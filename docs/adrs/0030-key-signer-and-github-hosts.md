@@ -34,7 +34,9 @@ The OIDC issuer for GHES and GHE.com is not stated in the pages consulted
 derive it: it is configuration, verified at setup time against the host's
 OIDC discovery document (`<issuer>/.well-known/openid-configuration`).
 NG4 confirms the real values on a GHES and a GHE.com instance before the
-defaults are documented.
+defaults are documented, and whether tokens from those hosts carry the
+`repository_id` and `repository_owner_id` claims that trust is built on
+(github.com documents both).
 
 Registration: the GitHub App **manifest flow** lets a customer register
 their own App in three steps (POST the manifest to
@@ -68,7 +70,31 @@ strategy per call. We do not use githubkit's `AppAuthStrategy` for
 signing, because it needs the PEM; we use githubkit for everything after
 the token exists.
 
-Implementations, selected by `SIGNER` setting:
+**Named signers.** Signers are configured in the `SIGNERS` setting, a map
+from a signer name to its configuration (JSON in the environment or a
+file), and each host selects one by name through `GitHubHostConfig.signer`.
+There is no global `SIGNER` setting, so two hosts can use different
+backends or different keys (an App is registered per host, so each has its
+own key):
+
+```python
+class SignerConfig(BaseModel):          # discriminated on "kind"; extra="forbid"
+    kind: Literal["file", "vault-transit", "aws-kms", "gcp-kms", "azure-key-vault"]
+    # kind-specific fields, e.g. file: path; vault-transit: addr, mount, key, auth.
+    # Credentials are file references (secret_id_file, token_file), never inline values.
+```
+
+```json
+{"dev": {"kind": "file", "path": "/run/secrets/app.pem"},
+ "prod": {"kind": "vault-transit", "addr": "https://vault.example", "mount": "transit",
+          "key": "trustbridge-ghes-prod", "auth": {"method": "kubernetes", "role": "trustbridge"}}}
+```
+
+Validation (see "Startup checks"): every host's `signer` names an entry;
+an entry no host uses is a warning; the `file` kind is refused when
+`mode=production`.
+
+Implementations, by `kind`:
 
 - `file`: reads a PEM path (dev only; startup warns and refuses in
   production mode unless explicitly allowed). Permissions are checked.
@@ -96,26 +122,66 @@ For the webhook secret and client secret the same secret store is used.
 @dataclass(frozen=True, slots=True)
 class GitHubHostConfig:
     name: str                  # tenant-facing key, e.g. "github.com", "ghes-prod"
-    kind: Literal["github.com", "ghes", "ghe.com"]
+    kind: HostKind             # ADR 0029: Literal["github.com", "ghes", "ghe.com"]
     web_url: str               # https://github.com | https://HOST | https://SUB.ghe.com
     api_url: str               # https://api.github.com | https://HOST/api/v3 | https://api.SUB.ghe.com
     oidc_issuer: str           # configured, never derived (see Context)
     registry_host: str         # ghcr.io | host-specific container registry host
+    oidc_id_claims: bool       # tokens carry repository_id / repository_owner_id; default True for github.com, False for ghes and ghe.com until NG4 confirms
     app_id: int
-    signer: str                # name of a configured signer
+    signer: str                # key into SIGNERS (see "Named signers")
     webhook_secret_ref: str
     ca_bundle: Path | None = None   # custom CA for this host (EB-5)
+
+    def to_host(self) -> GitHubHost: ...   # ADR 0029's adapter-facing projection: name, kind, api_url, oidc_issuer, oidc_id_claims, registry_host
 ```
 
 Hosts come from a settings list (`GITHUB_HOSTS`, a file or env JSON).
-Validation at startup: https only (except a flagged dev mode), `api_url`
-for `ghes` ends in `/api/v3`, GHE.com `api_url` matches
-`api.<sub>.ghe.com`, and for each host the issuer's discovery document is
-fetched (through the configured CA and proxy) and compared against the
-configured issuer; a mismatch refuses to start that host. `CredentialScope.github_host`
-(ADR 0029) is built from this config: adapters receive `api_url`,
-`oidc_issuer` and `registry_host` and never branch on host kind. Multiple
-hosts can be active in one deployment; a tenant belongs to exactly one.
+`CredentialScope.github_host` and `Tenant.github_host` (ADR 0029) are
+`to_host()` of this config. The core matches `GitHubHost.kind` against
+`Capabilities.github_hosts` and `oidc_hosts` before calling an adapter, so
+adapters receive `api_url`, `oidc_issuer` and `registry_host` and do not
+branch on the kind themselves. Multiple hosts can be active in one
+deployment; a tenant belongs to exactly one.
+
+**Why `oidc_id_claims`.** Trust is established on the `repository_id` and
+`repository_owner_id` claims (ADR 0029), which GitHub's OIDC reference
+lists in its claims table and says do not change when a repository or
+owner is renamed. The reference states that the immutable-`sub` rollout
+excludes GitHub Enterprise Server, but its claims table has no GHES note
+for the two claims and does not mention GHE.com, so whether those hosts
+emit them is unconfirmed. Until NG4 verifies it on a live instance, the
+flag is false there and the core falls back to a secret credential or a
+manual step; it never falls back to the mutable name claims.
+
+### Startup checks and readiness
+
+The template's lifespan is `replace` tier and has no hook. trustbridge
+wraps it (ADR 0028, "Lifespan: a trustbridge lifespan wrapping the
+template's"), and the same `trustbridge.startup.run_startup_checks` runs
+in the api lifespan and in the worker, reconciler and migrate commands'
+`main()`. It runs, per configured host, in this order, and refuses to
+start (non-zero exit, or a failed lifespan) on the first failure:
+
+1. Validate the settings: https only (except a flagged dev mode), `api_url`
+   for `ghes` ends in `/api/v3`, GHE.com `api_url` matches
+   `api.<sub>.ghe.com`, each host's `signer` exists in `SIGNERS`, `file`
+   signers are absent in production.
+2. Signer self-test: sign a probe with the host's signer and verify it
+   locally against `public_key_pem()`; then call `GET /app` with a real
+   App JWT and require the returned `id` to equal `app_id`. This proves
+   the signer's key is the one registered on that host.
+3. Issuer validation: fetch the discovery document (through the configured
+   CA and proxy) and compare its `issuer` with the configured
+   `oidc_issuer`; a mismatch refuses that host.
+4. Schema gate (ADR 0028, "Processes and database roles").
+
+Readiness: the api registers a `SignerHealthCheck` on the template's health
+registry (the cached `get_health_registry()` the health router reads), so
+`/health` readiness includes the signer. It re-signs a probe at most every
+30 seconds and caches the result; it does not call GitHub per probe. A
+failing signer takes the pod out of rotation and, in the worker, pauses
+consumption.
 
 ### Registration
 
@@ -136,8 +202,10 @@ hosts can be active in one deployment; a tenant belongs to exactly one.
 
 ## Decisions for the user (G-api)
 
-1. **Signer interface and `GITHUB_HOSTS` schema** as an operator-facing
-   API. Lean: approve as written.
+1. **Signer interface, `SIGNERS` map and `GITHUB_HOSTS` schema** as an
+   operator-facing API. Trade-off: two JSON settings with a name
+   reference, in exchange for different backends or keys per host (which
+   a single global `SIGNER` cannot express). Lean: approve as written.
 2. **Which signer backends ship in the first release.** Lean: `file`
    and `vault-transit` first; cloud KMS backends as extras after, since
    customers vary and each needs a live test.
@@ -145,6 +213,18 @@ hosts can be active in one deployment; a tenant belongs to exactly one.
    assembly with a remote signer (lean; the only way to honour EB-9);
    (b) pass the PEM to githubkit and forgo remote signing in some
    deployments.
+4. **Startup checks and readiness via the wrapping lifespan** (signer
+   self-test against `GET /app`, issuer validation, schema gate, signer
+   health in readiness). Trade-off: the api refuses to start on a bad
+   signer or issuer, in exchange for no silent mis-configuration; a signer
+   outage later drops readiness. Lean: as written.
+5. **`GitHubHostConfig.oidc_id_claims`**, false by default on GHES and
+   GHE.com until NG4 confirms the claims, so those hosts fall back to a
+   secret credential or a manual step rather than to mutable name claims.
+   Lean: as written.
+6. **Argo CD option A (reuse trustbridge's App key) only with the dev
+   `file` signer**; production uses a separate read-only App (option B,
+   ADR 0029 G-api item 6). Lean: B.
 
 ## Consequences
 
@@ -164,8 +244,21 @@ hosts can be active in one deployment; a tenant belongs to exactly one.
   avoids guessing; a wrong value fails closed.
 - A GHES 3.18 enterprise-owned App needs a manual step; we document it
   instead of hiding it.
-- The unverified GHES/GHE.com issuer values are a known gap, closed in
-  NG4 with live evidence.
+- The unverified GHES/GHE.com issuer values and ID-claim availability are
+  a known gap, closed in NG4 with live evidence.
+- The wrapping lifespan depends on a Starlette attribute (ADR 0028); the
+  smoke test is the guard.
+
+## Open issues
+
+- Argo CD option A applies only to the `file` signer (a non-exportable
+  signer has no key to hand over); the claim is narrowed to that and
+  production needs the separate read-only App (option B).
+- The signer self-test calls `GET /app` per host at startup, an outbound
+  call to a configured host only (EB-5); an air-gapped deployment must
+  allow it.
+- Webhook secrets and client secrets use the same secret store as signer
+  credentials; the store interface is NG3's.
 
 ## Sources
 
