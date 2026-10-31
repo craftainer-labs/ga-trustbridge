@@ -77,7 +77,7 @@ class GitHubHost:
 
 @dataclass(frozen=True, slots=True)
 class Tenant:
-    id: str               # GitHub installation id, as a string
+    id: str               # surrogate tenant id (UUID) mapping to (host, installation_id); installation ids are unique only per host
     github_host: GitHubHost
     org: str              # owning org / user login, informational only
 
@@ -139,7 +139,7 @@ class OidcTrust:
 @dataclass(frozen=True, slots=True)
 class IssuedSecret:
     ref: Mapping[str, str]            # platform ids (e.g. robot id), safe to store
-    values: Mapping[str, SecretStr]   # secret material, never logged, never persisted by the core
+    values: Mapping[str, SecretStr]   # secret material, never logged; held only in memory and the secret store
     expires_at: datetime | None
     retire_after: datetime | None = None   # set on a rotation: when the previous one may be retired
 
@@ -175,8 +175,8 @@ class PlatformAdapter(Protocol):
     async def ensure_credential(
         self, s: CredentialScope
     ) -> OidcTrust | IssuedSecret | NoCiCredential | Change: ...
-    async def rotate_begin(self, c: IssuedSecret) -> IssuedSecret: ...
-    async def rotate_finish(self, old: IssuedSecret) -> Change: ...
+    async def rotate_begin(self, current: Mapping[str, str]) -> IssuedSecret: ...   # current = ref of the live credential
+    async def rotate_finish(self, old: Mapping[str, str]) -> Change: ...            # old = ref only; values are never needed
 
     def github_outputs(self, state: AdapterState) -> Sequence[GitHubOutput]: ...
     async def delete(self, state: AdapterState) -> Change: ...
@@ -193,7 +193,16 @@ pydantic's.
 
 - **Reconcile, not command.** Every `ensure_*` reads the platform's
   current state and converges on the spec; calling it twice yields
-  `UNCHANGED` the second time. Identity is by durable platform ids and
+  `UNCHANGED` the second time. The exception is secret material, which
+  cannot be read back: before issuing, `ensure_credential` receives the
+  stored `ref` (via `CredentialScope`/`AdapterState`) and looks the
+  credential up by it. If it exists and the core has recorded its
+  values as delivered, the result is `Change(UNCHANGED)`; if it exists
+  but delivery is unrecorded (a crash between issue and the GitHub
+  write), the adapter deletes it and issues a fresh one, so at most one
+  orphan-candidate exists per scope. Credentials are named
+  deterministically (tenant, scope, generation) so orphans can be found
+  by a periodic sweep that deletes credentials with no matching ref. Identity is by durable platform ids and
   repository numeric ids, never by name or handle. `delete` is also
   idempotent (absent = `UNCHANGED`).
 - **OIDC first.** `ensure_credential` returns `OidcTrust` when
@@ -203,9 +212,10 @@ pydantic's.
   API (Docker Hub's OIDC connection): the core surfaces
   `manual_action` in the UI and as a check-run note, and re-runs the
   operation until the platform reports the trust.
-- **Two-phase rotation.** `rotate_begin(c)` creates the new credential
+- **Two-phase rotation.** `rotate_begin(current)` takes only the `ref`
+  of the live credential (the core stores refs, not values) and creates the new credential
   while the old stays valid and returns it with `retire_after` set. The
-  core writes the new values to GitHub, and calls `rotate_finish(old)`
+  core writes the new values to GitHub, and calls `rotate_finish(old_ref)`
   only after `retire_after` (grace period for in-flight CI). For
   `rotation="single"` platforms a hard cut is unavoidable and the
   adapter declares it. Harbor overlaps with two robots; Docker Hub with
@@ -213,7 +223,8 @@ pydantic's.
 - **Adapters never call GitHub.** They return `GitHubOutput`s; the core
   alone writes encrypted secrets, variables and environments.
 - **Secrets.** `values` are `SecretStr`, never logged, never stored by
-  the core except through the secret store; `Change.detail` and
+  the core except through the secret store (the core persists only
+  `ref`); `Change.detail` and
   exceptions must not contain them.
 - **Webhooks.** `capabilities().webhook` describes how inbound events are
   authenticated. For `NONE` and `STATIC_HEADER` the payload is never
@@ -229,11 +240,11 @@ pydantic's.
 
 | Adapter | Provisions | `oidc` | `ci_credential` | `rotation` | Webhook auth | GitHub hosts | Privileged credential held |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| JFrog Artifactory | project, repos, OIDC identity mapping (`/access/api/v1/oidc`) | yes (Enterprise X/Enterprise+; GHES/GHE.com via `generic` provider with the host's issuer; mappings on `repository`/`repository_owner`) | yes | none (trust, no secret) | `STATIC_HEADER` (JFrog webhook secret header); trigger-only | all | admin access token |
+| JFrog Artifactory | project, repos, OIDC identity mapping (`/access/api/v1/oidc`) | yes (Enterprise X/Enterprise+; GHES/GHE.com via `generic` provider with the host's issuer; mappings on `repository`/`repository_owner`) | yes | none (trust, no secret) | `HMAC` or `STATIC_HEADER` depending on whether a webhook secret is set (JFrog is reported to sign with HMAC-SHA256 in `X-JFrog-Event-Auth`; not confirmed against current JFrog docs, NG5 fixtures settle it); trigger-only | all | admin access token |
 | Harbor / MSR 4 (2.11-2.13) | project, robot account, webhook policy | no (no upstream OIDC federation) | yes, robot token | `two_phase` (two robots) | `STATIC_HEADER` (Harbor webhook auth header); trigger-only | all | system or project admin robot |
 | Docker Hub | repository, org access token | partial: OIDC connection is UI-only and github.com-only, so `NEEDS_MANUAL_ACTION` | yes, OAT (fallback) | `two_phase` (watch the 10-OAT Team limit) | `NONE` (Docker Hub webhooks are unauthenticated); trigger-only | all (OAT path); OIDC only github.com | **org-owner PAT** (see G-api) |
 | Argo CD | repository Secret using GitHub App credentials, AppProject, Application/ApplicationSet | n/a | **no** (`NoCiCredential`, pull-based) | none | `STATIC_HEADER` bearer, per tenant, constant-time compare; trigger-only | all | Kubernetes ServiceAccount with narrow RBAC; **raw App private key** held in the repo Secret (see G-api) |
-| GHCR | nothing | yes (`GITHUB_TOKEN`) | yes, `GITHUB_TOKEN` | none | n/a (GitHub events) | all; registry host derived from `GitHubHost.registry_host` | none |
+| GHCR | nothing | no (credential is `GITHUB_TOKEN`, no trust to establish) | yes, `GITHUB_TOKEN` | none | n/a (GitHub events) | all; registry host derived from `GitHubHost.registry_host` | none |
 
 Nexus stays out of the MVP.
 
@@ -246,10 +257,13 @@ Nexus stays out of the MVP.
 2. **Argo CD repository credential needs a raw GitHub App private key.**
    Argo CD's repo-creds with GitHub App auth stores the App's private
    key in a cluster Secret that Argo CD itself reads.
-   - A: reuse trustbridge's own App key. One App, but the Secret in
-     Argo CD's cluster holds the key that can mint tokens for every
-     tenant's installation. Compromise of Argo CD's namespace is
-     compromise of trustbridge.
+   - A: reuse trustbridge's own App key. Feasible only with the dev
+     `file` signer: with a non-exportable signer (Vault Transit, KMS,
+     import-and-delete, ADR 0030) there is no key to place in Argo CD's
+     Secret, and it would violate EB-9. Even then the Secret holds the
+     key that can mint tokens for every tenant's installation, so
+     compromise of Argo CD's namespace is compromise of trustbridge.
+     Not a real option for production; B or C remain.
    - B: a **separate, read-only GitHub App** (contents: read, metadata)
      registered per tenant or per host, whose key is the only one given
      to Argo CD. Cost: another App to register (the manifest flow
@@ -273,7 +287,16 @@ Nexus stays out of the MVP.
    - C: drop Docker Hub from the MVP.
    - Lean: A, opt-in per tenant and off by default, with B as the
      default path; A is enabled only when the tenant supplies the PAT.
-4. The **MVP set** is JFrog, Harbor/MSR, Docker Hub, Argo CD, GHCR
+4. **Secret-issuance retry policy** (proposal): lookup by stored `ref`,
+   delete-and-reissue when delivery is unrecorded, periodic orphan sweep
+   on deterministic names. Alternative: leave orphans to the customer.
+   Lean: as proposed (the Docker Hub 10-OAT cap makes orphans costly).
+5. **Tenant identity** (proposal, shared with ADR 0028): surrogate
+   tenant id mapping to `(host, installation_id)`.
+6. **JFrog webhook authentication** is unconfirmed against current JFrog
+   docs (HMAC vs static header); settled by NG5 fixtures, no decision
+   needed unless it changes the capability model.
+7. The **MVP set** is JFrog, Harbor/MSR, Docker Hub, Argo CD, GHCR
    (Nexus out). Lean: approve.
 
 ## Consequences
@@ -281,8 +304,9 @@ Nexus stays out of the MVP.
 - One shape covers OIDC-capable, secret-based, manual and pull-based
   platforms, so the core has no per-vendor branches.
 - Idempotency and `retire_after` make at-least-once delivery and
-  rotation grace periods safe, at the cost of every adapter doing a
-  read before every write.
+  rotation grace periods safe for everything except secret issuance,
+  which relies on the ref lookup and orphan rules above; the cost is
+  every adapter doing a read before every write.
 - Public API: third-party adapters are possible, and the interface can
   only grow additively. `API_VERSION` is the escape hatch.
 - Contract tests per adapter run against recorded API fixtures (NG5);

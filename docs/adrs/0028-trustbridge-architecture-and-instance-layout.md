@@ -82,7 +82,7 @@ instance code can live under `src/` at all. Findings from this repo:
   (`src/app/config.py:41`), which only rejects unknown init kwargs, not
   unrelated environment variables (tested in the template's
   `tests/unit/test_config.py`), so the two coexist.
-- **Process commands.** `scripts/runner.sh:16` hardcodes `app.main:app`
+- **Process commands.** `scripts/runner.sh:15` and `:27` hardcode `app.main:app`
   and the `Dockerfile` (replace tier, `ENTRYPOINT ["runner.sh"]`, line
   112) cannot be edited. The image therefore contains both packages
   (`COPY src ./src`, `Dockerfile:50`) but its default entrypoint serves
@@ -130,19 +130,28 @@ suites) before NG3 merges.
 
 ### Request path and processing
 
-1. **Ingress** `POST /webhooks/github` (GitHub documents: HTTPS, secret,
+1. **Ingress** `POST /webhooks/github/{host}` (one route per configured
+   GitHub host, so the verifier knows which webhook secret to use before
+   the payload is parsed; GitHub documents: HTTPS, secret,
    signature validation, a 2xx within 10 s, process asynchronously,
    `X-GitHub-Delivery` for replay detection, redelivery after downtime):
    - Read the raw body and verify `X-Hub-Signature-256` with
      `hmac.compare_digest` before parsing JSON. The secret is per App
-     (per GitHub host), never in the URL.
+     (per GitHub host, selected by the `{host}` path segment), never in
+     the URL.
    - Insert the delivery ID into a `webhook_deliveries` table with a
-     unique constraint (`INSERT ... ON CONFLICT DO NOTHING`). A conflict
+     unique constraint and an `enqueued_at` column (`INSERT ... ON
+     CONFLICT DO NOTHING`). A conflict on a row with `enqueued_at` set
      returns 2xx without enqueuing; redeliveries keep the original ID, so
-     this also dedupes them.
+     this also dedupes them. A conflict on a row with `enqueued_at` null
+     (a previous attempt failed before the enqueue) proceeds to the
+     enqueue.
    - `XADD` the verified payload reference to the Valkey Stream
-     `tb:events`, then return 202. No GitHub or adapter call happens on
-     the request path.
+     `tb:events`, set `enqueued_at`, then return 202. If the `XADD`
+     fails the handler returns 5xx and leaves `enqueued_at` null, so
+     GitHub's redelivery (or the reconciler, which also redelivers rows
+     with `enqueued_at` null past a grace period) retries it. No GitHub
+     or adapter call happens on the request path.
 2. **Worker**: the same image, command `python -m trustbridge.worker`.
    Consumer group `tb-workers`; `XREADGROUP`, `XACK` after success;
    `XAUTOCLAIM` reclaims entries idle past a threshold from dead
@@ -157,21 +166,25 @@ suites) before NG3 merges.
    periodic job lists failed deliveries with the App-JWT endpoints
    (`GET /app/hook/deliveries`, `POST /app/hook/deliveries/{id}/attempts`)
    from the last cursor, redelivering those whose ID is missing from
-   `webhook_deliveries`. This also covers downtime of the ingress.
+   `webhook_deliveries` or whose row has no `enqueued_at`. This also covers downtime of the ingress.
 4. **Installation tokens**: minted with the signer-backed App JWT
    (ADR 0030), cached in process until about 5 minutes before the
    1-hour expiry, and **down-scoped** per repository and permission set
-   at mint time. githubkit's `AppInstallationAuthStrategy` handles
-   minting and refresh; we wrap it so the JWT comes from the signer.
+   at mint time. As ADR 0030 decides, githubkit's App auth strategies
+   need the PEM and are not used: trustbridge assembles the JWT through
+   the signer, calls `POST /app/installations/{id}/access_tokens` itself
+   and hands githubkit only a token auth strategy.
 
 ### Tenancy
 
-Tenant = GitHub installation (EB-3). Every tenant-owned table has a
-`tenant_id` and Postgres row-level security keyed on a session setting
+Tenant = GitHub installation (EB-3). Installation IDs are unique only
+per GitHub host, so the tenant is identified by `(host, installation_id)`
+and every tenant-owned table carries a surrogate `tenant_id` (UUID) that
+maps to that pair. Every tenant-owned table has a `tenant_id` and Postgres row-level security keyed on a session setting
 (`SET LOCAL trustbridge.tenant_id`) applied per transaction by a
 dependency. Details (policies, the owner/app role split, the audit
-interplay) are ADR 0031. The worker sets the setting from the event's
-installation ID before any query.
+interplay) are ADR 0031. The worker resolves the event's `(host, installation_id)` to the
+`tenant_id` and sets the setting before any query.
 
 ### Queue client: redis-py against a Valkey server
 
@@ -196,6 +209,20 @@ discovered through the `trustbridge.adapters` entry-point group and
 enabled by name (ADR 0029). Telemetry and outbound calls other than to
 configured hosts and adapters are off by default (EB-5).
 
+## Decisions for the user (G-api)
+
+Proposals made in this ADR that the user should weigh:
+
+1. **Delivery ingest state**: a `webhook_deliveries.enqueued_at` column
+   so a failed enqueue is retried by redelivery or the reconciler,
+   instead of an outbox table. Lean: as written (simpler).
+2. **Tenant identity**: a surrogate tenant UUID mapping to
+   `(host, installation_id)`, because installation IDs are unique only
+   per GitHub host.
+3. **Per-host webhook route** `/webhooks/github/{host}` so the right
+   webhook secret is chosen before parsing. Alternative: try every
+   configured secret on a single route. Lean: per-host route.
+
 ## Consequences
 
 - Instance code is safe from sync with no manifest entries, and the
@@ -215,8 +242,10 @@ configured hosts and adapters are off by default (EB-5).
   forget; the drift test is the backstop.
 - At-least-once processing needs every handler to be idempotent; ADR 0029
   makes that an interface rule.
-- Stream growth: `XADD ... MAXLEN ~` on `tb:events` and a retention
-  setting for the dead-letter stream (EB-15).
+- Stream growth: trim `tb:events` only below entries that are
+  acknowledged (a `MINID` trim bounded by the oldest pending entry, not a
+  blind `MAXLEN ~`, which would discard unread or pending events), and a
+  retention setting for the dead-letter stream (EB-15).
 
 ## Sources
 

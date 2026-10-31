@@ -148,9 +148,14 @@ hosts can be active in one deployment; a tenant belongs to exactly one.
 
 ## Consequences
 
-- With a KMS or Vault backend, the App key never exists in the
-  application's memory or disk, and a pod compromise yields installation
-  tokens (1 hour) but not the key. Cost: a network round trip per JWT,
+- With a KMS or Vault backend, once the PEM has been imported and
+  deleted, the key is not exportable from the application. The manifest
+  flow still passes the PEM through the callback's memory (and, for the
+  `file` signer, disk) once, until imported. A compromised pod that
+  holds signer access can keep minting App JWTs, and from them
+  installation tokens (1 hour each) for every tenant, for as long as that
+  access lasts; the protection is against key exfiltration, not against
+  use of the signer. Revoke the pod's signer access to cut it off. Cost: a network round trip per JWT,
   mitigated by caching installation tokens, and a hard dependency on the
   signer's availability (health check and readiness probe include it).
 - We own about 40 lines of JWT assembly and must test clock skew and
