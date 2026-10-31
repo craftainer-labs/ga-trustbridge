@@ -4,13 +4,15 @@
 # edits this file for its own values and a sync keeps them.
 
 # DOCKERFILE and TARGET keep template-docker's defaults (`Dockerfile`,
-# `runner`); ARCHES (`amd64 arm64`) and OCI_LICENSE (`GPL-3.0-only`) too.
+# `runner`) and ARCHES (`amd64 arm64`) keep template-docker's defaults too;
+# OCI_LICENSE is set below (labs products are Apache-2.0).
 
 # The app reads APP_VERSION / APP_COMMIT (Dockerfile ARGs, exposed as env).
 # Recursive (`=`) so git runs only in recipes that build, as the Makefile does.
 BUILD_ARGS = --build-arg APP_VERSION=$(RELEASE_VERSION) --build-arg APP_COMMIT=$(shell git rev-parse HEAD)
 
-OCI_DESCRIPTION := FastAPI REST service with generic CRUD, OIDC auth and health checks
+OCI_LICENSE := Apache-2.0
+OCI_DESCRIPTION := Self-hosted OIDC-first GitHub App that provisions registry and GitOps access for repositories
 
 # Written to dist/ by `unit-tests` below (a release-check step) and attached
 # to the release; the image label points at it.

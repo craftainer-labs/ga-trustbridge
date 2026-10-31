@@ -3,8 +3,8 @@
 [project]
 name = "template-fastapi"
 version = "0.1.0"
-description = "Template repository for FastAPI projects"
-license = "GPL-3.0-only"
+description = "Self-hosted, OIDC-first GitHub App that provisions registry and GitOps access for repos"
+license = "Apache-2.0"
 requires-python = ">=3.14"
 dependencies = [
     "fastapi==0.141.1",
@@ -30,6 +30,9 @@ dependencies = [
     "granian==2.8.4",
     "craftainer-crud[mqtt,xml]>=0.7.0,<0.8",
     "craftainer-observability[otel,sqlalchemy,redis,s3,http,analytics]>=0.4.0,<0.5",
+    "githubkit[auth-app]==0.17.0",
+    "pynacl==1.6.2",
+    "valkey==6.2.0",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +59,10 @@ dev = [
     "squawk-cli==2.70.0",
     "craftainer-crud-sdk>=0.2.0,<0.3",
 ]
+
+# Adapter plugin group (ADR 0027): one package per registry/GitOps adapter
+# registers itself here. No adapters yet.
+[project.entry-points."trustbridge.adapters"]
 
 [build-system]
 requires = ["hatchling"]
