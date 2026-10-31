@@ -194,8 +194,9 @@ class CredentialOutcome:
     change: Change
     state: CredentialState            # the complete new state; the core persists it as returned
     credential: OidcTrust | IssuedSecret | NoCiCredential | None
-    # credential is None when there is nothing new to deliver: UNCHANGED, NEEDS_MANUAL_ACTION,
-    # rotate_finish, delete_credential.
+    # credential is None only when there is nothing to (re)deliver: a delivered secret that is
+    # UNCHANGED, NEEDS_MANUAL_ACTION, rotate_finish, delete_credential. An OIDC scope always
+    # returns its OidcTrust, also when UNCHANGED, so the core can re-derive the outputs (A1).
 
 @dataclass(frozen=True, slots=True)
 class GitHubOutput:
@@ -247,34 +248,31 @@ pydantic's.
 
 ### Persistence model
 
-ADR 0028 ("Persistence and serialisation") owns the tables and the
-lease. What an adapter author needs to know:
+ADR 0028 ("Persistence and serialisation") owns the tables and the lease.
+Decisions that shape the adapter contract:
 
 - **The core persists adapter state; adapters are stateless.** Every
   state-changing method receives the state the core last committed
-  (`prior`) and returns the complete new state. The core stores it as
-  returned, in `adapter_resources` (non-secret resources) and
-  `adapter_credentials` (credentials). An adapter keeps nothing between
+  (`prior`) and returns the complete new state, which the core stores as
+  returned (`adapter_resources` for non-secret resources,
+  `adapter_credentials` for credentials). An adapter keeps nothing between
   calls, so any worker, or the same worker after a restart, can continue.
-- **One operation per scope at a time.** The core holds the lease on
-  `(tenant, adapter, lease_key)` (the scope's `scope_key` by default) around every call that can create or
-  delete something. Adapters declaring `credential_limit` are leased on
-  `(tenant, adapter, lease_key="*")`, so the cap is counted while no other worker
-  creates credentials for that tenant and adapter. The core refuses to
-  create past the limit, counting `current` and `previous` slots of all
-  scopes plus in-flight operations, and returns a non-retryable
-  `AdapterError`.
-- **Write-ahead for every secret-bearing call.** Before calling
+- **One operation per scope at a time.** The core serialises calls per
+  `(tenant, adapter, scope)` with a lease. An adapter that declares
+  `credential_limit` is serialised adapter-wide for creation, and the core
+  refuses to create past the limit (counting current, previous and
+  in-flight credentials) with a non-retryable `AdapterError`.
+- **Write-ahead for every secret-bearing call.** The core commits the
+  intent, including the deterministic platform-side `name`, before calling
   `ensure_credential`, `rotate_begin`, `rotate_finish` or
-  `delete_credential`, the core commits a `credential_operations` row
-  (kind, target generation, deterministic name, state `intent`) and the
-  intent state (`current`/`previous` with the target slot's `name` and an
-  empty `ref`). `prior` is that committed state. The name is therefore
-  known and stored before the platform can possibly hold the credential.
+  `delete_credential`; `prior` is that committed state. The name is known
+  and stored before the platform can hold the credential.
 - **Lookup rule.** When `ref` is empty the adapter looks the object up by
-  `name` before creating anything; when it exists it is the object of
-  this operation. `name` is unique per generation, so a retry reuses the
-  same name and never creates a second credential.
+  `name` before creating anything. `name` is unique per generation, so a
+  retry reuses the name and never creates a second credential.
+- **Secret values are parked, not stored.** Returned values are held in an
+  operation value store (a secret-store backend entry, never Postgres)
+  until the core has delivered them to GitHub, then removed.
 
 ### Semantics
 
@@ -282,97 +280,72 @@ lease. What an adapter author needs to know:
   current state and converges on the spec; calling it twice yields
   `UNCHANGED` the second time. Identity is by durable platform ids and
   repository numeric ids, never by name or handle. `delete` and
-  `delete_credential` are also idempotent (absent = `UNCHANGED`).
-- **Secret issuance** (`ensure_credential` on the secret path), by the
-  state of `prior.current`:
-  - `ref` set and `delivered=True`: nothing to do, `UNCHANGED`,
-    `credential=None`.
-  - `ref` set and `delivered=False`, or `ref` empty but an object named
-    `name` exists: the platform holds a credential whose values the core
-    does not have (the core calls the adapter only when the values are
-    not already parked, see below). The adapter deletes it and issues a
-    fresh one under the same `name`, so the platform holds one
-    credential per scope-generation, never two.
-  - `ref` empty and nothing named `name`: create it.
-  - The adapter returns the state with `current.ref` filled in and
-    `delivered=False`, and the `IssuedSecret`.
-- **Core sequence after the adapter returns** (the order closes the crash
-  windows): (1) put `values` in the operation value store keyed by the
-  operation id; (2) commit `current.ref` and the operation state
-  `platform_done` in one transaction; (3) write the GitHub outputs
-  (idempotent PUTs); (4) commit `delivered=True`, operation state
-  `delivered`; (5) delete the parked values. A crash before (2) leaves
-  the operation at `intent`: the retry issues again under the same
-  name (bounded, as above). A crash after (2) and before (4) leaves
-  `platform_done` with the values parked: the retry skips the adapter
-  and redoes (3) to (5). The values are never stored anywhere else, and
-  never in Postgres.
+  `delete_credential` are idempotent (absent = `UNCHANGED`).
+- **Secret issuance.** Secret values cannot be read back, so when the
+  platform already holds a credential for the target `name` whose values
+  the core does not have, the adapter replaces it under the same `name`
+  rather than adding another; the platform holds one credential per scope
+  generation. When `current` is already delivered the result is
+  `UNCHANGED`. The adapter returns the state with `current.ref` filled in
+  and `delivered=False`, plus the `IssuedSecret`; the core parks,
+  persists and delivers (invariants A8, and 0028 invariants 21 and 23).
 - **OIDC first.** `ensure_credential` returns `OidcTrust` when
-  `capabilities().oidc` is true, the host's `kind` is in `oidc_hosts`
-  and `GitHubHost.oidc_id_claims` is true. Otherwise it falls back to
-  `IssuedSecret`. `NoCiCredential` means trustbridge provisions nothing
-  for CI (Argo CD, GHCR). A `Change` with `NEEDS_MANUAL_ACTION` (and
-  `credential=None`) means the adapter cannot finish via API (Docker
-  Hub's OIDC connection): the core surfaces `manual_action` in the UI and
-  as a check-run note, and re-runs the operation until the platform
-  reports the trust. For trust, `current.delivered` is returned `True`
-  (nothing secret to deliver); the core still writes the outputs
-  idempotently.
-- **OIDC trust claims.** `OidcTrust.claims` carries `repository_id`
-  and `repository_owner_id` as strings (`repository_owner_id` only for an
-  org-wide scope), plus `environment` when the scope has one. They are
-  the claims GitHub documents as not changing on rename or transfer; the
-  mutable `repository` / `repository_owner` names are never used for
-  trust. The adapter maps them to the platform's identity-mapping syntax
-  (for JFrog, claims JSON on the mapping).
+  `capabilities().oidc` is true, the host's `kind` is in `oidc_hosts` and
+  `GitHubHost.oidc_id_claims` is true. Otherwise it falls back to
+  `IssuedSecret`. `NoCiCredential` means trustbridge provisions nothing for
+  CI (Argo CD, GHCR). A `Change` with `NEEDS_MANUAL_ACTION` (and
+  `credential=None`) means the adapter cannot finish via API (Docker Hub's
+  OIDC connection): the core surfaces `manual_action` in the UI and as a
+  check-run note, and re-runs the operation until the platform reports the
+  trust. For trust, `current.delivered` is `True` (nothing secret to
+  deliver); the core writes the outputs idempotently every time.
+- **OIDC trust claims.** `OidcTrust.claims` carries `repository_id` and
+  `repository_owner_id` as strings (`repository_owner_id` only for an
+  org-wide scope), plus `environment` when the scope has one: the claims
+  GitHub documents as not changing on rename or transfer. The mutable
+  `repository` / `repository_owner` names are never used for trust. The
+  adapter maps the claims to the platform's identity-mapping syntax (for
+  JFrog, claims JSON on the mapping). What the claims can and cannot tell
+  apart (permissions) is G-api item 12.
 - **Two-phase rotation, resumable.** The core starts a rotation by
-  committing an operation `rotate` at `intent` with the intent state
-  `current = Slot(generation+1, new name, ref={}, delivered=False)` and
-  `previous = the old live slot`. `rotate_begin(s, prior)` creates the new
-  credential under `current.name` (replacing a leftover of that name, by
-  the lookup rule) while `previous` stays valid, and returns the state
-  with `current.ref` set plus the `IssuedSecret`. The core parks, commits
-  and delivers it as in the sequence above. Only after delivery does the
-  core set `previous.retire_after = now + grace` (grace period for
-  in-flight CI) and leave the operation at `awaiting_retire`. When
-  `retire_after` passes, the core takes the lease and calls
-  `rotate_finish(s, prior)`; the adapter deletes `previous` (by `ref`, or
-  by `name` when `ref` is empty) and returns the state with
-  `previous=None`. A crash or retry at any step resumes the same
-  operation: a rotation request while an operation for the scope is not
-  terminal resumes it and never starts generation+2 (a partial unique
-  index allows one non-terminal operation per scope). For
+  committing an intent in which `current` is the next generation (new
+  name, empty `ref`) and `previous` is the live slot. `rotate_begin`
+  creates the new credential while `previous` stays valid and returns it.
+  After the core has delivered the new values it sets
+  `previous.retire_after` (the grace period for in-flight CI), and when
+  that passes calls `rotate_finish`, which deletes `previous`. A retry or
+  crash at any step resumes the same operation; a rotation request while
+  one is in flight resumes it and never starts a further generation. For
   `rotation="single"` platforms a hard cut is unavoidable: `rotate_begin`
   replaces the secret in place, returns `previous=None`, and there is no
-  finish. Harbor overlaps with two robots; Docker Hub with two OATs, so
-  its `credential_limit=10` counts both.
+  finish. Harbor overlaps with two robots; Docker Hub with two OATs, so its
+  `credential_limit=10` counts both.
 - **Orphan sweep.** Because the name is stored before the platform holds
-  the credential, a credential matching the full `tb-<tenant uuid hex>-` prefix (the whole 128-bit tenant id, so tenants sharing one platform account cannot match each other) that
-  appears in no `current`/`previous` slot and no non-terminal operation is
-  an orphan. The reconciler lists with `list_credentials(t)` under the
-  `(tenant, adapter, lease_key="*")` lease and deletes orphans with
-  `delete_credential`. An operation that exhausts its attempts without
-  delivery is `failed`; for an initial issue the core then deletes the
-  credential (no orphan, no unusable credential kept); for a rotation the
-  old credential is still valid and the new one is deleted.
+  the credential, a credential carrying the full `tb-<tenant uuid hex>-`
+  prefix (the whole 128-bit tenant id, so tenants sharing one platform
+  account cannot match each other) that appears in no slot and no
+  non-terminal operation is an orphan. The reconciler lists with
+  `list_credentials(t)` and deletes orphans with `delete_credential` (the
+  ordering that keeps this safe is 0028 invariant 22). An operation that
+  exhausts its attempts without delivery is `failed`: an initial issue then
+  has its credential deleted, and a failed rotation has its new credential
+  deleted while the old one stays valid.
 - **Adapters never call GitHub.** They return `GitHubOutput`s from
   `github_outputs`; the core alone writes encrypted secrets, variables and
   environments.
-- **Secrets.** `values` are `SecretStr`, never logged, never stored by
-  the core except in the operation value store (a secret-store backend
-  entry, deleted after delivery); the core persists only `ref` and
-  `name`; `Change.detail` and exceptions must not contain them.
+- **Secrets.** `values` are `SecretStr`, never logged, never stored by the
+  core except in the operation value store; the core persists only `ref`
+  and `name`; `Change.detail` and exceptions must not contain them.
 - **Webhooks.** `capabilities().webhook` describes how inbound events are
-  authenticated. For `NONE` and `STATIC_HEADER` the payload is never
-  acted on; it only triggers a re-read via the platform API. Static
-  headers are compared in constant time.
+  authenticated. For `NONE` and `STATIC_HEADER` the payload is never acted
+  on; it only triggers a re-read via the platform API. Static headers are
+  compared in constant time.
 - **Errors.** Adapters raise `AdapterError(retryable: bool, message)`;
-  retryable errors go back to the stream's retry path. Every adapter call
-  is bounded by the core with a timeout of at most half the lease TTL, so
-  a holder that lost its lease cannot still be inside a call when the next
-  holder starts (ADR 0028, "Persistence and serialisation").
-- **Versioning.** `API_VERSION` is an integer; a breaking change bumps
-  it and the core refuses adapters outside its supported range. Additive
+  retryable errors go back to the retry path of ADR 0028. Every adapter
+  call is bounded by the core with a timeout shorter than the lease TTL
+  (0028 invariant 11).
+- **Versioning.** `API_VERSION` is an integer; a breaking change bumps it
+  and the core refuses adapters outside its supported range. Additive
   fields to dataclasses are non-breaking (new fields get defaults).
 
 ### Capability matrix for the MVP adapters
@@ -388,6 +361,48 @@ lease. What an adapter author needs to know:
 `ci_credential` means trustbridge provisions a credential for CI; GHCR's
 row changed from "yes, `GITHUB_TOKEN`" for consistency with that
 definition. Nexus stays out of the MVP.
+
+## Invariants NG3 must implement and test
+
+Each is one testable sentence. Invariants A1-A9 concern the adapter
+contract (contract tests, NG5, run them against every adapter); the core
+side is in ADR 0028 ("Invariants NG3 must implement and test", numbers
+cited as "0028 invariant n").
+
+- **A1.** For an OIDC scope `ensure_credential` returns the `OidcTrust`
+  on every successful outcome, including `UNCHANGED`, and `github_outputs`
+  is a pure function of `(scope, credential)`, so the core can re-derive
+  and re-write the outputs after a crash (0028 invariant 21).
+- **A2.** Calling any state-changing method twice with the same `prior`,
+  and once with `ref` emptied, leaves exactly one platform object and
+  returns `UNCHANGED` on the repeat.
+- **A3.** When `ref` is empty the adapter finds an existing object by
+  `name` before creating, and never creates a second object with that name.
+- **A4.** A platform-side credential name contains the full tenant id and
+  is unique per generation; an adapter that must shorten a name shortens
+  only the scope part, deterministically (0028 invariant 24).
+- **A5.** No `Change.detail`, exception message or log line produced by an
+  adapter contains secret material, and no adapter makes a call to GitHub.
+- **A6.** `OidcTrust.claims` contains only `repository_id`,
+  `repository_owner_id` and `environment`, never `sub` or the name claims,
+  and the core offers trust only when the capability, the host kind and
+  `oidc_id_claims` all allow it.
+- **A7.** `Capabilities.oidc_hosts` is empty when `oidc` is false and is a
+  subset of `github_hosts`, and the core checks the host kind before any
+  call to the adapter.
+- **A8.** After a crash at any point during an issue or rotation, retries
+  converge to one platform credential per scope generation with its
+  outputs delivered, and once the values are parked the core does not
+  call the adapter again for that operation.
+- **A9.** A rotation request while an operation for the scope is not
+  terminal resumes that operation and never creates a further generation;
+  `rotate_finish` runs only after the new values are delivered and
+  `retire_after` has passed, deletes only `previous`, and is idempotent.
+- **A10.** A failed initial issue leaves no platform credential behind,
+  and a failed rotation leaves the old credential valid and the new one
+  deleted.
+- **A11.** One scope parked at `NEEDS_MANUAL_ACTION` does not block
+  operations on other scopes of the tenant.
 
 ## Decisions for the user (G-api)
 
@@ -459,27 +474,37 @@ definition. Nexus stays out of the MVP.
     needed unless it changes the capability model.
 11. The **MVP set** is JFrog, Harbor/MSR, Docker Hub, Argo CD, GHCR
     (Nexus out). Lean: approve.
+12. **Open design question: what OIDC trust can enforce for different
+    permissions.** The trust conditions are `repository_id` (or
+    `repository_owner_id` for an org-wide scope) plus an optional
+    environment. Two scopes that differ only in `permission` (`pull`
+    versus `push` or `admin`) therefore produce identical claims, so a
+    trust cannot tell them apart, and any workflow in the repository (or
+    org) that can obtain a token gets the broadest permission granted to
+    that claim set. Options: (a) offer OIDC only where the claims
+    distinguish the scopes: `push` and `admin` require a distinct
+    protected `environment` per permission, otherwise the scope falls back
+    to an `IssuedSecret`; (b) add `ref` or `job_workflow_ref` conditions
+    per permission (needs `OidcTrust.claims` to carry them and the
+    platform to accept them; a rename of a workflow file breaks trust);
+    (c) one trust per repository at the highest permission requested,
+    documented as such. Lean: (a). It keeps the durable-id rule, makes
+    privilege explicit, and costs a secret credential only where no
+    environment is configured.
 
 ## Open issues
 
-- The value store backend (Kubernetes Secret, Vault KV) and its
-  interface are named here but specified in NG3; any backend must support
-  create, read and delete by operation id and encrypt at rest.
+- The value store backend (Kubernetes Secret, Vault KV) and its interface
+  are named here but specified in NG3; any backend must support create,
+  read and delete by operation id and encrypt at rest (also an open issue
+  in ADR 0028).
 - `environment` is a mutable name; it is added to `claims` only when the
   scope has one, and GitHub documents no immutable id for it. Accepted:
   environment names are controlled by the repository owner the trust
   already names by id.
-- The OIDC trust conditions are `repository_id` (or `repository_owner_id`
-  for an org-wide scope) plus an optional environment; no claim limits the
-  ref or workflow, so a `push` or `admin` scope trusts every workflow in
-  the repository (or org) that can obtain a token. Whether `push`/`admin`
-  should require a protected environment, or a `ref` / `job_workflow_ref`
-  condition, is a design question for the user (G-api), not settled here.
 - Platform name length limits (Harbor robot names, OAT labels) may force
-  an adapter to shorten `name`; the shortening may touch only the scope
-  part (the full tenant id must remain for the orphan sweep, otherwise the
-  adapter must record the mapping in `ref`), must be deterministic and
-  still unique per generation. NG5 contract tests check this.
+  an adapter to shorten `name`; invariant A4 bounds how. NG5 contract
+  tests check this.
 - JFrog accepting `repository_id` / `repository_owner_id` as mapping
   claims, and GHES/GHE.com tokens carrying them, are unconfirmed (NG5 and
   NG4).
@@ -495,9 +520,8 @@ definition. Nexus stays out of the MVP.
 - Public API: third-party adapters are possible, and the interface can
   only grow additively. `API_VERSION` is the escape hatch.
 - Contract tests per adapter run against recorded API fixtures (NG5);
-  Harbor fixtures cover 2.13. They include replay tests: each method
-  called twice with the same `prior`, and with `ref` emptied, must leave
-  one platform object.
+  Harbor fixtures cover 2.13. They include the replay tests of invariants
+  A2 and A3.
 - Adapters that hold privileged credentials are visibly flagged
   (`needs_privileged_credential`), feeding the audit log.
 

@@ -79,6 +79,10 @@ instance code can live under `src/` at all. Findings from this repo:
 
 ## Decision
 
+This ADR records decisions and their consequences. How each one must
+behave under failure is stated as testable invariants (next section) that
+NG3 implements and tests; the mechanics are NG3's to design within them.
+
 ### Layout: an instance package beside `app`
 
 - Instance code lives in **`src/trustbridge/`**, a sibling package of the
@@ -100,93 +104,43 @@ instance code can live under `src/` at all. Findings from this repo:
 
 ### Lifespan: a trustbridge lifespan wrapping the template's
 
-The template builds one module-level app: `app = FastAPI(...,
+The template builds one module-level app with `FastAPI(...,
 lifespan=lifespan)` (`src/app/main.py:197-199`); its lifespan migrates
-(when enabled), prefetches JWKS, starts cache invalidation and yields
-`None` (lines 86-113), so FastAPI's own hook is taken and a second
-`lifespan=` cannot be passed after the fact. FastAPI passes that
-`lifespan` to its router (`fastapi/applications.py:990`), and Starlette's
-`Router.lifespan` enters `self.lifespan_context` when the server starts
-the lifespan (`starlette/routing.py:639-648`, installed version), so
-replacing the attribute with a wrapper composes both without editing a
-template file. `trustbridge/main.py`:
+when enabled, prefetches JWKS, starts cache invalidation and yields
+`None` (lines 86-113), so the hook is taken and a second `lifespan=`
+cannot be passed later. FastAPI hands that lifespan to its router
+(`fastapi/applications.py:990`) and Starlette's `Router.lifespan` enters
+`self.lifespan_context` at server start (`starlette/routing.py:639-648`,
+installed version). **Decision:** `trustbridge.main` replaces
+`app.router.lifespan_context` with a wrapper that runs trustbridge's
+startup checks (ADR 0030) and registers its readiness check, enters the
+template's own lifespan inside it, and releases trustbridge's resources
+after the template has shut down. No template file is edited. The worker,
+reconciler and migrate commands do not use FastAPI; they call the same
+startup checks from their own `main()`.
 
-```python
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI
-
-from app.health_checks import get_health_registry
-from app.main import app                      # template app: routers, middleware, its lifespan
-from trustbridge.settings import get_trustbridge_settings
-from trustbridge.startup import SignerHealthCheck, run_startup_checks
-from trustbridge.webhooks import router as webhooks_router
-
-_template_lifespan = app.router.lifespan_context   # the template's, as FastAPI built it
-
-
-@asynccontextmanager
-async def _lifespan(app_: FastAPI) -> AsyncIterator[object]:
-    settings = get_trustbridge_settings()          # validates; refuses bad config
-    runtime = await run_startup_checks(settings)   # ADR 0030: settings, signers, issuers (no schema gate yet)
-    get_health_registry().register(SignerHealthCheck(runtime))   # readiness hook (same cached registry the health router uses)
-    try:
-        async with _template_lifespan(app_) as state:   # template's migrate (dev/compose/tests only), JWKS, cache, GC freeze
-            await runtime.wait_for_schema()        # schema gate, after any template migration
-            yield state
-    finally:
-        await runtime.aclose()                     # trustbridge's own clients, after the template's shutdown
-
-
-app.router.lifespan_context = _lifespan
-app.include_router(webhooks_router, prefix="/webhooks")
-```
-
-Order: trustbridge's startup checks (settings, signers, issuers) run
-first, so a bad signer or issuer refuses to start before the template
-touches the database. The schema gate runs after the template's lifespan
-has been entered, because in dev, compose and tests the template's own
-lifespan performs the migration (`RUN_MIGRATIONS_ON_STARTUP=true`) and
-the gate would otherwise fail on an empty database; in production the
-template migrates nothing and the gate simply waits for the migrate Job.
-On shutdown the template unwinds first, then trustbridge's resources.
-`lifespan_context` is an attribute of Starlette's router, not a documented
-extension point; the instance smoke test enters the lifespan with
-`TestClient(app)` as a context manager and asserts the startup checks ran
-and the webhook route exists, so a sync that changes the template's
-construction fails visibly. The worker, reconciler and migrate commands
-do not use FastAPI, so they call the same `run_startup_checks` from their
-own `main()` and then call `wait_for_schema()` (see "Processes and
-database roles").
+Consequence: `lifespan_context` is an attribute of Starlette's router, not
+a documented extension point, so a sync that changes the template's
+construction can break this. The guard is a smoke test (invariant 20).
 
 ### Settings
 
 `trustbridge.settings.TrustbridgeSettings` subclasses `app.config.Settings`
 and adds the GitHub hosts, signers, queue, retention and adapter fields;
-it sets `extra="forbid"` explicitly and configures **no `env_file`**. Both
-classes read the same environment: the template keeps `get_settings()`
-(base fields), trustbridge code uses `get_trustbridge_settings()`.
+it sets `extra="forbid"` explicitly and configures **no `env_file`**. The
+template keeps `get_settings()` (base fields); trustbridge code uses
+`get_trustbridge_settings()`.
 
 Correction to the earlier wording: the two classes coexist because the
 environment source ignores unrelated variables (the template tests this in
 `tests/unit/test_config.py`), not because `forbid` is harmless. `forbid`
-catches unknown init kwargs and dotenv entries only. So (a) trustbridge
-never adds a dotenv or secrets-dir source to `TrustbridgeSettings`
-without `dotenv_filtering="only_existing"`, because a shared dotenv file
-would otherwise fail on every key one of the two classes does not know;
-(b) a misspelt trustbridge variable is silently ignored, so settings
-whose absence is dangerous (`GITHUB_HOSTS`, `SIGNERS`) have no default and
-fail validation when missing. Trustbridge-only variables are not prefixed,
-so a typo cannot be told from an unrelated variable by prefix; instead
-startup compares every environment variable name with the trustbridge
-field names (`difflib.get_close_matches`, cutoff 0.85) and fails on a
-near-miss that is not itself a field name (`LEASE_TTL_SECOND`), and logs
-the effective value of every trustbridge setting that has a default
-(retention, TTLs, caps) so a silently applied default is visible.
-Production also refuses
-`RUN_MIGRATIONS_ON_STARTUP=true` (below). Installed pydantic-settings is
-2.15.0.
+catches unknown init kwargs and dotenv entries only, so a misspelt
+environment variable is silently ignored. **Decisions:** no dotenv or
+secrets-dir source on `TrustbridgeSettings` (unless filtered to existing
+fields), settings whose absence is dangerous (`GITHUB_HOSTS`, `SIGNERS`)
+have no default, near-miss variable names are detected at startup, and
+effective defaults are logged (invariant 19). Production refuses
+`RUN_MIGRATIONS_ON_STARTUP=true`. Installed pydantic-settings is 2.15.0.
 
 ### Processes and database roles
 
@@ -201,37 +155,26 @@ documented in the README. No local-manifest ignore entries are needed.
 
 | Process | Command | DB role | Migrates? | Scales |
 | --- | --- | --- | --- | --- |
-| api | `uvicorn trustbridge.main:app ...` | `trustbridge_app` | never; `RUN_MIGRATIONS_ON_STARTUP=false` | replicas |
+| api | `uvicorn trustbridge.main:app ...` | `trustbridge_app` | never | replicas |
 | worker | `python -m trustbridge.worker` | `trustbridge_app` | never | replicas (consumer group) |
-| reconciler | `python -m trustbridge.reconciler` | `trustbridge_app` | never | 1 active for singleton duties (advisory lock, EB-6); the relay runs on every replica (`SKIP LOCKED`) |
+| reconciler | `python -m trustbridge.reconciler` | `trustbridge_app` | never | replicas; singleton duties run on one at a time (EB-6) |
 | migrate | `python -m trustbridge.migrations upgrade` | `trustbridge_owner` | yes, only this | one Job per release, before the rollout |
 
-- **Migrate job.** A Helm `pre-install,pre-upgrade` hook (NG7), the same
-  image, connecting to the primary directly, not through a pooler
-  (`docs/architecture.md:275-282`). `upgrade` takes a session-level
-  Postgres advisory lock on a dedicated connection, so a second concurrent
-  run waits, then runs `command.upgrade(Config("alembic.ini"), "head")`.
-  It exits non-zero on failure and the rollout does not start.
-- **Role split.** The owner role (`trustbridge_owner`, given to the Job
-  through the `POSTGRES_USER`/`POSTGRES_PASSWORD` variables the template
-  already reads) owns the tables, creates `trustbridge_app` and the RLS
-  policies and grants `SELECT, INSERT, UPDATE, DELETE` on tenant tables
-  (hand-written revisions, ADR 0031). The runtime processes get
-  `trustbridge_app` through the same variables, a non-owner subject to RLS
-  with no DDL rights. The template's `RUN_MIGRATIONS_ON_STARTUP=true` would
-  fail for that role, so `TrustbridgeSettings` **refuses to start with
-  `mode=production` and `RUN_MIGRATIONS_ON_STARTUP=true`**. Dev, compose and
-  tests keep the template default and migrate through the template's
-  startup and `post-create.d/20-migrate.sh` as before, as the owner.
-- **Schema gate.** Every runtime process checks at startup that
-  `alembic_version` is at or after `REQUIRED_REVISION`, a constant in
-  `trustbridge.startup` updated in the commit that first needs a schema
-  change (so a rollback to older code against a newer schema still starts,
-  per NFR-0027's expand/contract rule). `wait_for_schema()` retries for
-  `SCHEMA_WAIT_SECONDS` (default 300) in every process, the api included
-  (a lifespan that has not yet yielded is not serving or ready), and then
-  fails (non-zero exit). A pod that starts before the Job finishes
-  therefore waits instead of racing it.
+**Decisions.**
+
+- Migrations run in a dedicated migrate Job (a Helm pre-install/pre-upgrade
+  hook, NG7) against the primary directly, never in the api, worker or
+  reconciler. The template's startup migration stays for dev, compose and
+  tests only; production refuses it. This follows the template's own
+  guidance (`docs/architecture.md:156`, `:275-282`, NFR-0027).
+- Two database roles: the Job runs as the owner role that owns the tables
+  and creates the application role and the RLS policies (ADR 0031);
+  runtime processes run as a non-owner application role subject to RLS with
+  no DDL rights. Both are supplied through the `POSTGRES_*` variables the
+  template already reads.
+- Runtime processes gate on the schema: they wait for a schema at or after
+  the revision the code requires and stay compatible with a newer schema
+  (rollback), per NFR-0027's expand/contract rule (invariants 12-13).
 
 ### Migrations: one history, extended through a thin wrapper
 
@@ -265,165 +208,85 @@ database, run the template suites) before NG3 merges.
 
 ### Persistence and serialisation
 
-Tables (all tenant-owned ones under RLS, ADR 0031; names are the
-contract between 0028, 0029 and the later ADRs):
+Table names are the contract between this ADR, 0029 and the later ADRs
+(columns are NG3's, within the invariants):
 
 | Table | Purpose |
 | --- | --- |
-| `tenants` | surrogate `id` (UUID) for `(host, installation_id)`, unique on that pair |
-| `webhook_deliveries` | the ingest outbox and dedupe record; see "Request path" |
-| `scope_leases` | `(tenant_id, adapter, lease_key)` primary key; `holder`, `fence` (bigint), `expires_at` |
-| `adapter_resources` | `(tenant_id, adapter, resource_key)` primary key; `ResourceState` as `name`, `ref` (jsonb) |
-| `adapter_credentials` | `(tenant_id, adapter, scope_key)` primary key; `CredentialState` as jsonb; `version` |
-| `credential_operations` | write-ahead log: `id`, `tenant_id`, `adapter`, `scope_key`, `kind` (`issue`, `rotate`, `delete`), `generation`, `name`, `state` (`intent`, `platform_done`, `delivered`, `awaiting_retire`, `finished`, `failed`), `attempts`, `fence`, `created_at`, `updated_at`; a partial unique index allows one non-terminal row per `(tenant_id, adapter, scope_key)` |
+| `tenants` | surrogate tenant id (UUID) for `(host, installation_id)` |
+| `webhook_deliveries` | the ingest outbox and dedupe record |
+| `scope_leases` | per-scope leases with a fencing counter |
+| `adapter_resources` | `ResourceState` of non-secret resources (ADR 0029) |
+| `adapter_credentials` | `CredentialState` per credential scope (ADR 0029) |
+| `credential_operations` | write-ahead log of secret-bearing operations |
 
-**Lease.** Serialisation is per `(tenant, adapter, lease_key)`.
-`lease_key` is the scope's `scope_key`, except for an adapter that
-declares `credential_limit`, where it is the constant `*` so a platform
-cap is counted without a concurrent creator. `lease_key` is only the
-lease's key: `adapter_credentials` and `credential_operations` always
-carry the real `scope_key`, so scopes of one tenant keep separate state
-and separate one-non-terminal-operation slots (a scope parked at
-`NEEDS_MANUAL_ACTION` does not block the others). It is a lease
-row, not a Postgres advisory lock: the lock must outlive a transaction
-while an HTTP call runs, and session-level advisory locks do not survive
-PgBouncer in transaction mode (`DB_POOL_MODE=external`, ADR 0022), while
-holding a transaction open across a platform call would pin a connection
-and an RLS setting. Acquire:
+**Decisions.**
 
-```sql
-INSERT INTO scope_leases (tenant_id, adapter, lease_key, holder, fence, expires_at)
-VALUES (:t, :a, :k, :me, 1, now() + :ttl)
-ON CONFLICT (tenant_id, adapter, lease_key) DO UPDATE
-   SET holder = :me, fence = scope_leases.fence + 1, expires_at = now() + :ttl
- WHERE scope_leases.expires_at < now()
-RETURNING fence;
-```
-
-`:me` is a fresh UUID generated per unit of work (one task handling one
-scope), never a worker or consumer id, so a redelivery of the same message
-to the same consumer, or two tasks in one process, cannot both hold the
-lease. No row returned means someone else holds it: the message goes back
-to the retry path (below) without counting as a failed attempt. The holder
-renews at a third of the TTL (`LEASE_TTL_SECONDS`, default 120) with
-`UPDATE scope_leases SET expires_at = now() + :ttl WHERE ... AND holder =
-:me AND fence = :fence` (no fence bump, so the `fence` the holder keeps in
-memory stays valid; zero rows updated means the lease was lost and the
-unit of work aborts). When the unit of work ends the holder releases with
-`UPDATE ... SET expires_at = now() WHERE ... AND holder = :me AND fence =
-:fence`, so the next message for the scope does not wait out the TTL. Every
-write to `credential_operations`, `adapter_credentials` and
-`adapter_resources` carries `AND EXISTS (SELECT 1 FROM scope_leases WHERE
-... AND fence = :fence AND holder = :me)`, so a holder that lost the lease
-cannot commit. The platform call itself cannot be fenced, so each adapter
-call runs under a timeout of at most half the TTL
-(`ADAPTER_CALL_TIMEOUT_SECONDS`, default 30); a stale holder is therefore
-out of its call before the next one starts. Residual: a process frozen
-longer than the TTL inside a call can still complete it; the deterministic
-name and the lookup rule (ADR 0029) make that call idempotent.
-
-**Write-ahead.** For every secret-bearing adapter call the core commits
-the intent (`credential_operations` row and intent state with the
-deterministic name) before the call, persists the returned state after it,
-parks returned secret values in the operation value store, and only then
-writes GitHub. The exact sequence and its crash windows are in ADR 0029
-("Semantics"). The reconciler resumes every non-terminal operation whose
-lease is free: `intent` and `platform_done` are retried, `awaiting_retire`
-past `retire_after` runs `rotate_finish`, `failed` triggers cleanup, and
-a sweep deletes credentials that no slot or operation accounts for.
+- **Serialisation per scope by a lease with fencing.** One credential or
+  resource operation at a time per `(tenant, adapter, lease key)`. The
+  lease key is the scope's key, except for an adapter that declares
+  `credential_limit`, where one adapter-wide key serialises creation so
+  the platform cap is never exceeded by concurrent workers. A lease is a
+  row, not a Postgres advisory lock, because the hold must outlive a
+  transaction while a platform HTTP call runs and session advisory locks do
+  not survive PgBouncer transaction mode (`DB_POOL_MODE=external`, ADR
+  0022). Guarded writes carry the fence, so a holder that lost its lease
+  cannot commit; platform calls are bounded by a timeout shorter than the
+  lease TTL. Residual: a process frozen past the TTL inside a call can
+  still complete it; the deterministic name and the lookup rule (ADR
+  0029) make that call idempotent.
+- **Write-ahead for every secret-bearing call.** The intent (operation row
+  and deterministic platform-side name) is committed before the adapter is
+  called; the adapter's returned state is persisted after; secret values
+  are parked outside Postgres until delivered to GitHub. Rotation resumes
+  the in-flight operation instead of starting another. The reconciler
+  resumes every non-terminal operation whose lease is free and sweeps
+  unaccounted platform credentials. The adapter-facing contract is in ADR
+  0029.
 
 ### Request path and processing
 
-1. **Ingress** `POST /webhooks/github/{host}` (one route per configured
-   GitHub host, so the verifier knows which webhook secret to use before
-   the payload is parsed; GitHub documents: HTTPS, secret,
-   signature validation, a 2xx within 10 s, process asynchronously,
+1. **Ingress** `POST /webhooks/github/{host}`, one route per configured
+   GitHub host so the verifier knows which webhook secret to use before
+   the payload is parsed (GitHub documents: HTTPS, secret, signature
+   validation, a 2xx within 10 s, process asynchronously,
    `X-GitHub-Delivery` for replay detection, redelivery after downtime).
-   This is a **transactional outbox**:
-   - Reject at once with 413 when `Content-Length` exceeds
-     `WEBHOOK_MAX_BODY_BYTES` (default 25 MiB, GitHub's documented payload
-     cap; NG3 confirms), read the raw body as a stream that aborts when the
-     cap is passed, and verify
-     `X-Hub-Signature-256` with `hmac.compare_digest` before parsing JSON.
-     The secret is per App (per GitHub host, selected by the `{host}` path
-     segment), never in the URL.
-   - In one transaction insert into `webhook_deliveries`: `delivery_id`
-     (the `X-GitHub-Delivery` value, primary key), `host`, `event`,
-     allow-listed `headers` (jsonb: `X-GitHub-Event`,
-     `X-GitHub-Hook-ID`, `X-GitHub-Hook-Installation-Target-ID`,
-     `X-GitHub-Hook-Installation-Target-Type`; never the signature),
-     `body` (bytea), `received_at`, `state='received'`,
-     `relayed_at` null, `retry_at` null, `attempts` 0, `tenant_id` null
-     (resolved by the worker). `INSERT ... ON CONFLICT (delivery_id) DO NOTHING`; a
-     conflict is a redelivery or replay and returns 2xx. Commit, then
-     return 202. The 2xx is therefore sent only after the event is
-     durable in Postgres, and the response never waits for Valkey.
-   - After the response (a background task) the handler makes one
-     best-effort relay of its own row (below) for latency, with a Valkey
-     socket timeout of 1 second; a failure is ignored. No GitHub or adapter
-     call happens on the request path.
-2. **Relay** (a task in the reconciler, plus the best-effort call above):
-   `SELECT ... WHERE state = 'received' AND relayed_at IS NULL AND
-   (retry_at IS NULL OR retry_at <= now()) ORDER BY received_at FOR UPDATE
-   SKIP LOCKED LIMIT n`, `XADD tb:events` with the **delivery id only**,
-   `UPDATE ... SET relayed_at = now()`, commit. A crash after the `XADD`
-   and before the commit relays a second time; handlers are idempotent and
-   the worker skips a delivery already `processed`, and a duplicate claim
-   does not touch `attempts` (below). The same task re-relays rows still
-   `received`, with `retry_at` null, more than `RELAY_RECHECK_MINUTES`
-   (default 15) after `relayed_at`, which recovers a Valkey that lost its
-   data or a trimmed entry; rows waiting in a delayed retry are left to
-   their `retry_at`. The
-   handler and the relay are interchangeable, so several reconciler
-   standbys may run it.
-3. **Worker**: the same image, command `python -m trustbridge.worker`.
-   Consumer group `tb-workers`; `XREADGROUP` returns a delivery id; the
-   worker loads the row (body included) from Postgres, resolves the
-   `(host, installation_id)` to `tenant_id`, sets the RLS setting, runs the
-   handlers, marks the row `processed` and `XACK`s. `XAUTOCLAIM` reclaims
-   entries idle past a threshold from dead consumers. `attempts` on the
-   row counts **failed handling only**: it is incremented when a handler
-   raises (a retryable or non-retryable `AdapterError`, or any other
-   error), not on a claim, a redelivered duplicate, a re-relay or a busy
-   lease. Retry path: for a busy lease or a retryable error the worker, in
-   one transaction, sets `relayed_at = null` and `retry_at = now() +
-   backoff` (bounded exponential, 5 s to 5 min; for a failure also
-   `attempts + 1`) and then `XACK`s the entry; the relay re-adds the row
-   once `retry_at` passes. After `MAX_DELIVERY_ATTEMPTS` failures the
-   worker sets the row `dead`, `XADD`s `{delivery_id, error}` to
-   `tb:events:dead`, and `XACK`s. The dead-letter stream carries no body:
-   the admin API reads the body from the row, and "requeue" resets the row
-   to `received` with `relayed_at` null, `retry_at` null and `attempts` 0. A row whose body was purged (below) before it was
-   processed goes to `dead` with reason `body_purged`. Handlers are
-   idempotent (reconcile-style, ADR 0029), so at-least-once delivery is
-   safe. Leader election is not needed for workers (the consumer group
-   partitions work, the lease serialises scopes); the reconciler uses a
-   Postgres advisory lock (EB-6) on a direct connection for its singleton
-   duties.
-4. **Delivery reconciler**: GitHub never redelivers on its own. A
-   periodic job lists failed deliveries with the App-JWT endpoints
+   **Decision: a transactional outbox.** The handler bounds the body size,
+   verifies `X-Hub-Signature-256` in constant time, then stores the
+   delivery id, host, event, allow-listed headers and the body in
+   `webhook_deliveries` in one transaction and only then answers 2xx.
+   Valkey is never on the request path. A repeated delivery id returns 2xx
+   without a second row. No GitHub or adapter call happens on the request
+   path.
+2. **Relay.** A relay task (in the reconciler, plus one best-effort call
+   from the ingress after the response) adds the **delivery id only** to
+   the Valkey stream `tb:events`. It may add an id twice; processing is
+   idempotent. It also re-adds rows that never reached the stream or whose
+   stream entry was lost.
+3. **Worker** (same image, `python -m trustbridge.worker`). Consumer group
+   `tb-workers`; the worker reads the delivery id, loads the row and body
+   from Postgres, resolves `(host, installation_id)` to the tenant, sets
+   the RLS setting, runs the handlers and marks the row processed.
+   Failures retry with backoff; a delivery that exhausts its attempts, or
+   that repeatedly kills the worker, goes to the dead-letter stream
+   `tb:events:dead` as `{delivery_id, error}`. The dead-letter carries no
+   body: the admin API reads it from the row, and "requeue" makes the row
+   deliverable again. Handlers are idempotent (reconcile-style, ADR 0029).
+   Leader election is not needed for workers (the consumer group
+   partitions work, the lease serialises scopes).
+4. **Delivery reconciler**: GitHub never redelivers on its own. A periodic
+   job lists failed deliveries with the App-JWT endpoints
    (`GET /app/hook/deliveries`, `POST /app/hook/deliveries/{id}/attempts`)
-   from the last cursor and redelivers those whose ID is **missing from
-   `webhook_deliveries`** (the ingress was down or answered 5xx before
-   committing). A row that exists is never redelivered: it is already
-   durable and the relay and worker own it.
-5. **Retention and trimming** (EB-15):
-   - `body` is set null (`body_purged_at`) `DELIVERY_BODY_RETENTION_DAYS`
-     (default 7) after `processed`, and `DEAD_LETTER_RETENTION_DAYS`
-     (default 30) after `dead`. The row (id, host, event, state) stays for
-     `DELIVERY_ID_RETENTION_DAYS` (default 30) so a late redelivery is
-     still deduplicated, then is deleted.
-   - `tb:events` is trimmed by the reconciler with `XTRIM tb:events MINID
-     <t>`, where `t = min(oldest pending id of the group, now -
-     STREAM_RETENTION_HOURS)` and, with nothing pending, `t = now -
-     STREAM_RETENTION_HOURS`. The stream is therefore bounded by the
-     retention window even when the group is stalled or lagging (signer or
-     schema-wait outage), and entries being worked (pending) are not
-     trimmed. An entry trimmed unread is recovered by the re-relay sweep
-     (the row is still `received`, `relayed_at` older than the recheck
-     window), because Postgres, not the stream, is the source of
-     truth. `tb:events:dead` is trimmed by age,
-     `DEAD_LETTER_RETENTION_DAYS`.
+   and redelivers those whose id is **missing from `webhook_deliveries`**
+   (the ingress was down or answered 5xx). A stored row is never
+   redelivered: it is durable and the relay and worker own it.
+5. **Retention and trimming** (EB-15). Bodies are purged after a retention
+   period (shorter for processed, longer for dead rows) while the row
+   remains long enough to deduplicate a late redelivery. The stream holds
+   ids only and is trimmed only below what the group has acknowledged;
+   the dead-letter stream is trimmed by age. Postgres, not the stream, is
+   the source of truth. The settings and their proposed defaults are in
+   G-api item 9.
 6. **Installation tokens**: minted with the signer-backed App JWT
    (ADR 0030), cached in process until about 5 minutes before the
    1-hour expiry, and **down-scoped** per repository and permission set
@@ -437,31 +300,27 @@ a sweep deletes credentials that no slot or operation accounts for.
 Tenant = GitHub installation (EB-3). Installation IDs are unique only
 per GitHub host, so the tenant is identified by `(host, installation_id)`
 and every tenant-owned table carries a surrogate `tenant_id` (UUID) that
-maps to that pair. Every tenant-owned table has a `tenant_id` and Postgres
-row-level security keyed on a session setting
-(`SET LOCAL trustbridge.tenant_id`) applied per transaction by a
-dependency. Details (policies, the owner/app role split, the audit
-interplay) are ADR 0031. The worker resolves the event's
+maps to that pair, with Postgres row-level security keyed on a per-
+transaction session setting. Details (policies, the owner/app role split,
+the audit interplay) are ADR 0031. The worker resolves the event's
 `(host, installation_id)` to the `tenant_id` and sets the setting before
 any tenant query. `webhook_deliveries` is the exception: it is written
 before the tenant is known, so it is host-scoped and outside tenant RLS;
-the relay and reconciler iterate tenants (setting the value per tenant)
-for lease, operation and state tables. ADR 0031 must confirm this
-exception and the grants (open issue below).
+the relay and reconciler iterate tenants for tenant-owned tables. ADR 0031
+must confirm this exception and the grants (open issue below).
 
 ### Queue client: redis-py against a Valkey server
 
 Follow ADR 0013: the server is Valkey, the client is `redis` (redis-py,
 `redis.asyncio`), already pinned at `redis==8.1.0` and used by the
 template's `app/cache.py`. trustbridge uses `redis.asyncio` for Streams
-too (`xadd`, `xreadgroup`, `xautoclaim`, `xack`, `xtrim`, `xpending`,
-`xinfo_groups`). Reasons: one client and one connection configuration
-(`redis_url`, with the template's `rediss://` enforcement) for both
-template and instance code; the stream commands used are part of the
-shared protocol, which Valkey implements. NG1 also added `valkey==6.2.0`
-(valkey-py), which nothing imports; **NG3 removes it**. If Valkey ever
-diverges from Redis protocol in a way that matters, switching clients is a
-contained change behind `trustbridge.queue`.
+too. Reasons: one client and one connection configuration (`redis_url`,
+with the template's `rediss://` enforcement) for both template and
+instance code; the stream commands used are part of the shared protocol,
+which Valkey implements. NG1 also added `valkey==6.2.0` (valkey-py), which
+nothing imports; **NG3 removes it**. If Valkey ever diverges from Redis
+protocol in a way that matters, switching clients is a contained change
+behind `trustbridge.queue`.
 
 ### Hosts, signers and adapters
 
@@ -474,68 +333,170 @@ entry-point group and enabled by name (ADR 0029). Telemetry and outbound
 calls other than to configured hosts and adapters are off by default
 (EB-5).
 
+## Invariants NG3 must implement and test
+
+Each is one testable sentence. Where a number is a setting, the setting
+name is used. Invariants about the adapter contract are in ADR 0029
+("Invariants NG3 must implement and test"); those about signers and hosts
+are in ADR 0030.
+
+**Ingest and queue**
+
+1. A 2xx for a webhook is returned only after its delivery row is
+   committed in Postgres, and a repeated delivery id returns 2xx without
+   creating a second row.
+2. A request whose `Content-Length` exceeds `WEBHOOK_MAX_BODY_BYTES` is
+   rejected with 413 before its body is read, a streamed body that passes
+   the cap is aborted, and the signature is verified in constant time
+   before the JSON is parsed or anything is stored.
+3. A delivery's failure counter increases only when a handler fails;
+   claiming an entry, a duplicate from the relay, a re-relay and a busy
+   lease never increase it.
+4. A delivery whose handling ends the worker process without recording a
+   failure reaches the dead letter after `MAX_DELIVERY_ATTEMPTS`
+   deliveries of the same stream entry (counted from the stream's delivery
+   count), while a relay duplicate or a retry re-add does not count as a
+   delivery of that entry.
+5. After the stream loses data (restart without persistence, flush or
+   failover), the re-relay sweep re-adds every delivery row that is
+   unprocessed and not `dead`, including rows never relayed, and leaves
+   rows waiting in a delayed retry until their retry time.
+6. Trimming `tb:events` never removes an entry that is unread by the group
+   or pending (unacknowledged), including when nothing is pending and when
+   the group is stalled; group lag is exported as a metric.
+7. A dead-lettered delivery's body is readable from Postgres until its
+   dead-letter retention elapses, and "requeue" makes exactly that row
+   deliverable again with its failure counter reset.
+8. The delivery reconciler never redelivers a delivery whose id has a
+   stored row.
+
+**Serialisation and credential operations**
+
+9. At most one unit of work holds the lease for a given `(tenant,
+   adapter, lease key)`; the holder identity is per unit of work, so two
+   tasks in one process, or a redelivery to the same consumer, cannot both
+   hold it.
+10. Lease fencing is checked atomically with every guarded write,
+    including lease expiry, in the same statement as the write, so a holder
+    whose lease expired or was taken over cannot commit even if it has not
+    noticed; renewing or releasing a lease never changes the fence its
+    holder keeps.
+11. Every adapter call is bounded by a timeout shorter than the lease TTL,
+    and an adapter with `credential_limit` never has more credentials
+    (current, previous and in flight) than the limit under concurrent
+    workers.
+
+**Schema, startup and health**
+
+12. The runtime role can read the schema version table the gate depends
+    on, and a test running as that role passes the gate.
+13. The schema gate accepts a database whose revision is newer than, and
+    unknown to, the running code (rolled-back code against a newer schema)
+    and rejects one older than the revision the code requires, without the
+    code needing to know the database's revision.
+14. While the schema is not current, the api and the long-running
+    processes stay alive (liveness passes) and report not ready, and they
+    exit non-zero only after `SCHEMA_WAIT_SECONDS`; waiting never fails
+    liveness.
+15. With `MODE=mock` no process waits for a schema or touches a database
+    for it.
+16. Entering the lifespan more than once in a process (tests, reloads)
+    registers each trustbridge health check exactly once on the template's
+    registry.
+17. A process refuses to start in production with
+    `RUN_MIGRATIONS_ON_STARTUP=true`, and no runtime process executes a
+    migration.
+18. The migrate Job runs as the owner role, two concurrent Job runs do not
+    interleave, and a failed migration fails the Job so the rollout does
+    not start.
+19. A near-miss environment variable name (for example
+    `LEASE_TTL_SECOND`) fails startup, and the effective value of every
+    trustbridge setting that has a default is logged at startup.
+20. A smoke test enters `trustbridge.main:app`'s lifespan, asserts the
+    startup checks ran and that the webhook route exists, and fails if the
+    template stops exposing `app.router.lifespan_context`.
+
+**Operations, secrets and names** (the adapter side is in ADR 0029)
+
+21. CI outputs are recoverable after a crash at any point between a
+    platform change succeeding and the GitHub writes being recorded as
+    done: a retry writes the outputs again, for issued secrets from the
+    parked values, and for OIDC trust and for `UNCHANGED` by re-deriving
+    them, so no scope is left with platform state but no GitHub outputs.
+22. The orphan sweep never deletes a credential created after its
+    database read: it lists the platform first, reads the database after,
+    and deletes only credentials that appear in the list and are
+    unaccounted for in that read.
+23. Parked secret values are removed on every terminal operation state
+    (finished, failed, abandoned), and a sweep removes values whose
+    operation is terminal or missing, including after a crash.
+24. A platform-side credential name contains the full tenant id, and an
+    adapter that shortens a name shortens only the scope part.
+
 ## Decisions for the user (G-api)
 
 Proposals made in this ADR that the user should weigh. Each lean is
-labeled as a lean; the defaults named in the text (retention days,
-TTLs) are proposals too.
+labeled as a lean; the defaults named below are proposals too.
 
 1. **Ingest as a transactional outbox** (body and headers stored in
-   `webhook_deliveries` in the 2xx transaction; a relay XADDs only the
-   delivery id; worker and dead-letter read from Postgres). Replaces the
-   earlier `enqueued_at` column. Trade-off: payload bodies live in Postgres
-   for a retention window (EB-15) and there is a relay task, in exchange
-   for no lost events when Valkey is down or loses data and a well-defined
-   stream trim. Alternative: `enqueued_at` with the body in the stream
-   (rejected: the stream is then the only copy). Lean: outbox.
+   `webhook_deliveries` in the 2xx transaction; a relay adds only the
+   delivery id to the stream; worker and dead-letter read from Postgres).
+   Replaces the earlier `enqueued_at` column. Trade-off: payload bodies
+   live in Postgres for a retention window (EB-15) and there is a relay
+   task, in exchange for no lost events when Valkey is down or loses data.
+   Alternative: `enqueued_at` with the body in the stream (rejected: the
+   stream is then the only copy). Lean: outbox.
 2. **Tenant identity**: a surrogate tenant UUID mapping to
    `(host, installation_id)`, because installation IDs are unique only
    per GitHub host. Lean: as written.
 3. **Per-host webhook route** `/webhooks/github/{host}` so the right
    webhook secret is chosen before parsing. Alternative: try every
    configured secret on a single route. Lean: per-host route.
-4. **Serialisation by a lease table with fencing** rather than Postgres
-   advisory locks. Trade-off: one more table and the fencing predicate on
-   writes, in exchange for working behind PgBouncer transaction mode and
-   across long platform calls. Lean: lease table.
-5. **Write-ahead `credential_operations` and a resumable operation state
-   machine** (details in ADR 0029). Lean: as written.
-6. **A dedicated migrate job and no startup migration in production**
-   (`TrustbridgeSettings` refuses `RUN_MIGRATIONS_ON_STARTUP=true` in
-   production; a schema gate on `REQUIRED_REVISION`; owner role for the
-   Job, `trustbridge_app` for runtime). Trade-off: one more deployable
-   step, in exchange for no migration races between replicas, workers and
+4. **Serialisation by a lease row with fencing** rather than Postgres
+   advisory locks. Trade-off: one more table and fenced writes, in exchange
+   for working behind PgBouncer transaction mode and across long platform
+   calls. Lean: lease row.
+5. **Write-ahead credential operations with resumable rotation**
+   (contract in ADR 0029). Lean: as written.
+6. **A dedicated migrate job and no startup migration in production**,
+   with an owner role for the Job and a non-owner application role for
+   runtime, and a schema gate. Trade-off: one more deployable step, in
+   exchange for no migration races between replicas, workers and
    reconcilers and a runtime role without DDL. Lean: as written.
 7. **Wrapping the template's lifespan by assigning
    `app.router.lifespan_context`** from `trustbridge.main`, guarded by a
    smoke test. Alternatives: a template hook (NX-style change, declined
-   for now); running the checks only in the worker/reconciler and leaving
-   the api unchecked (rejected: the api mints tokens). Lean: as written.
-8. **Settings hygiene**: no dotenv source in `TrustbridgeSettings`;
-   dangerous settings have no default; unknown `TB_*` variables fail
-   startup. Lean: as written.
-9. **Retention and tuning defaults** (body 7 days, dead 30, delivery id 30,
-   stream 24 h, lease TTL 120 s, adapter call timeout 30 s, relay recheck
-   15 min, schema wait 300 s). Lean: approve as starting points; they are
-   settings.
+   for now); running the checks only in the worker/reconciler (rejected:
+   the api mints tokens). Lean: as written. How the wrapper treats a host
+   with no App yet or an unavailable host is a separate question, ADR 0030
+   item 5.
+8. **Settings hygiene**: no unfiltered dotenv source; dangerous settings
+   have no default; near-miss variable names fail startup. Lean: as
+   written.
+9. **Retention and tuning defaults**, all settings: body retention 7 days
+   after processing and 30 days after dead-lettering, delivery id 30 days,
+   lease TTL 120 s, adapter call timeout 30 s, relay recheck 15 min,
+   schema wait 300 s, `MAX_DELIVERY_ATTEMPTS` and the retry backoff bounds
+   set by NG3. Lean: approve as starting points.
+10. **Abuse limits on the unauthenticated webhook route.** The ingress
+    buffers up to the body cap before the signature can be checked.
+    Options: (a) rate limiting per source address at the ingress
+    controller, set in the Helm chart (NG7); (b) an application limiter;
+    (c) neither, documented. Lean: (a).
 
 ## Open issues
 
 - ADR 0031 must settle RLS for `webhook_deliveries` (host-scoped, written
   before the tenant is known) and how the relay and reconciler read across
   tenants without a `BYPASSRLS` role (proposed: iterate tenants, setting
-  the value per tenant; relay reads only the host-scoped table).
+  the value per tenant; the relay reads only the host-scoped table).
 - The operation value store (where parked secret values live between
   issue and delivery) is specified in NG3; ADR 0029 fixes only its
-  contract.
+  contract (also listed there).
 - The 25 MiB payload cap is GitHub's documented limit as recalled for
   this ADR and was not re-fetched in this pass; NG3 confirms it.
 - `lifespan_context` is not a documented Starlette extension point; the
-  smoke test is the guard.
-- The unauthenticated webhook route buffers up to the body cap before the
-  signature can be checked. Rate limiting per source address at the
-  ingress controller (or an application limiter) is not decided here; it
-  is a deployment question for NG7 and the user.
+  smoke test (invariant 20) is the guard.
 
 ## Consequences
 
@@ -547,9 +508,8 @@ TTLs) are proposals too.
   explicit.
 - If the template changes `app.main` in a way that stops
   `from app.main import app` or `app.router.lifespan_context` working
-  (renamed variable, factory), the entrypoint breaks. The instance has its
-  own smoke test that enters `trustbridge.main:app`'s lifespan and checks
-  the webhook route, so a sync PR fails visibly.
+  (renamed variable, factory), the entrypoint breaks. The smoke test
+  makes a sync PR fail visibly.
 - Mutating the template's `app` after import is simple but couples us to
   its router order and middleware stack; accepted.
 - Hand-written revisions plus a wrapper CLI is a convention people can
@@ -557,8 +517,13 @@ TTLs) are proposals too.
 - At-least-once processing needs every handler to be idempotent; ADR 0029
   makes that an interface rule.
 - Storing bodies adds a retention duty (EB-15) and database size
-  proportional to webhook volume; the purge job bounds it.
+  proportional to webhook volume; the purge bounds it.
+- Because the stream is trimmed only below what the group acknowledged, a
+  stalled consumer group lets the stream grow by one id per event; the
+  lag metric (invariant 6) is the alarm.
 - Four process types and a migrate hook make a fuller Helm chart (NG7).
+- The invariant list is the acceptance bar for NG3; a design that meets
+  it differently from what the earlier drafts described is acceptable.
 
 ## Sources
 
@@ -575,7 +540,7 @@ TTLs) are proposals too.
 - githubkit authentication (`AppAuthStrategy`,
   `AppInstallationAuthStrategy`, `base_url`):
   https://github.com/yanyongyu/githubkit (docs: usage/getting-started/authentication.md)
-- redis-py streams (`xadd`, `xreadgroup`, `xautoclaim`, `xtrim` `MINID`):
+- redis-py streams (`xadd`, `xreadgroup`, `xautoclaim`, `xtrim`):
   https://redis.readthedocs.io/en/stable/commands.html
 - Valkey stream commands:
   https://valkey.io/commands/#stream

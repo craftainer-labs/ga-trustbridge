@@ -158,33 +158,27 @@ manual step; it never falls back to the mutable name claims.
 
 The template's lifespan is `replace` tier and has no hook. trustbridge
 wraps it (ADR 0028, "Lifespan: a trustbridge lifespan wrapping the
-template's"), and the same `trustbridge.startup.run_startup_checks` runs
-in the api lifespan and in the worker, reconciler and migrate commands'
-`main()`. It runs, per configured host, in this order, and refuses to
-start (non-zero exit, or a failed lifespan) on the first failure:
+template's"), and the same startup checks run in the api lifespan and in
+the worker, reconciler and migrate commands. **Decision:** per configured
+host, in this order, they
 
-1. Validate the settings: https only (except a flagged dev mode), `api_url`
-   for `ghes` ends in `/api/v3`, GHE.com `api_url` matches
-   `api.<sub>.ghe.com`, each host's `signer` exists in `SIGNERS`, `file`
-   signers are absent in production.
-2. Signer self-test: sign a probe with the host's signer and verify it
-   locally against `public_key_pem()`; then call `GET /app` with a real
-   App JWT and require the returned `id` to equal `app_id`. This proves
-   the signer's key is the one registered on that host.
-3. Issuer validation: fetch the discovery document (through the configured
-   CA and proxy) and compare its `issuer` with the configured
-   `oidc_issuer`; a mismatch refuses that host.
-The schema gate (ADR 0028, "Processes and database roles") is not part of
-`run_startup_checks`: every process calls `wait_for_schema()` after it, and
-the api does so after entering the template's lifespan so that the
-template's dev-time migration has already run.
+1. validate the settings (https only except a flagged dev mode, `api_url`
+   shape per host kind, every host's `signer` names an entry in
+   `SIGNERS`, no `file` signer in production);
+2. self-test the signer: a probe signature verifies against
+   `public_key_pem()`, and an App JWT accepted by `GET /app` returns an
+   `id` equal to the configured `app_id`, which proves the signer's key is
+   the one registered on that host;
+3. validate the issuer: the host's OIDC discovery document reports the
+   configured `oidc_issuer` (fetched through the configured CA and proxy).
 
-Readiness: the api registers a `SignerHealthCheck` on the template's health
-registry (the cached `get_health_registry()` the health router reads), so
-`/health` readiness includes the signer. It re-signs a probe at most every
-30 seconds and caches the result; it does not call GitHub per probe. A
-failing signer takes the pod out of rotation and, in the worker, pauses
-consumption.
+What a failed check does (refuse the process, or only mark that host
+unavailable) is G-api item 5. The schema gate (ADR 0028, "Processes and
+database roles") is separate from these checks. Readiness: the api
+registers a signer health check on the template's health registry (the
+cached registry the health router reads), so `/health` readiness includes
+the signer; it does not call GitHub per probe. A failing signer takes the
+pod out of rotation and, in the worker, pauses consumption.
 
 ### Registration
 
@@ -203,6 +197,32 @@ consumption.
   secret through an authenticated admin endpoint or CLI. The same
   validations apply.
 
+Both paths produce an App id, key and webhook secret for a host that had
+none. How a host that is configured but has no App yet coexists with the
+startup checks above is open: G-api item 5.
+
+## Invariants NG3 must implement and test
+
+Each is one testable sentence (the shared ones are in ADR 0028, "Invariants
+NG3 must implement and test", cited as "0028 invariant n").
+
+1. The signer self-test fails for a signer whose key is not the one
+   registered for the host's `app_id`, and passes for the right key.
+2. The JWT never has `exp` more than 9 minutes ahead of now nor `iat`
+   later than now, and the clock-skew allowance is covered by a test.
+3. Startup rejects a host whose discovery document `issuer` differs from
+   the configured `oidc_issuer`, a `SIGNERS` reference that names no
+   entry, a `file` signer when `mode=production`, and a non-https URL
+   outside the flagged dev mode.
+4. The signer health check never makes a GitHub call per probe, and is
+   registered once however many times the lifespan is entered (0028
+   invariant 16).
+5. The PEM returned by the manifest flow is never logged or returned to
+   the browser, and a signer configuration never contains an inline secret
+   value.
+6. A host whose `oidc_id_claims` is false is never offered OIDC trust
+   (0029 invariants A6 and A7).
+
 ## Decisions for the user (G-api)
 
 1. **Signer interface, `SIGNERS` map and `GITHUB_HOSTS` schema** as an
@@ -217,15 +237,33 @@ consumption.
    (b) pass the PEM to githubkit and forgo remote signing in some
    deployments.
 4. **Startup checks and readiness via the wrapping lifespan** (signer
-   self-test against `GET /app`, issuer validation, schema gate, signer
-   health in readiness). Trade-off: the api refuses to start on a bad
-   signer or issuer, in exchange for no silent mis-configuration; a signer
-   outage later drops readiness. Lean: as written.
-5. **`GitHubHostConfig.oidc_id_claims`**, false by default on GHES and
+   self-test against `GET /app`, issuer validation, signer health in
+   readiness). Trade-off: mis-configuration is caught at startup instead of
+   at the first webhook, in exchange for a check that can fail for reasons
+   outside the process (a signer or GHES outage). Lean: as written, with
+   the failure policy of item 5.
+5. **Open design question: failure policy and bootstrap.** A host
+   registered through the manifest flow has no App id or key until an
+   admin completes the flow, yet the checks above need both, and a signer
+   or Vault outage, or one unreachable GHES host, would stop the whole api
+   and its webhook ingress for healthy hosts (although ingress needs no
+   signer: the outbox of ADR 0028 keeps events). Options: (a) **per-host
+   availability**: a host is `unregistered` (no App yet, serves only the
+   registration flow), `unavailable` (a check failed, its events wait in
+   the outbox) or `ready`; only invalid settings stop a process; the signer
+   is excluded from the api's readiness and reported per host; (b) a
+   separate bootstrap mode or command that registers a host before the
+   normal processes start, with fail-closed startup unchanged (simple,
+   but no first-run UI flow and an outage still stops everything); (c)
+   manual registration only, completed before the first start (fail-closed,
+   least code, loses the manifest flow's convenience). Lean: (a); it
+   resolves the bootstrap and the outage coupling in one model, at the
+   cost of per-host state and UI.
+6. **`GitHubHostConfig.oidc_id_claims`**, false by default on GHES and
    GHE.com until NG4 confirms the claims, so those hosts fall back to a
    secret credential or a manual step rather than to mutable name claims.
    Lean: as written.
-6. **Argo CD option A (reuse trustbridge's App key) only with the dev
+7. **Argo CD option A (reuse trustbridge's App key) only with the dev
    `file` signer**; production uses a separate read-only App (option B,
    ADR 0029 G-api item 6). Lean: B.
 
@@ -254,15 +292,9 @@ consumption.
 
 ## Open issues
 
-- Signer health gates the whole api: a signer or Vault outage, or one
-  unreachable GHES host at startup, makes the api unready or unable to
-  start, including webhook ingress for healthy hosts, although ingress
-  needs no signer (ADR 0028's outbox is meant to keep it independent).
-  The alternative is to degrade per host (that host's events wait in the
-  outbox, the signer is excluded from the api's readiness, startup checks
-  mark a host unavailable instead of refusing the process). This is
-  Decision 4's trade-off made sharper; it is the user's call (G-api), and
-  the text above keeps the current proposal.
+- Until G-api item 5 is decided, the failure policy of the startup checks
+  (process-wide refusal or per-host availability) and the first-run
+  bootstrap of a host with no App are unsettled.
 - Argo CD option A applies only to the `file` signer (a non-exportable
   signer has no key to hand over); the claim is narrowed to that and
   production needs the separate read-only App (option B).
