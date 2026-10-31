@@ -96,8 +96,8 @@ an entry no host uses is a warning; the `file` kind is refused when
 
 Implementations, by `kind`:
 
-- `file`: reads a PEM path (dev only; startup warns and refuses in
-  production mode unless explicitly allowed). Permissions are checked.
+- `file`: reads a PEM path (dev only; startup warns, and refuses in
+  production mode with no override). Permissions are checked.
 - `vault-transit`: signs with a Vault Transit RSA key
   (`POST /transit/sign/<key>/sha2-256` with `signature_algorithm=pkcs1v15`,
   `prehashed=false`, then converts Vault's base64 result). Auth via
@@ -210,7 +210,8 @@ NG3 must implement and test", cited as "0028 invariant n").
    registered for the host's `app_id`, and passes for the right key.
 2. The JWT never has `exp` more than 9 minutes ahead of now nor `iat`
    later than now, and the clock-skew allowance is covered by a test.
-3. Startup rejects a host whose discovery document `issuer` differs from
+3. Startup (a process refusal or a host marked unavailable, per G-api
+   item 5) rejects a host whose discovery document `issuer` differs from
    the configured `oidc_issuer`, a `SIGNERS` reference that names no
    entry, a `file` signer when `mode=production`, and a non-https URL
    outside the flagged dev mode.

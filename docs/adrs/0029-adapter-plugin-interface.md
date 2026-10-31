@@ -364,18 +364,21 @@ definition. Nexus stays out of the MVP.
 
 ## Invariants NG3 must implement and test
 
-Each is one testable sentence. Invariants A1-A9 concern the adapter
+Each is one testable sentence. Invariants A1-A11 concern the adapter
 contract (contract tests, NG5, run them against every adapter); the core
 side is in ADR 0028 ("Invariants NG3 must implement and test", numbers
 cited as "0028 invariant n").
 
 - **A1.** For an OIDC scope `ensure_credential` returns the `OidcTrust`
-  on every successful outcome, including `UNCHANGED`, and `github_outputs`
+  on every outcome except `NEEDS_MANUAL_ACTION` (which returns
+  `credential=None`), including `UNCHANGED`, and `github_outputs`
   is a pure function of `(scope, credential)`, so the core can re-derive
   and re-write the outputs after a crash (0028 invariant 21).
 - **A2.** Calling any state-changing method twice with the same `prior`,
   and once with `ref` emptied, leaves exactly one platform object and
-  returns `UNCHANGED` on the repeat.
+  returns `UNCHANGED` on the repeat, except that a repeated issuance of a
+  secret not yet delivered replaces the value under the same `name` and
+  reports `UPDATED`.
 - **A3.** When `ref` is empty the adapter finds an existing object by
   `name` before creating, and never creates a second object with that name.
 - **A4.** A platform-side credential name contains the full tenant id and
