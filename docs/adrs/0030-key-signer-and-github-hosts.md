@@ -112,8 +112,10 @@ signer exposes `key_id`, and the rollover is: add the new key, switch the
 signer config, delete the old key.
 
 The manifest flow returns the PEM to our callback. The callback hands it
-straight to the signer's `import` path (Vault Transit import, KMS import)
-or, for `file`, writes it with mode 0600, and never logs or returns it.
+straight to the signer's import operation, an operation of the signer
+implementation outside the `AppKeySigner` Protocol (which stays
+sign-only; for `vault-transit` the Transit key import, for the later KMS
+kinds their import APIs), or, for `file`, writes it with mode 0600, and never logs or returns it.
 For the webhook secret and client secret the same secret store is used.
 
 ### Hosts
@@ -126,8 +128,8 @@ class GitHubHostConfig:
     web_url: str               # https://github.com | https://HOST | https://SUB.ghe.com
     api_url: str               # https://api.github.com | https://HOST/api/v3 | https://api.SUB.ghe.com
     oidc_issuer: str           # configured, never derived (see Context)
-    registry_host: str         # ghcr.io | host-specific container registry host
-    oidc_id_claims: bool       # tokens carry repository_id / repository_owner_id; default True for github.com, False for ghes and ghe.com until NG4 confirms
+    registry_host: str         # ghcr.io | containers.HOST (GHES) | containers.SUB.ghe.com (GHE.com), as in ADR 0029
+    oidc_id_claims: bool       # tokens carry repository_id / repository_owner_id; no field default: the host loader sets it explicitly (kind-dependent default True for github.com, False for ghes and ghe.com until NG4 confirms)
     app_id: int
     signer: str                # key into SIGNERS (see "Named signers")
     webhook_secret_ref: str
