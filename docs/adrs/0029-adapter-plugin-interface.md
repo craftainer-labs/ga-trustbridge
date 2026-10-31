@@ -504,8 +504,13 @@ cited as "0028 invariant n").
 ## Open issues
 
 - The mechanism for passing tenant and connection data to adapter methods
-  (including `delete` and `health_check`) is settled in NG5.
-- The `api_version` compatibility rule (equality or a range, and how a
+  (including `delete` and `health_check`) is settled in NG5; the
+  `AdapterConfig` wording in the loading paragraph is provisional until
+  then, and `AdapterConfig`, `AdapterError`, `ProjectSpec` and
+  `ADAPTERS_ENABLED` are defined there.
+- Whether the core, a contract invariant or the adapter enforces "no
+  `rotate_begin` for an `OidcTrust` scope", and the rotation behaviour when
+  a scope switches between `OidcTrust` and `IssuedSecret`, is settled by NG4.- The `api_version` compatibility rule (equality or a range, and how a
   single integer expresses it) is settled by NG4.
 - The value store backend (Kubernetes Secret, Vault KV) and its interface
   are named here but specified in NG3; any backend must support create,

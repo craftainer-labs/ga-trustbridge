@@ -298,6 +298,9 @@ NG3 must implement and test", cited as "0028 invariant n").
 
 ## Open issues
 
+- The `oidc_id_claims` default is applied by the host loader, not a dataclass
+  default; behaviour for an unknown `kind` and a startup check that the
+  default was applied are NG3's.
 - How the manifest-flow callback reaches a signer's import operation (it
   is outside the sign-only `AppKeySigner` Protocol) and what happens for a
   signer without import are settled by NG4.

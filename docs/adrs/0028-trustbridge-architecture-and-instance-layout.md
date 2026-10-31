@@ -174,7 +174,7 @@ documented in the README. No local-manifest ignore entries are needed.
   no DDL rights. Both are supplied through the `POSTGRES_*` variables the
   template already reads.
 - Runtime processes gate on the schema through one **schema-compatibility
-  integer**: a single-row table (the "schema version table") that every
+  integer**: a single-row table (the schema-compatibility table) that every
   migration writes, compared with the integer the running code requires.
   They wait until the database's integer is at least the required one and
   stay compatible with a higher one (rollback), per NFR-0027's
@@ -491,6 +491,8 @@ labeled as a lean; the defaults named below are proposals too.
     (c) neither, documented. Lean: (a).
 
 ## Open issues
+
+- The schema-compatibility table's name and column are NG3's to choose.
 
 - ADR 0031 must settle RLS for `webhook_deliveries` (host-scoped, written
   before the tenant is known) and how the relay and reconciler read across
