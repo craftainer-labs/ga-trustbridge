@@ -1,7 +1,7 @@
 # Project metadata, dependencies, and every linter/type-checker/test-runner
 # config: see CLAUDE.md's "Configuration" section for why it all lives here.
 [project]
-name = "trustbridge"
+name = "template-fastapi"
 version = "0.1.0"
 description = "Self-hosted, OIDC-first GitHub App that provisions registry and GitOps access for repos"
 license = "Apache-2.0"
