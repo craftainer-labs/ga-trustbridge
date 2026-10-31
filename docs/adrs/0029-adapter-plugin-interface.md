@@ -55,13 +55,9 @@ jfrog = "trustbridge.adapters.jfrog:JFrogAdapter"
 ```
 
 The core loads `importlib.metadata.entry_points(group="trustbridge.adapters")`,
-instantiates each enabled adapter, and checks the adapter class's
-`api_version` attribute against the supported range (the module constant
-`API_VERSION` is the value the core supports). Per-tenant connection data
-(resolved from the secret store) is passed to each adapter method call, not
-held by the instance, so one stateless instance serves all tenants; the
-shapes of `AdapterConfig`, `AdapterError`, `ProjectSpec` and the
-`ADAPTERS_ENABLED` setting are specified by NG5. The five built-in adapters use
+instantiates each enabled adapter with an `AdapterConfig` (per-tenant
+connection data resolved from the secret store), and checks
+`API_VERSION` against the supported range. The five built-in adapters use
 the same mechanism. An adapter not listed in the deployment's
 `ADAPTERS_ENABLED` setting is never loaded.
 
@@ -89,7 +85,7 @@ class GitHubHost:
     kind: HostKind        # the core checks it against Capabilities before any call
     api_url: str          # https://api.github.com | https://HOST/api/v3 | https://api.SUB.ghe.com
     oidc_issuer: str      # per host, configured (ADR 0030)
-    oidc_id_claims: bool  # tokens from this host carry repository_id / repository_owner_id (ADR 0030)
+    oidc_id_claims: bool  # tokens from this host carry the id claims (repository_owner_id always, repository_id for repo scopes; ADR 0030)
     registry_host: str    # ghcr.io | containers.HOST | containers.SUB.ghe.com container registry host
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +178,7 @@ class Applied:
 class OidcTrust:
     issuer: str                       # the host's oidc_issuer
     audience: str | None
-    claims: Mapping[str, str]         # claim -> value the platform must require: repository_id, repository_owner_id (+ environment); never `sub`, never the name claims
+    claims: Mapping[str, str]         # claim -> value the platform must require: repository_owner_id always, repository_id when the scope has one, environment when the scope has one (A6); never `sub`, never the name claims
 
 @dataclass(frozen=True, slots=True)
 class IssuedSecret:
@@ -295,8 +291,11 @@ Decisions that shape the adapter contract:
   persists and delivers (invariants A8, and 0028 invariants 21 and 23).
 - **OIDC first.** `ensure_credential` returns `OidcTrust` when
   `capabilities().oidc` is true, the host's `kind` is in `oidc_hosts` and
-  `GitHubHost.oidc_id_claims` is true. Otherwise it falls back to
-  `IssuedSecret`. `NoCiCredential` means trustbridge provisions nothing for
+  `GitHubHost.oidc_id_claims` is true. Otherwise (including
+  `oidc_id_claims=False`, where no `OidcTrust` and so no `claims` exist) it
+  falls back to `IssuedSecret`. The core never calls `rotate_begin` for a
+  scope whose current credential is an `OidcTrust`; `rotation` describes
+  the `IssuedSecret` only. `NoCiCredential` means trustbridge provisions nothing for
   CI (Argo CD, GHCR). A `Change` with `NEEDS_MANUAL_ACTION` (and
   `credential=None`) means the adapter cannot finish via API (Docker Hub's
   OIDC connection): the core surfaces `manual_action` in the UI and as a
@@ -357,7 +356,7 @@ Decisions that shape the adapter contract:
 
 | Adapter | Provisions | `oidc` / `oidc_hosts` | `ci_credential` | `rotation` | Webhook auth | `github_hosts` | Privileged credential held |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| JFrog Artifactory | project, repos, OIDC identity mapping (`/access/api/v1/oidc`) | yes, all three kinds (Enterprise X/Enterprise+; GHES/GHE.com via `generic` provider with the host's issuer; mappings on `repository_id`/`repository_owner_id`, so GHES and GHE.com also need `oidc_id_claims`) | yes | `single` (applies to the fallback secret only; an `OidcTrust` has no secret to rotate) | `HMAC` or `STATIC_HEADER` depending on whether a webhook secret is set (JFrog is reported to sign with HMAC-SHA256 in `X-JFrog-Event-Auth`; not confirmed against current JFrog docs, NG5 fixtures settle it); trigger-only | all | admin access token |
+| JFrog Artifactory | project, repos, OIDC identity mapping (`/access/api/v1/oidc`) | yes, all three kinds (Enterprise X/Enterprise+; GHES/GHE.com via `generic` provider with the host's issuer; mappings on `repository_owner_id` and, for repo scopes, `repository_id`, so GHES and GHE.com also need `oidc_id_claims`) | yes | `single` (applies to the fallback secret only; an `OidcTrust` has no secret to rotate) | `HMAC` or `STATIC_HEADER` depending on whether a webhook secret is set (JFrog is reported to sign with HMAC-SHA256 in `X-JFrog-Event-Auth`; not confirmed against current JFrog docs, NG5 fixtures settle it); trigger-only | all | admin access token |
 | Harbor / MSR 4 (2.11-2.13) | project, robot account, webhook policy | no (no upstream OIDC federation); `oidc_hosts` empty | yes, robot token | `two_phase` (two robots) | `STATIC_HEADER` (Harbor webhook auth header); trigger-only | all | system or project admin robot |
 | Docker Hub | repository, org access token | partial: OIDC connection is UI-only and github.com-only, so `NEEDS_MANUAL_ACTION`; `oidc_hosts = {github.com}` | yes, OAT (fallback); `credential_limit=10` | `two_phase` (watch the 10-OAT Team limit) | `NONE` (Docker Hub webhooks are unauthenticated); trigger-only | all (OAT path) | **org-owner PAT** (see G-api) |
 | Argo CD | repository Secret using GitHub App credentials, AppProject, Application/ApplicationSet | n/a; `oidc_hosts` empty | **no** (`NoCiCredential`, pull-based) | none | `STATIC_HEADER` bearer, per tenant, constant-time compare; trigger-only | all | Kubernetes ServiceAccount with narrow RBAC; **raw App private key** held in the repo Secret (see G-api) |
@@ -435,7 +434,7 @@ cited as "0028 invariant n").
    orphans to the customer. Lean: as written.
 4. **Resumable two-phase rotation** (`rotate_begin`/`rotate_finish` by
    state; the core sets `retire_after` after delivery). Lean: as written.
-5. **OIDC trust on `repository_id` and `repository_owner_id`**, not the
+5. **OIDC trust on `repository_owner_id` (and `repository_id` for repo scopes)**, not the
    name claims NR5 named. Trade-off: durable across rename and transfer,
    but GHES and GHE.com availability of the two claims is unconfirmed, so
    `oidc_id_claims` defaults to false there and NG4 settles it; JFrog
@@ -504,6 +503,10 @@ cited as "0028 invariant n").
 
 ## Open issues
 
+- The mechanism for passing tenant and connection data to adapter methods
+  (including `delete` and `health_check`) is settled in NG5.
+- The `api_version` compatibility rule (equality or a range, and how a
+  single integer expresses it) is settled by NG4.
 - The value store backend (Kubernetes Secret, Vault KV) and its interface
   are named here but specified in NG3; any backend must support create,
   read and delete by operation id and encrypt at rest (also an open issue

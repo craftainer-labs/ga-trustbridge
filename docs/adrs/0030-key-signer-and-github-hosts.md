@@ -129,7 +129,7 @@ class GitHubHostConfig:
     api_url: str               # https://api.github.com | https://HOST/api/v3 | https://api.SUB.ghe.com
     oidc_issuer: str           # configured, never derived (see Context)
     registry_host: str         # ghcr.io | containers.HOST (GHES) | containers.SUB.ghe.com (GHE.com), as in ADR 0029
-    oidc_id_claims: bool       # tokens carry repository_id / repository_owner_id; no field default: the host loader sets it explicitly (kind-dependent default True for github.com, False for ghes and ghe.com until NG4 confirms)
+    oidc_id_claims: bool       # tokens carry the id claims (repository_owner_id always, repository_id for repo scopes; ADR 0029 A6); no field default: the host loader sets it explicitly (kind-dependent default True for github.com, False for ghes and ghe.com until NG4 confirms)
     app_id: int
     signer: str                # key into SIGNERS (see "Named signers")
     webhook_secret_ref: str
@@ -138,7 +138,10 @@ class GitHubHostConfig:
     def to_host(self) -> GitHubHost: ...   # ADR 0029's adapter-facing projection: name, kind, api_url, oidc_issuer, oidc_id_claims, registry_host
 ```
 
-Hosts come from a settings list (`GITHUB_HOSTS`, a file or env JSON).
+Hosts come from a settings list (`GITHUB_HOSTS`, a file or env JSON). The
+loader applies the `oidc_id_claims` default by `kind` (True for
+`github.com`, False for `ghes` and `ghe.com`) when an entry omits the key,
+and an explicit value always wins.
 `CredentialScope.github_host` and `Tenant.github_host` (ADR 0029) are
 `to_host()` of this config. The core matches `GitHubHost.kind` against
 `Capabilities.github_hosts` and `oidc_hosts` before calling an adapter, so
@@ -146,8 +149,8 @@ adapters receive `api_url`, `oidc_issuer` and `registry_host` and do not
 branch on the kind themselves. Multiple hosts can be active in one
 deployment; a tenant belongs to exactly one.
 
-**Why `oidc_id_claims`.** Trust is established on the `repository_id` and
-`repository_owner_id` claims (ADR 0029), which GitHub's OIDC reference
+**Why `oidc_id_claims`.** Trust is established on the `repository_owner_id`
+claim and, for repo scopes, `repository_id` (ADR 0029 A6), which GitHub's OIDC reference
 lists in its claims table and says do not change when a repository or
 owner is renamed. The reference states that the immutable-`sub` rollout
 excludes GitHub Enterprise Server, but its claims table has no GHES note
@@ -295,6 +298,9 @@ NG3 must implement and test", cited as "0028 invariant n").
 
 ## Open issues
 
+- How the manifest-flow callback reaches a signer's import operation (it
+  is outside the sign-only `AppKeySigner` Protocol) and what happens for a
+  signer without import are settled by NG4.
 - Until G-api item 5 is decided, the failure policy of the startup checks
   (process-wide refusal or per-host availability) and the first-run
   bootstrap of a host with no App are unsettled.

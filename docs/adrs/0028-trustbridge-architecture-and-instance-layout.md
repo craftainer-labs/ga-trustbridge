@@ -58,7 +58,7 @@ instance code can live under `src/` at all. Findings from this repo:
 5. **What the template does about migrations at startup.**
    `src/app/main.py:49-58` defines `_run_migrations`
    (`command.upgrade(Config("alembic.ini"), "head")`), and the template's
-   `lifespan` (`main.py:86-124`) calls it in the api process when
+   `lifespan` (`main.py:86-124`) calls it (lines 103-104) in the api process when
    `settings.run_migrations_on_startup` (default `true`,
    `src/app/config.py:110`) and `mode != "mock"`. `scripts/runner.sh`
    only starts uvicorn or granian (lines 9-30) and never migrates;
@@ -173,9 +173,12 @@ documented in the README. No local-manifest ignore entries are needed.
   runtime processes run as a non-owner application role subject to RLS with
   no DDL rights. Both are supplied through the `POSTGRES_*` variables the
   template already reads.
-- Runtime processes gate on the schema: they wait for a schema at or after
-  the revision the code requires and stay compatible with a newer schema
-  (rollback), per NFR-0027's expand/contract rule (invariants 12-13).
+- Runtime processes gate on the schema through one **schema-compatibility
+  integer**: a single-row table (the "schema version table") that every
+  migration writes, compared with the integer the running code requires.
+  They wait until the database's integer is at least the required one and
+  stay compatible with a higher one (rollback), per NFR-0027's
+  expand/contract rule (invariants 12-13).
 
 ### Migrations: one history, extended through a thin wrapper
 
@@ -389,8 +392,8 @@ are in ADR 0030.
 
 **Schema, startup and health**
 
-12. The runtime role can read the schema version table the gate depends
-    on, and a test running as that role passes the gate.
+12. The runtime role can read the schema-compatibility table (invariant
+    13) the gate depends on, and a test running as that role passes the gate.
 13. The schema gate compares the database's schema-compatibility integer
     (a single-row table written by every migration) with the integer the
     running code requires: it accepts a database whose integer is equal or
