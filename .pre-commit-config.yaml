@@ -1,0 +1,209 @@
+# Run with prek (https://prek.j178.dev/, a Rust, drop-in-compatible
+# reimplementation of pre-commit — see CLAUDE.md for why) or with the
+# classic `pre-commit` CLI; both read this exact file.
+#
+# Fast, basic checks run on every commit. Slower, extensive checks run on
+# push. Every hook also carries the "manual" stage, so
+# `prek run --hook-stage manual --all-files` runs everything at
+# once regardless of which git hook would normally trigger it.
+default_install_hook_types:
+  - pre-commit
+  - pre-push
+  - commit-msg
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        stages: [pre-commit, manual]
+      - id: end-of-file-fixer
+        stages: [pre-commit, manual]
+      - id: check-yaml
+        stages: [pre-commit, manual]
+      - id: check-toml
+        stages: [pre-commit, manual]
+      - id: check-json
+        stages: [pre-commit, manual]
+      - id: check-added-large-files
+        stages: [pre-commit, manual]
+      - id: check-merge-conflict
+        stages: [pre-commit, manual]
+      - id: mixed-line-ending
+        stages: [pre-commit, manual]
+      - id: debug-statements
+        stages: [pre-commit, manual]
+      - id: detect-private-key
+        stages: [pre-commit, manual]
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      # No "manual" stage here, unlike every other hook in this file: this
+      # one needs the actual commit-message file git passes at the
+      # commit-msg stage, which "prek run --all-files --hook-stage manual"
+      # has no equivalent for.
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+
+  # ruff, mypy, pytest and uv itself are already project dev-dependencies
+  # (see pyproject.toml) — running them via `uv run` keeps their pinned
+  # versions as the single source of truth instead of a second, separate
+  # pin per tool in this file.
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --force-exclude --fix --exit-non-zero-on-fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+        stages: [pre-commit, manual]
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+        stages: [pre-commit, manual]
+
+      - id: mypy
+        name: mypy --strict
+        entry: uv run mypy src tests
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push, manual]
+
+      - id: import-linter
+        name: import-linter (app layers)
+        # --cache-dir: import-linter has no pyproject.toml setting for this (unlike
+        # ruff/mypy/pytest's cache-dir/cache_dir), only a CLI flag -- see the
+        # cache-dir comment under [tool.ruff] in pyproject.toml for why it's kept
+        # outside the bind-mounted /workspace.
+        entry: uv run lint-imports --cache-dir /home/vscode/.cache/import_linter
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push, manual]
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push, manual]
+
+      - id: pytest-e2e
+        name: pytest (e2e)
+        entry: uv run pytest tests/e2e
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push, manual]
+
+      - id: uv-lock-check
+        name: uv lock --check
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push, manual]
+
+      - id: pip-audit
+        name: pip-audit (dependency vulnerabilities)
+        # --local: audit exactly what uv.lock resolves into this environment, not
+        # every version pip-audit could find on PyPI for a looser requirement.
+        entry: uv run pip-audit --local
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push, manual]
+
+      - id: template-sync-manifest
+        name: template-sync-manifest (every tracked path classified)
+        entry: python3 .github/scripts/template_sync_manifest.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, manual]
+
+      - id: scripts-tests
+        name: scripts-tests (.github/scripts unit tests, executable bits)
+        entry: env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts -p "test_*.py"
+        language: system
+        files: ^(\.github/(scripts|workflows)/|\.claude/hooks/|Makefile$)
+        pass_filenames: false
+        stages: [pre-commit, manual]
+
+      - id: devcontainer-lock
+        name: devcontainer-lock (lockfile matches devcontainer.json features)
+        entry: python3 .github/scripts/check_devcontainer_lock.py
+        language: system
+        files: ^\.devcontainer/devcontainer(-lock)?\.json$
+        pass_filenames: false
+        stages: [pre-commit, manual]
+
+  # template-docker's image-layer hooks (docs/TEMPLATE.md's "Image layer").
+  - repo: local
+    hooks:
+      # Official hadolint image, pinned (a regex manager in renovate.json
+      # tracks the tag); docker_image runs it with the repo mounted, so no
+      # host install is needed. Fails on warning and above, not info: the
+      # base-owned devcontainer Dockerfile trips info-level DL3066. There is no repo-wide
+      # DL3008 (pin apt package versions) ignore: where a pin would break rebuilds, add a
+      # per-line `# hadolint ignore=DL3008` with a reason.
+      - id: hadolint
+        name: hadolint (Dockerfile lint)
+        entry: hadolint/hadolint:v2.15.1 hadolint --failure-threshold warning
+        language: docker_image
+        files: ^(\.devcontainer/)?Dockerfile$
+        stages: [pre-commit, manual]
+
+      # The toolchain version ARGs must match between the devcontainer image
+      # and the runtime image. An instance appends its own ARG names (e.g.
+      # RUST_VERSION) to this entry.
+      - id: check-dockerfile-versions
+        name: check-dockerfile-versions (ARG defaults match across Dockerfiles)
+        entry: bash scripts/check-dockerfile-versions.sh DEBIAN_VERSION PYTHON_VERSION
+        language: system
+        # Also when the check itself, or this entry (the ARG list), changes.
+        files: ^((\.devcontainer/)?Dockerfile|scripts/check-dockerfile-versions\.sh|\.pre-commit-config\.yaml)$
+        pass_filenames: false
+        stages: [pre-commit, manual]
+
+      - id: lint-migrations
+        name: lint-migrations (Squawk over new or changed Alembic revisions)
+        # --changed-only: applied migrations are frozen (NFR-0019), so only
+        # revisions that differ from the merge base with main are linted,
+        # even under --all-files.
+        entry: bash scripts/lint-migrations.sh --changed-only
+        language: system
+        files: ^alembic/versions/.+\.py$
+        stages: [pre-commit, manual]
+
+      # Vulnerability scan of the built image tar for the current
+      # RELEASE_VERSION/RELEASE_ARCH in dist/ with Trivy (ADR 0001; the Trivy
+      # pin and why are in scripts/image-scan.sh). Manual stage only: it needs
+      # `make build` to have produced the tar and network for the
+      # vulnerability DB. Skips cleanly with no tar.
+      - id: image-scan
+        name: image-scan (Trivy, HIGH/CRITICAL with a fix)
+        entry: bash scripts/image-scan.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [manual]
+
+      # Offline tests of the scripts and Makefile logic above (repo
+      # derivation, version-check edge cases, smoke-test failure on a missing
+      # tar); needs no Docker.
+      - id: image-scripts-test
+        name: image-scripts-test (Makefile and scripts/ behaviour)
+        entry: bash scripts/test-image-scripts.sh
+        language: system
+        files: ^(Makefile|scripts/(check-dockerfile-versions|image-scan|image-smoke|skopeo|test-image-scripts)\.sh)$
+        pass_filenames: false
+        stages: [pre-commit, manual]

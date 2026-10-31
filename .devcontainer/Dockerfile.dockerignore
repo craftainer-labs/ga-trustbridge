@@ -1,0 +1,18 @@
+# Build context excludes for the devcontainer image (.devcontainer/Dockerfile).
+# BuildKit reads <Dockerfile>.dockerignore next to the Dockerfile in place of
+# the context root's .dockerignore, which stays free for an instance's own
+# runtime image.
+.git
+.github
+.devcontainer
+.secrets
+docs
+README.md
+CLAUDE.md
+# Dependency, build-output and coverage directories at any depth: an
+# instance's tests or tools may leave them in the working tree, and none
+# belongs in the devcontainer image's build context.
+**/node_modules
+**/dist
+**/coverage
+**/target

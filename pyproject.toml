@@ -1,0 +1,204 @@
+# Project metadata, dependencies, and every linter/type-checker/test-runner
+# config: see CLAUDE.md's "Configuration" section for why it all lives here.
+[project]
+name = "template-fastapi"
+version = "0.1.0"
+description = "Template repository for FastAPI projects"
+license = "GPL-3.0-only"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.53.0",
+    "pydantic-settings==2.15.0",
+    "pyjwt[crypto]==2.15.0",
+    "httpx==0.28.1",
+    "sqlalchemy[asyncio]==2.0.54",
+    "asyncpg==0.31.0",
+    "alembic==1.20.0",
+    "redis==8.1.0",
+    "boto3==1.43.98",
+    "debugpy==1.8.22",
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-exporter-otlp-proto-http==1.45.1",
+    "python-multipart==0.0.32",
+    "opentelemetry-instrumentation-logging==0.66b1",
+    "defusedxml==0.7.1",
+    "slowapi==0.1.10",
+    "aiomqtt==2.5.1",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "opentelemetry-instrumentation-sqlalchemy==0.66b1",
+    "granian==2.8.4",
+    "craftainer-crud[mqtt,xml]>=0.7.0,<0.8",
+    "craftainer-observability[otel,sqlalchemy,redis,s3,http,analytics]>=0.4.0,<0.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.8",
+    "mypy==2.3.1",
+    "prek==0.5.3",
+    "httpx2==2.13.0",
+    "playwright==1.63.0",
+    "pytest-playwright==0.9.0",
+    "selenium==4.49.0",
+    "pytest-cov==7.1.0",
+    "import-linter==2.15",
+    "boto3-stubs[s3]==1.43.98",
+    "types-defusedxml==0.7.0.20260504",
+    "pip-audit==2.10.1",
+    "locust==2.46.6",
+    "pytest-benchmark==5.3.0",
+    "pytest-codspeed==5.0.3",
+    "py-spy==0.4.2",
+    "pyinstrument==5.1.3",
+    "squawk-cli==2.70.0",
+    "craftainer-crud-sdk>=0.2.0,<0.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+# Kept outside the bind-mounted /workspace, same reasoning as .venv in the
+# Dockerfile: a cache dir inside the mount gets scanned file-by-file by
+# host antivirus/malware tools on Windows and is painfully slow to write to.
+cache-dir = "/home/vscode/.cache/ruff"
+
+[tool.ruff.lint]
+# Curated strict set: correctness + style + security (S) + pylint (PL) +
+# mandatory type annotations (ANN) + docstrings on public members (D1xx --
+# only the "missing docstring" checks, not D2xx/D4xx formatting conventions).
+# Every selected rule is a hard failure -- there is no "warn only" tier.
+# COM812/ISC001 are excluded because they conflict with the ruff formatter
+# (ruff's own documented recommendation).
+select = [
+    "E", "W", "F", "I", "UP", "B", "C4", "N", "S", "A", "SIM", "RUF", "PL", "ANN",
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",
+]
+ignore = ["COM812", "ISC001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is the point of a test, and comparing to literal expected values
+# is not a "magic number". Covers tests/ and tests/e2e/ alike.
+"tests/**" = ["S101", "PLR2004"]
+# test_hero_record_lifecycle_draft_through_revisions (and its XML e2e counterpart,
+# test_hero_xml_record_lifecycle_draft_through_revisions) is deliberately one long,
+# linear narrative (draft -> publish -> lock -> ... -> revisions, see the plan's
+# own "Tests" section) -- splitting it into several tests would hide that it's
+# one continuous record's lifecycle, which is the point of the test.
+"tests/unit/crud_1/heroes/test_heroes_v2.py" = ["PLR0915"]
+"tests/e2e/test_heroes_xml_e2e.py" = ["PLR0915"]
+
+[tool.importlinter]
+# Enforces src/app/README.md's strict import order between the app's own
+# subpackages (the published craftainer-* packages enforce their own in
+# their repos): a layer may import any layer listed after it, never one listed
+# before it (e.g. app.models must never import from app.controllers). Run via `uv run lint-imports` (wired into
+# .pre-commit-config.yaml's manual/pre-push stage).
+root_packages = ["app"]
+
+[[tool.importlinter.contracts]]
+name = "app layers"
+type = "layers"
+containers = ["app"]
+layers = [
+    "main",
+    "crud_1",
+    "controllers",
+    "http_headers",
+    "views",
+    "maintenance",
+    "models",
+    "oidc",
+    "problem_details",
+    "rate_limit",
+    "cache",
+    "health_checks",
+    "analytics",
+    "db",
+    "config",
+]
+
+[tool.mypy]
+python_version = "3.14"
+mypy_path = "src"
+strict = true
+warn_unreachable = true
+# See the cache-dir comment under [tool.ruff] above -- same reasoning.
+cache_dir = "/home/vscode/.cache/mypy"
+
+[tool.pytest.ini_options]
+# cache_dir: see the cache-dir comment under [tool.ruff] above -- same reasoning.
+cache_dir = "/home/vscode/.cache/pytest"
+addopts = "--strict-markers --strict-config -ra --ignore=tests/e2e --ignore=tests/bench --cov=app --cov-report=term-missing"
+# Lets an `async def test_...` run without a per-test @pytest.mark.asyncio marker --
+# needed once tests exercise app.interfaces/app.repositories/health directly (not just
+# through TestClient, which stays sync regardless of this setting).
+asyncio_mode = "auto"
+# app.models.base's engine/session factory are process-wide singletons (like
+# get_settings()), matching how the app itself runs in a single event loop. A
+# per-test event loop (pytest-asyncio's default) would hand asyncpg connections
+# from one loop to another between tests, which asyncpg rejects outright --
+# "another operation is in progress". One session-scoped loop avoids that.
+asyncio_default_fixture_loop_scope = "session"
+filterwarnings = [
+    "error",
+    # starlette 1.6.0's testclient module still references the anyio.abc.BlockingPortal
+    # alias that anyio 4.15.0 deprecated in favor of anyio.from_thread.BlockingPortal --
+    # a starlette bug, not ours to fix here.
+    "ignore:The anyio\\.abc\\.BlockingPortal alias is deprecated.*:DeprecationWarning:starlette\\.testclient",
+    # slowapi 0.1.10 (latest as of this writing) still calls the stdlib's own
+    # deprecated asyncio.iscoroutinefunction instead of inspect.iscoroutinefunction --
+    # a slowapi bug, not ours to fix here.
+    "ignore:'asyncio\\.iscoroutinefunction' is deprecated.*:DeprecationWarning:slowapi\\.extension",
+]
+
+[tool.coverage.run]
+# relative_files/parallel: tests/e2e's app process runs as a subprocess (see
+# tests/e2e/conftest.py and tests/e2e/sitecustomize.py), writing its own
+# parallel data file that pytest-cov combines with this process's at the end
+# of the run -- both must agree on relative paths to combine correctly.
+#
+# sigterm: without this, uvicorn's own SIGTERM handler (installed after
+# coverage.process_startup() runs) restores and re-raises through whatever
+# handler predates it -- Python's default, since coverage doesn't install
+# one unless asked -- which kills that process before its atexit-based save
+# ever runs. This makes coverage install a SIGTERM handler of its own, which
+# saves data first and is what ends up back in place by the time uvicorn
+# re-raises the signal it caught (tests/e2e/conftest.py stops that process
+# with SIGTERM).
+source = ["app"]
+branch = true
+parallel = true
+relative_files = true
+sigterm = true
+# data_file: see the cache-dir comment under [tool.ruff] above -- same
+# reasoning. Both the main pytest process and the tests/e2e subprocess resolve
+# this same absolute path from this file, so parallel data files still combine
+# correctly despite living outside the bind-mounted /workspace.
+data_file = "/home/vscode/.cache/coverage/.coverage"
+# app/maintenance.py is invoked externally (`python -m app.maintenance`), never
+# imported by the running app or by any tests/e2e journey against it -- see its
+# own module docstring. tests/integration/test_maintenance.py still imports and
+# calls it directly, so it's genuinely tested; omitting it here just means
+# neither coverage gate requires its lines to show up as executed by that
+# particular run.
+omit = ["*/app/maintenance.py"]
+
+[tool.coverage.report]
+# Single source of truth for the coverage gate: both the plain `pytest` run
+# (tests/unit + tests/integration) and the explicit `pytest tests/e2e` run
+# enforce this same threshold -- see CLAUDE.md's "Three test suites" section.
+fail_under = 100
+show_missing = true

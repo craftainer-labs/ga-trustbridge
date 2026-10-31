@@ -1,0 +1,66 @@
+# template-fastapi's instance-owned additions to template-base's
+# compose.yml (whose dev service is named `myapp`). Merged over it by
+# devcontainer.json's dockerComposeFile list.
+include:
+  - ./stack/postgres/compose.yml
+  - ./stack/s3/compose.yml
+  - ./stack/keycloak/compose.yml
+  - ./stack/redis/compose.yml
+  - ./stack/mqtt/compose.yml
+  - ./stack/selenium/compose.yml
+  - ./stack/umami/compose.yml
+
+# env_file below pulls in each stack service's own credentials (see
+# stack/README.md's "Configuration" section); src/app/config.py assembles
+# DATABASE_URL and the S3 access/secret key fields from the raw
+# postgres/rustfs values at runtime, and OIDC_* arrive from keycloak.env
+# already fully composed.
+services:
+  myapp:
+    env_file:
+      - ./stack/postgres/postgres.env
+      - ./stack/s3/s3.env
+      - ./stack/keycloak/keycloak.env
+      - ./stack/umami/umami.env
+    # Waits for every stack service's own healthcheck (see each fragment's
+    # compose.yml) so `docker compose up` -- and therefore devcontainers/ci's
+    # runCmd, and postCreateCommand -- never starts app, prek, or pytest
+    # before the service they'd talk to is actually ready.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      selenium:
+        condition: service_healthy
+    environment:
+      # Fixed in-network hostnames/ports, not credentials, so they're
+      # literal here rather than pulled from a stack env file. MODE is a
+      # behavior toggle, not a credential either -- see src/app/config.py
+      # and src/app/README.md's "MODE" section; the devcontainer always
+      # runs dev (debugger enabled) unless overridden.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      S3_ENDPOINT_URL: http://s3:9000
+      REDIS_URL: redis://redis:6379/0
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      MODE: dev
+      # OTel service.name, read by craftainer_observability.logs.
+      OTEL_SERVICE_NAME: template-fastapi
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      UV_LINK_MODE: copy
+      # Keep the virtualenv outside the bind-mounted /workspace: on Windows
+      # hosts a .venv inside the mount gets scanned file-by-file by
+      # antivirus/malware tools and is painfully slow to install into.
+      UV_PROJECT_ENVIRONMENT: /home/vscode/.venv
+      # The symlink template-base's develop.sh creates for its pinned
+      # uv-installed CPython, so no second copy of the version exists.
+      UV_PYTHON: /usr/local/bin/python3

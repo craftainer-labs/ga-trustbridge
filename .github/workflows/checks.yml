@@ -1,0 +1,88 @@
+# Lint/type-check/test gate: runs every prek hook, fast and extensive,
+# inside the same devcontainer used for local development.
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prek:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            # renovate: datasource=github-runners depName=ubuntu
+            runner: ${{ vars.CI_RUNNER_AMD64 || 'ubuntu-24.04' }}
+          - arch: arm64
+            # renovate: datasource=github-runners depName=ubuntu
+            runner: ${{ vars.CI_RUNNER_ARM64 || 'ubuntu-24.04-arm' }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      # Unique per run so concurrent runs (two PRs, or a re-run) never
+      # collide on container/volume/network names, and so the teardown
+      # step below tears down exactly this run's stack and nothing else.
+      - name: Set compose project name
+        run: echo "COMPOSE_PROJECT_NAME=ci-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      # Warms the Buildx layer cache for the devcontainer image (the
+      # `develop` stage below) before devcontainers/ci builds it via
+      # `docker compose build`. Same context/target/Dockerfile as the dev
+      # service in .devcontainer/compose.yml, so cache keys line up; no
+      # push/load since this step only needs to populate the cache, not
+      # produce a usable image.
+      - name: Warm devcontainer image build cache
+        uses: docker/build-push-action@v7.4.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          context: .
+          file: .devcontainer/Dockerfile
+          target: develop
+          # Same optional secret compose.yml passes (see the Dockerfile).
+          secret-envs: github_token=GITHUB_TOKEN
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      # --hook-stage manual runs every hook (both the fast pre-commit-stage
+      # ones and the extensive pre-push-stage ones) in one pass, inside the
+      # devcontainer -- the same environment (uv, prek, playwright, ...) a
+      # contributor develops in, not a hand-rolled CI-only equivalent.
+      - name: Run all hooks in the devcontainer
+        uses: devcontainers/ci@v0.3
+        env:
+          # Build-time only: compose.yml's `github_token` build secret, so
+          # the image build's GitHub downloads are authenticated and not
+          # rate-limited (HTTP 429). Not forwarded into the container.
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          runCmd: prek run --all-files --hook-stage manual
+
+      # devcontainers/ci starts the full compose stack (see
+      # .devcontainer/devcontainer.json's dockerComposeFile) but never
+      # tears it down -- that's fine for a throwaway CI VM, but this repo
+      # wants a clean, explicit teardown regardless. Selecting the stack
+      # by project name alone (no -f list) also covers any services an
+      # instance adds through compose.instance.yml's `include:`.
+      - name: Tear down devcontainer stack
+        if: always()
+        # COMPOSE_PROJECT_NAME is unset when an earlier step failed before
+        # "Set compose project name"; then no stack was started either.
+        run: |
+          if [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
+            echo "No compose project name set; nothing to tear down."
+            exit 0
+          fi
+          docker compose -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans

@@ -1,0 +1,255 @@
+{
+  "realm": "template-fastapi",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "clients": [
+    {
+      "clientId": "api",
+      "name": "template-fastapi API",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8000/docs/oauth2-redirect"
+      ],
+      "webOrigins": [
+        "http://localhost:8000"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "bff",
+      "name": "template BFF",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${BFF_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "redirectUris": [
+        "http://localhost:5173/bff/callback",
+        "http://localhost:8081/bff/callback"
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/##http://localhost:8081/",
+        "backchannel.logout.url": "http://host.docker.internal:8787/bff/backchannel-logout",
+        "backchannel.logout.session.required": "true",
+        "backchannel.logout.revoke.offline.tokens": "false",
+        "use.refresh.tokens": "true",
+        "standard.token.exchange.enabled": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "test-cli",
+      "name": "Dev-only password-grant client for tests",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "roles": {
+    "client": {
+      "api": [
+        {
+          "name": "viewer",
+          "description": "Read-only access to Hero routes"
+        },
+        {
+          "name": "editor",
+          "description": "Read/create/update access to Hero routes"
+        },
+        {
+          "name": "maintainer",
+          "description": "Full CRUD access to Hero routes, including delete"
+        },
+        {
+          "name": "security",
+          "description": "Access to /audit"
+        },
+        {
+          "name": "detective",
+          "description": "Read-only access to Hero routes, plus /audit"
+        }
+      ]
+    }
+  },
+  "users": [
+    {
+      "username": "viewer",
+      "enabled": true,
+      "email": "vera.vance@blub.com",
+      "emailVerified": true,
+      "firstName": "Vera",
+      "lastName": "Vance",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "viewer",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "viewer"
+        ]
+      }
+    },
+    {
+      "username": "editor",
+      "enabled": true,
+      "email": "edgar.ellis@blub.com",
+      "emailVerified": true,
+      "firstName": "Edgar",
+      "lastName": "Ellis",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "editor",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "editor"
+        ]
+      }
+    },
+    {
+      "username": "security",
+      "enabled": true,
+      "email": "sam.sentinel@blub.com",
+      "emailVerified": true,
+      "firstName": "Sam",
+      "lastName": "Sentinel",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "security",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "security"
+        ]
+      }
+    },
+    {
+      "username": "maintainer",
+      "enabled": true,
+      "email": "mia.mason@blub.com",
+      "emailVerified": true,
+      "firstName": "Mia",
+      "lastName": "Mason",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "maintainer",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "maintainer"
+        ]
+      }
+    },
+    {
+      "username": "detective",
+      "enabled": true,
+      "email": "dana.drake@blub.com",
+      "emailVerified": true,
+      "firstName": "Dana",
+      "lastName": "Drake",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "detective",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "detective"
+        ]
+      }
+    }
+  ]
+}

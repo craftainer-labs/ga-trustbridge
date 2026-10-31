@@ -1,0 +1,265 @@
+# Load tests: build the runner stage from the root compose.yml, layered with
+# compose.perf.yml (api capped at 1 vCPU / 2 GB, SYS_PTRACE, bulk rate limit
+# raised -- the limit is per client IP and Locust shares one), and run
+# tests/perf/locustfile.py against it. Two jobs:
+#   - fixed: the NFR-0024 absolute p95 ceilings (the locustfile's quitting hook)
+#     plus a relative check of the aggregate p95 against the latest successful
+#     main run's summary artifact. Weekly, on workflow_dispatch, and on pull
+#     requests labelled `perf`.
+#   - capacity: report only, workflow_dispatch with mode=capacity. Steps users
+#     up, samples api CPU/RSS and records a py-spy profile during a hold.
+# Not triggered per-push/PR like checks.yml/smoke.yml -- see
+# docs/adrs/0010-locust-for-load-testing.md for why.
+name: Perf
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "fixed = regression check; capacity = step-load search (report only)"
+        type: choice
+        options: [fixed, capacity]
+        default: fixed
+      capacity_max_users:
+        description: "Capacity mode: last step's users"
+        default: "100"
+      capacity_step_duration:
+        description: "Capacity mode: seconds per step (at least 100 so the profile fits in a hold)"
+        default: "120"
+  schedule:
+    # Weekly, off-peak -- see docs/adrs/0010-locust-for-load-testing.md.
+    - cron: "17 3 * * 1"
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+env:
+  # The fixed job fails when the aggregate p95 is more than this many percent
+  # worse than the latest successful main run's.
+  PERF_MAX_P95_REGRESSION_PERCENT: "20"
+  # Every `docker compose` call below layers the perf override.
+  COMPOSE_FILE: compose.yml:compose.perf.yml
+
+permissions:
+  contents: read
+
+jobs:
+  fixed:
+    # Scheduled runs and dispatches with mode=fixed always run; a pull request
+    # runs only with the `perf` label (and a `labeled` event only for that one).
+    if: >-
+      inputs.mode != 'capacity'
+      && (github.event_name != 'pull_request'
+      || (contains(github.event.pull_request.labels.*.name, 'perf')
+      && (github.event.action != 'labeled' || github.event.label.name == 'perf')))
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      # Only to download the baseline artifact from the latest main run.
+      actions: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+          # Same minor as the devcontainer's CPython (.devcontainer/Dockerfile's
+          # PYTHON_VERSION); otherwise uv picks the runner's newest Python that
+          # satisfies requires-python.
+          python-version: "3.14"
+
+      # Install Python and the locked dependencies now, while the default CA
+      # bundle is in effect: the Locust step later sets SSL_CERT_FILE to the
+      # stack's self-signed Keycloak cert, and uv honours it, so any download
+      # from there on (Python, wheels) would fail TLS verification.
+      - name: Install Python and dependencies
+        run: uv sync --locked --all-extras
+
+      # Unique per run so concurrent runs never collide on
+      # container/volume/network names -- same reasoning as checks.yml/smoke.yml.
+      - name: Set compose project name
+        run: echo "COMPOSE_PROJECT_NAME=perf-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+
+      - name: Build and start stack
+        run: docker compose up -d --build --wait --wait-timeout 300
+
+      # locustfile.py logs in with a real password grant against Keycloak's
+      # token endpoint, from this runner host rather than from inside the
+      # compose network -- it needs the same "keycloak" DNS name and trusted
+      # cert the api container already has (see compose.yml's keycloak
+      # ports: comment for why 127.0.0.1 + this exact hostname).
+      - name: Point this runner at the stack's Keycloak
+        run: |
+          echo "127.0.0.1 keycloak" | sudo tee -a /etc/hosts
+          docker compose cp smoke-tls-cert:/tls/keycloak.crt keycloak.crt
+
+      # stats.py stops itself after --duration (shorter than the run) so its
+      # file exists when Locust quits and --summary-json embeds it as
+      # `api_resources`. --processes -1 keeps the generator off the critical
+      # path; the summary's generator_cpu_percent says if it was not enough.
+      - name: Run Locust load test
+        env:
+          OIDC_TOKEN_URL: "https://keycloak:8443/realms/template-fastapi/protocol/openid-connect/token"
+          SSL_CERT_FILE: ${{ github.workspace }}/keycloak.crt
+        run: |
+          mkdir -p tests/perf/.results
+          api="$(docker compose ps -q api)"
+          uv run python tests/perf/stats.py --container "$api" --interval 2 \
+            --duration 100 --out tests/perf/.results/stats.json &
+          stats_pid=$!
+          status=0
+          uv run locust -f tests/perf/locustfile.py --headless --processes -1 \
+            --host http://localhost:8000 \
+            --users 20 --spawn-rate 5 --run-time 2m \
+            --csv tests/perf/.results/run --html tests/perf/.results/run.html \
+            --stats-json tests/perf/.results/stats.json \
+            --summary-json tests/perf/.results/summary.json \
+            --exit-code-on-error 1 || status=$?
+          wait "$stats_pid" || true
+          exit "$status"
+
+      # Latest successful non-PR run of this workflow on main that uploaded a
+      # perf-summary artifact. `gh run download` with the job's read-only
+      # GITHUB_TOKEN (actions: read) is all this needs; none yet is fine.
+      - name: Download baseline summary from main
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p tests/perf/.results/baseline
+          for id in $(gh run list --workflow perf.yml --branch main --status success --limit 20 \
+              --json databaseId,event --jq '.[] | select(.event != "pull_request") | .databaseId'); do
+            if gh run download "$id" --name perf-summary --dir tests/perf/.results/baseline; then
+              echo "Baseline: run $id"
+              break
+            fi
+          done
+
+      - name: Compare p95 against the main baseline
+        if: ${{ !cancelled() && hashFiles('tests/perf/.results/summary.json') != '' }}
+        run: |
+          uv run python tests/perf/compare_summary.py \
+            --baseline tests/perf/.results/baseline/summary.json \
+            --current tests/perf/.results/summary.json \
+            --max-regression-percent "$PERF_MAX_P95_REGRESSION_PERCENT" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      # Small and separate so later runs can download just this as a baseline.
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: perf-summary
+          path: tests/perf/.results/summary.json
+          if-no-files-found: ignore
+
+      - name: Upload Locust report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: locust-report
+          path: |
+            tests/perf/.results/
+            !tests/perf/.results/baseline/
+          if-no-files-found: ignore
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
+  capacity:
+    # Report only: no gate, nothing compares against it.
+    if: inputs.mode == 'capacity'
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+          # Same minor as the devcontainer's CPython (.devcontainer/Dockerfile's
+          # PYTHON_VERSION); otherwise uv picks the runner's newest Python that
+          # satisfies requires-python.
+          python-version: "3.14"
+
+      # Install Python and the locked dependencies now, while the default CA
+      # bundle is in effect: the Locust step later sets SSL_CERT_FILE to the
+      # stack's self-signed Keycloak cert, and uv honours it, so any download
+      # from there on (Python, wheels) would fail TLS verification.
+      - name: Install Python and dependencies
+        run: uv sync --locked --all-extras
+
+      - name: Set compose project name
+        run: echo "COMPOSE_PROJECT_NAME=perf-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+
+      - name: Build and start stack
+        run: docker compose up -d --build --wait --wait-timeout 300
+
+      - name: Point this runner at the stack's Keycloak
+        run: |
+          echo "127.0.0.1 keycloak" | sudo tee -a /etc/hosts
+          docker compose cp smoke-tls-cert:/tls/keycloak.crt keycloak.crt
+
+      # Locust quits right after the first failing step, at a time unknown in
+      # advance, so stats.py runs until we stop it after Locust (its file is
+      # therefore uploaded on its own rather than embedded in the summary).
+      # profile.sh runs once step 1 plus the next step's warm-up have passed,
+      # which is inside step 2's hold; it is skipped with a warning if Locust
+      # has already quit (the first step failed).
+      - name: Run Locust capacity search
+        env:
+          OIDC_TOKEN_URL: "https://keycloak:8443/realms/template-fastapi/protocol/openid-connect/token"
+          SSL_CERT_FILE: ${{ github.workspace }}/keycloak.crt
+          MAX_USERS: ${{ inputs.capacity_max_users }}
+          STEP_DURATION: ${{ inputs.capacity_step_duration }}
+        run: |
+          mkdir -p tests/perf/.results
+          warmup=30
+          api="$(docker compose ps -q api)"
+          uv run python tests/perf/stats.py --container "$api" --interval 2 \
+            --out tests/perf/.results/stats.json &
+          stats_pid=$!
+          uv run locust -f tests/perf/locustfile.py --headless --processes -1 \
+            --host http://localhost:8000 --perf-mode capacity \
+            --capacity-step-users 10 --capacity-step-duration "$STEP_DURATION" \
+            --capacity-warmup "$warmup" --capacity-max-users "$MAX_USERS" \
+            --csv tests/perf/.results/cap --html tests/perf/.results/cap.html \
+            --summary-json tests/perf/.results/cap.json &
+          locust_pid=$!
+          sleep "$((STEP_DURATION + warmup + 10))"
+          if kill -0 "$locust_pid" 2>/dev/null; then
+            tests/perf/profile.sh -d 60 -c "$api" || echo "::warning::profile.sh failed"
+          else
+            echo "::warning::Locust already finished; no profile recorded"
+          fi
+          status=0
+          wait "$locust_pid" || status=$?
+          kill -INT "$stats_pid" 2>/dev/null || true
+          wait "$stats_pid" || true
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::Locust exited $status (not even the first step passed); report only"
+          fi
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Upload capacity results
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: capacity-report
+          path: tests/perf/.results/
+          if-no-files-found: ignore
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans

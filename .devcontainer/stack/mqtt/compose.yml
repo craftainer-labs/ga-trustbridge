@@ -1,0 +1,38 @@
+# Stack service: Eclipse Mosquitto (MQTT broker), reachable only from other
+# containers on the compose-generated default network (see ../README.md).
+# Backs app.interfaces.base.MQTTEventSink/MQTTEventSource -- see
+# docs/adrs/0015-mqtt-for-crud-events.md. mosquitto.conf resolves relative to
+# this file's own directory (see ../README.md's "Devcontainer stack pattern").
+services:
+  mqtt:
+    image: eclipse-mosquitto:2.0.22
+    restart: unless-stopped
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
+    # The image ships mosquitto_pub/mosquitto_sub but no curl/wget (see
+    # ../README.md's "Devcontainer stack pattern") -- a real publish against
+    # the broker itself is both available and a stronger check than a bare
+    # TCP probe.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mosquitto_pub",
+          "-h",
+          "localhost",
+          "-t",
+          "healthcheck",
+          "-m",
+          "ping",
+          "-q",
+          "1",
+          "-i",
+          "healthcheck",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mqtt-data:

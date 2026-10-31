@@ -1,0 +1,49 @@
+{
+  "mcpServers": {
+    "clear-thought": {
+      "command": "npx",
+      "args": ["-y", "@waldzellai/clear-thought-onepointfive@0.2.1"]
+    },
+    "postgres": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "postgres-mcp==0.3.0",
+        "--with",
+        "mcp==1.9.4",
+        "postgres-mcp",
+        "--access-mode=unrestricted"
+      ],
+      "env": {
+        "DATABASE_URI": "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+      }
+    },
+    "redis": {
+      "command": "uvx",
+      "args": ["--from", "redis-mcp-server==0.5.1", "redis-mcp-server", "--url", "${REDIS_URL}"]
+    },
+    "s3-mcp": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/JakePeralta7/s3-mcp@b6a2cb856d979b0fa1f8d694c5226388aa82c2d0",
+        "s3-mcp"
+      ],
+      "env": {
+        "S3_ENDPOINT_URL": "${S3_ENDPOINT_URL}",
+        "AWS_ACCESS_KEY_ID": "${RUSTFS_ACCESS_KEY}",
+        "AWS_SECRET_ACCESS_KEY": "${RUSTFS_SECRET_KEY}"
+      }
+    },
+    "playwright": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--extra",
+        "dev",
+        "python",
+        ".claude/mcp/playwright_selenium_bridge.py"
+      ]
+    }
+  }
+}

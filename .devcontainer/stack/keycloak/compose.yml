@@ -1,0 +1,44 @@
+# Stack service: Keycloak (OIDC provider). No ports: mapping here —
+# host-browser access to its login/admin UI goes through devcontainer.json's
+# forwardPorts, not through compose port publishing (see ../README.md
+# and the root README's "Don't"). Relative paths below (the env_file and the
+# bind-mount) resolve relative to this file's own directory, not
+# .devcontainer/ — see ../README.md's "Devcontainer stack pattern" section.
+# KEYCLOAK_ADMIN/KEYCLOAK_ADMIN_PASSWORD come from keycloak.env, next to
+# this file.
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.4
+    restart: unless-stopped
+    command: start-dev --import-realm
+    env_file:
+      - ./keycloak.env
+    # Hostname v2 (https://www.keycloak.org/server/hostname): KC_HOSTNAME is
+    # the full public URL, so every token's `iss` is
+    # http://localhost:8080/realms/<realm> whichever host it was minted
+    # through. BACKCHANNEL_DYNAMIC lets server-to-server endpoints
+    # (token, JWKS, introspection) keep working via http://keycloak:8080.
+    # Set here, not in keycloak.env, which myapp also loads.
+    environment:
+      KC_HOSTNAME: http://localhost:8080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+    # Lets Keycloak reach a BFF running on the host/forwarded port (the
+    # realm's back-channel logout URL uses host.docker.internal:8787).
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    # No curl/wget in this image (see stack/README.md) -- bash's /dev/tcp
+    # is the only HTTP-capable tool available, so it speaks a bare HTTP/1.1
+    # request over it by hand. Hits the template-fastapi realm's own discovery
+    # endpoint (not /health, which needs KC_HEALTH_ENABLED and a second
+    # management port) so this also confirms --import-realm has finished,
+    # not just that the JVM has booted.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf ''GET /realms/template-fastapi/.well-known/openid-configuration HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'' >&3 && head -1 <&3 | grep -q ''200 OK'''
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s

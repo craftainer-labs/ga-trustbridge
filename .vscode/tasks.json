@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Ruff: check & format",
+      "type": "shell",
+      "command": "uv run ruff check --fix . && uv run ruff format .",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Mypy: type check",
+      "type": "shell",
+      "command": "uv run mypy src tests",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Pytest: unit + integration",
+      "type": "shell",
+      "command": "uv run pytest",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Prek: run all hooks (manual stage)",
+      "type": "shell",
+      "command": "prek run --all-files --hook-stage manual",
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}

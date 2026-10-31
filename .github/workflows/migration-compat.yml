@@ -1,0 +1,147 @@
+# N-1 migration compatibility (NFR-0027): migrates a fresh database to the
+# PR's head, then runs the latest release's integration and e2e suites
+# against it with RUN_MIGRATIONS_ON_STARTUP=false, proving the previous
+# release still works on the new schema (the state of a canary rollout).
+# Also lints the PR's new or changed revisions with Squawk.
+#
+# The N-1 half reports and skips (job stays green) until the latest release
+# tag's src/app/config.py mentions RUN_MIGRATIONS_ON_STARTUP: older code
+# would try to migrate a database whose revision it doesn't know.
+name: Migration compat
+
+on:
+  pull_request:
+    paths:
+      - alembic/versions/**
+      - src/app/models/**
+      # craftainer-crud's models (revision table, base columns) arrive as a
+      # version bump in the lockfile now that the package is published.
+      - uv.lock
+      - scripts/lint-migrations.sh
+      - .github/workflows/migration-compat.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migration-compat:
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    steps:
+      # Full history and all tags: the N-1 worktree needs the release tag,
+      # and the lint step diffs against the PR's base commit.
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Latest stable release tag (vMAJOR.MINOR.PATCH, no prerelease), and
+      # whether its config already knows RUN_MIGRATIONS_ON_STARTUP.
+      - name: Find the N-1 release
+        id: n1
+        run: |
+          tag="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+          if [ -z "$tag" ]; then
+            reason="no stable release tag exists yet"
+          elif ! git show "${tag}:src/app/config.py" | grep -qi 'run_migrations_on_startup'; then
+            reason="latest release ${tag} predates RUN_MIGRATIONS_ON_STARTUP (src/app/config.py has no such setting), so it would migrate a database it doesn't know"
+          else
+            reason=""
+          fi
+          if [ -n "$reason" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=N-1 check skipped::${reason}"
+            echo "N-1 compatibility check skipped: ${reason}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+            git worktree add --detach .migration-compat/n-1 "$tag"
+          fi
+
+      # New or changed revisions, handed to scripts/lint-migrations.sh.
+      - name: List changed revisions
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mkdir -p .migration-compat
+          : > .migration-compat/changed.txt
+          if [ -n "$BASE_SHA" ]; then
+            git diff --name-only --diff-filter=AMR "$BASE_SHA" HEAD -- 'alembic/versions/*.py' \
+              > .migration-compat/changed.txt
+          fi
+
+      # What runs inside the devcontainer; written here so runCmd stays a
+      # single command regardless of the action's shell.
+      - name: Write the in-container script
+        run: |
+          cat > .migration-compat/run.sh <<'SCRIPT'
+          set -euxo pipefail
+
+          # Squawk over the PR's new or changed revisions (offline-rendered).
+          mapfile -t revisions < .migration-compat/changed.txt
+          if [ "${#revisions[@]}" -gt 0 ]; then
+            bash scripts/lint-migrations.sh "${revisions[@]}"
+          fi
+
+          if [ "${N1_SKIP}" = "true" ]; then
+            echo "N-1 check skipped"
+            exit 0
+          fi
+
+          # A fresh database, so no earlier run or post-create migration
+          # leaks into the result.
+          export PGPASSWORD="${POSTGRES_PASSWORD}"
+          psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d postgres \
+            -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS migration_compat" \
+            -c "CREATE DATABASE migration_compat"
+          export POSTGRES_DB=migration_compat
+
+          # The PR's head schema, using the PR's code.
+          uv run alembic upgrade head
+
+          # The previous release's code and its own locked dependencies,
+          # against that schema. --no-cov: its coverage gate expects the
+          # unit tests too.
+          cd .migration-compat/n-1
+          export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
+          export RUN_MIGRATIONS_ON_STARTUP=false
+          uv sync --locked --all-extras
+          # Keep the cacheprovider plugin loaded: the N-1 pyproject may set
+          # cache_dir, which pytest rejects as an unknown ini option once
+          # the plugin is disabled. Point the cache outside the tree instead.
+          uv run pytest tests/integration tests/e2e --no-cov -o cache_dir=/tmp/pytest-n1
+          SCRIPT
+
+      - name: Set compose project name
+        run: echo "COMPOSE_PROJECT_NAME=migcompat-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      # Same cache scope as checks.yml's amd64 leg, so the devcontainer
+      # image build below is a cache hit.
+      - name: Warm devcontainer image build cache
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          file: .devcontainer/Dockerfile
+          target: develop
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+
+      - name: Lint revisions and run the N-1 suites in the devcontainer
+        uses: devcontainers/ci@v0.3
+        with:
+          runCmd: bash .migration-compat/run.sh
+          env: |
+            N1_SKIP=${{ steps.n1.outputs.skip }}
+
+      - name: Tear down devcontainer stack
+        if: always()
+        run: |
+          docker compose \
+            -p ${{ env.COMPOSE_PROJECT_NAME }} \
+            down --volumes --remove-orphans

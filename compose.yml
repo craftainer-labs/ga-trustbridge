@@ -1,0 +1,330 @@
+# Runner-image smoke-test stack: builds and runs the same `runner` stage
+# `release.yml` ships, against the stack's real backing services, so CI can
+# confirm /health/live and /health/ready before a release ships. Distinct
+# from .devcontainer/compose.yml (which runs the `develop` stage and is
+# never referenced by devcontainer.json) -- selenium is left out since
+# nothing here needs a browser driver.
+#
+# Unlike .devcontainer/compose.yml, this file leaves MODE at the runner
+# stage's own production default (Dockerfile) -- that's the whole point of
+# this smoke test -- which means it must also satisfy src/app/config.py's
+# production-only guardrails: postgres_password/s3_access_key/s3_secret_key
+# can't be left at the stack fragments' shared local-dev defaults,
+# oidc_issuer_url/s3_endpoint_url/redis_url must all be encrypted, and
+# postgres_sslmode must be require/verify-ca/verify-full. The
+# overrides below exist only to satisfy those guardrails; they're
+# smoke-test-only values, not real secrets, and never touch the shared
+# .devcontainer/stack fragments (whose local-dev defaults stay exactly
+# as-is for the devcontainer itself). postgres/redis/s3/keycloak all need
+# credential and/or TLS overrides below, and `include:` (unlike `extends:`)
+# deliberately errors on any field conflict with an included service
+# instead of merging -- so all four are extended per-service instead (see
+# each service below); nothing here is pulled in via include: anymore.
+
+x-smoke-postgres-password: &smoke_postgres_password smoke-only-postgres-pw
+x-smoke-s3-access-key: &smoke_s3_access_key smoke-only-access-key
+x-smoke-s3-secret-key: &smoke_s3_secret_key smoke-only-secret-key-000
+x-smoke-mqtt-user: &smoke_mqtt_user smoke-only-mqtt-user
+x-smoke-mqtt-password: &smoke_mqtt_password smoke-only-mqtt-pw
+
+services:
+  # One-shot: generates a single self-signed cert (with SANs for every
+  # in-network hostname that terminates TLS in this stack) so Keycloak,
+  # Redis, and S3 can each serve TLS to satisfy config.py's production
+  # guardrails, with the OIDC/S3/Redis health checks able to complete a
+  # TLS handshake against them. SANs must match the in-network hostnames
+  # ("keycloak"/"redis"/"s3") since that's what both each service's own
+  # TLS listener and the api container's client connections use. Also
+  # writes the same key pair under RustFS's required filenames
+  # (RUSTFS_TLS_PATH expects exactly rustfs_cert.pem/rustfs_key.pem).
+  smoke-tls-cert:
+    image: alpine/openssl:latest
+    entrypoint: ["sh", "-c"]
+    command:
+      # chmod: this container runs as root, but Keycloak's image runs as
+      # uid 1000 (see stack/keycloak/compose.yml) -- world-readable is fine
+      # for a self-signed, 1-day, CI-only cert with no real-world value.
+      # Postgres is the exception: it refuses a key file that is group- or
+      # world-accessible unless root-owned, so it gets its own private copy
+      # (postgres.key) owned by the alpine image's postgres uid (70), 0600.
+      - >-
+        openssl req -x509 -newkey rsa:2048 -nodes -days 1
+        -keyout /tls/keycloak.key -out /tls/keycloak.crt
+        -subj /CN=keycloak
+        -addext subjectAltName=DNS:keycloak,DNS:redis,DNS:s3,DNS:postgres,DNS:mqtt
+        && cp /tls/keycloak.crt /tls/rustfs_cert.pem
+        && cp /tls/keycloak.key /tls/rustfs_key.pem
+        && cp /tls/keycloak.key /tls/postgres.key
+        && chmod 644 /tls/keycloak.key /tls/keycloak.crt
+        /tls/rustfs_cert.pem /tls/rustfs_key.pem
+        && chown 70:70 /tls/postgres.key && chmod 600 /tls/postgres.key
+    volumes:
+      - smoke-tls:/tls
+
+  postgres:
+    extends:
+      file: ./.devcontainer/stack/postgres/compose.yml
+      service: postgres
+    environment:
+      POSTGRES_PASSWORD: *smoke_postgres_password
+    # extends: replaces command: wholesale; the image's default is just
+    # `postgres`, so only the TLS flags are added. The healthcheck (local
+    # pg_isready over the unix socket) is unaffected by ssl=on.
+    command: >-
+      postgres -c ssl=on -c ssl_cert_file=/tls/keycloak.crt
+      -c ssl_key_file=/tls/postgres.key
+    volumes:
+      - smoke-tls:/tls:ro
+    depends_on:
+      smoke-tls-cert:
+        condition: service_completed_successfully
+
+  # extends: (not the plain include: every other stack service that needs
+  # no override uses) so the TLS command/port/healthcheck below can replace
+  # the shared fragment's plaintext-only ones -- include: errors on that
+  # kind of field conflict instead of merging. The shared dev-only fragment
+  # itself (.devcontainer/stack/redis/compose.yml) is untouched.
+  redis:
+    extends:
+      file: ./.devcontainer/stack/redis/compose.yml
+      service: redis
+    # extends: replaces command: wholesale rather than merging, so the
+    # existing --appendonly yes has to be repeated alongside the new TLS
+    # flags. Plaintext 6379 is left open too (ssl_auth_clients no isn't set
+    # here -- --tls-port only adds a second, encrypted listener, it doesn't
+    # replace 6379) so the valkey-cli ping healthcheck below keeps working
+    # unchanged over plaintext while api's actual REDIS_URL connection
+    # (rediss://redis:6380/0, see the api service below) is genuinely
+    # encrypted.
+    command: >-
+      valkey-server --appendonly yes
+      --tls-port 6380 --tls-cert-file /tls/keycloak.crt
+      --tls-key-file /tls/keycloak.key --tls-auth-clients no
+    volumes:
+      - smoke-tls:/tls:ro
+    depends_on:
+      smoke-tls-cert:
+        condition: service_completed_successfully
+
+  s3:
+    extends:
+      file: ./.devcontainer/stack/s3/compose.yml
+      service: s3
+    environment:
+      RUSTFS_ACCESS_KEY: *smoke_s3_access_key
+      RUSTFS_SECRET_KEY: *smoke_s3_secret_key
+      # RustFS's TLS mode replaces the plain-HTTP listener on the same
+      # address rather than adding a second port (MinIO-like), so once this
+      # is set http://s3:9000 stops answering and only https://s3:9000
+      # does -- see the healthcheck and the api service's S3_ENDPOINT_URL
+      # override below.
+      RUSTFS_TLS_PATH: /tls
+    volumes:
+      - smoke-tls:/tls:ro
+    healthcheck:
+      # -k: self-signed, internal-only check -- api's actual client still
+      # verifies via its own CA trust (AWS_CA_BUNDLE, see the api service
+      # below).
+      test: ["CMD", "curl", "-fk", "https://localhost:9000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      smoke-tls-cert:
+        condition: service_completed_successfully
+
+  # Same image/pin as .devcontainer/stack/mqtt/, but with a TLS listener
+  # (the smoke-tls cert, SAN DNS:mqtt) and password auth instead of that
+  # fragment's anonymous plaintext one, so the production-mode api's
+  # MQTTEventSink/MQTTEventSource can really publish. Its own config is
+  # inline (configs: below) and the password file is built at startup from
+  # the smoke-only credentials, so no secret-shaped file is checked in.
+  mqtt:
+    image: eclipse-mosquitto:2.0.22
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        mosquitto_passwd -b -c /mosquitto/passwd
+        "$$MQTT_USERNAME" "$$MQTT_PASSWORD"
+        && chown mosquitto: /mosquitto/passwd
+        && exec mosquitto -c /mosquitto/config/mosquitto.conf
+    environment:
+      MQTT_USERNAME: *smoke_mqtt_user
+      MQTT_PASSWORD: *smoke_mqtt_password
+    configs:
+      - source: smoke-mosquitto-conf
+        target: /mosquitto/config/mosquitto.conf
+    volumes:
+      - smoke-tls:/tls:ro
+    # Authenticated TLS publish against the broker itself (-h mqtt, not
+    # localhost, so the hostname matches the cert's SAN).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mosquitto_pub -h mqtt -p 8883 --cafile /tls/keycloak.crt
+          -u "$$MQTT_USERNAME" -P "$$MQTT_PASSWORD"
+          -t healthcheck -m ping -q 1 -i healthcheck
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      smoke-tls-cert:
+        condition: service_completed_successfully
+
+  keycloak:
+    extends:
+      file: ./.devcontainer/stack/keycloak/compose.yml
+      service: keycloak
+    volumes:
+      - smoke-tls:/opt/keycloak/tls:ro
+    environment:
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/tls/keycloak.crt
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/tls/keycloak.key
+      # The devcontainer stack pins the public issuer to http://localhost:8080; here the
+      # api validates `iss` as the https URL clients reach, so pin that instead.
+      KC_HOSTNAME: https://keycloak:8443
+    depends_on:
+      smoke-tls-cert:
+        condition: service_completed_successfully
+    ports:
+      # Second deliberate deviation from stack/README.md's "no ports:" rule
+      # (see api's own ports: below) -- tests/perf/locustfile.py logs in with
+      # a real password grant from outside the compose network (the GitHub
+      # Actions runner, or a developer's shell reproducing perf.yml locally),
+      # which needs a host route to Keycloak's token endpoint. Kept at the
+      # same 8443 the api service uses internally so the issued token's own
+      # `iss` claim (which echoes back whatever Host the client connected
+      # through) still matches OIDC_ISSUER_URL below, letting the same
+      # runner-image api process validate it -- perf.yml adds a `keycloak`
+      # /etc/hosts entry pointing at 127.0.0.1 for the same reason.
+      - "8443:8443"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    env_file:
+      - ./.devcontainer/stack/postgres/postgres.env
+      - ./.devcontainer/stack/s3/s3.env
+      - ./.devcontainer/stack/keycloak/keycloak.env
+    environment:
+      # Fixed in-network hostnames/ports, not credentials -- same values
+      # .devcontainer/compose.yml sets literally. No MODE override: the
+      # runner stage's own ENV MODE=production default (Dockerfile) is
+      # exactly what this smoke test wants to exercise against real
+      # dependencies, not MODE=mock's in-memory fakes.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      # Satisfies the production postgres_sslmode guardrail; the postgres
+      # service above serves TLS with the smoke-tls cert. `require`, not
+      # verify-full: asyncpg only verifies against a separately supplied CA
+      # file, which no setting provides yet.
+      POSTGRES_SSLMODE: require
+      # Pooled connections reuse asyncpg's prepared statements; see
+      # docs/adrs/0022-db-pool-mode-per-deployment.md. The app default stays `null`.
+      DB_POOL_MODE: local
+      # OTel service.name, read by craftainer_observability.logs's
+      # Resource.create() (OTEL_SERVICE_NAME is OTel's own env var).
+      OTEL_SERVICE_NAME: template-fastapi
+      S3_ENDPOINT_URL: https://s3:9000
+      REDIS_URL: rediss://redis:6380/0
+      # Match the postgres/s3 overrides above -- see this file's header
+      # comment for why these can't stay at the shared stack defaults.
+      POSTGRES_PASSWORD: *smoke_postgres_password
+      RUSTFS_ACCESS_KEY: *smoke_s3_access_key
+      RUSTFS_SECRET_KEY: *smoke_s3_secret_key
+      # keycloak's/redis's/s3's TLS listeners (see smoke-tls-cert above) all
+      # use the same self-signed cert; SSL_CERT_FILE is honored by httpx's
+      # default SSL context (httpx._config.create_ssl_context) so the OIDC
+      # health check's discovery request trusts it, and by
+      # ssl.create_default_context() (redis-py's SSLConnection, see
+      # health/checks.py's RedisHealthCheck) so the rediss:// connection
+      # trusts it too -- both instead of failing TLS verification against
+      # the usual public CA bundle.
+      OIDC_ISSUER_URL: https://keycloak:8443/realms/template-fastapi
+      # keycloak.env (loaded above) points these at the devcontainer's http:// URLs, which
+      # MODE=production refuses; override with the smoke stack's https issuer.
+      OIDC_ISSUER: https://keycloak:8443/realms/template-fastapi
+      OIDC_DISCOVERY_URL: https://keycloak:8443/realms/template-fastapi/.well-known/openid-configuration
+      SSL_CERT_FILE: /tls/keycloak.crt
+      # boto3/botocore does *not* honor SSL_CERT_FILE (unlike httpx/redis-py
+      # above) -- AWS_CA_BUNDLE is its own equivalent env var, needed so the
+      # S3 health check (health/checks.py's S3HealthCheck, boto3-based)
+      # trusts the same self-signed cert instead of failing TLS
+      # verification.
+      AWS_CA_BUNDLE: /tls/keycloak.crt
+      # _require_mqtt_auth_in_production (config.py) requires TLS and
+      # credentials under MODE=production. MQTT_HOST/MQTT_PORT point at the
+      # mqtt service above (TLS listener); aiomqtt's
+      # ssl.create_default_context() honors SSL_CERT_FILE, so the broker's
+      # self-signed cert is trusted like Redis's. Smoke-test-only values.
+      MQTT_HOST: mqtt
+      MQTT_PORT: "8883"
+      MQTT_USE_TLS: "true"
+      MQTT_USERNAME: *smoke_mqtt_user
+      MQTT_PASSWORD: *smoke_mqtt_password
+      # Required under MODE=production (config.py); smoke-test-only value.
+      SUBSCRIBER_SECRET: smoke-test-subscriber-secret-0123456789
+      # Required under MODE=production (config.py, RFC 9728 resource identifier): an
+      # https origin with no path. Smoke-test-only value; nothing resolves it.
+      PUBLIC_BASE_URL: https://api.smoke.invalid
+    volumes:
+      - smoke-tls:/tls:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+      smoke-tls-cert:
+        condition: service_completed_successfully
+    # No curl/wget in the runner image (slim base, nothing installed beyond
+    # the venv -- see scripts/runner-setup.sh), so this shells out to the
+    # venv's own Python instead. A non-2xx response (e.g. 503 while a
+    # dependency is still starting) raises HTTPError, a nonzero exit.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      # Covers Alembic migrations plus Keycloak's own startup budget
+      # (~2 minutes worst case -- see stack/keycloak/compose.yml).
+      start_period: 150s
+    ports:
+      # The one deliberate deviation from stack/README.md's "no ports:"
+      # rule: that rule is for fragments under .devcontainer/ reached only
+      # from sibling containers. This file lives outside .devcontainer/ and
+      # exists to be curled from the GitHub Actions runner (host).
+      - "8000:8000"
+
+configs:
+  smoke-mosquitto-conf:
+    content: |
+      listener 8883
+      cafile /tls/keycloak.crt
+      certfile /tls/keycloak.crt
+      keyfile /tls/keycloak.key
+      allow_anonymous false
+      password_file /mosquitto/passwd
+      log_dest stdout
+
+volumes:
+  smoke-tls:
+  # extends: (unlike include:) only copies the named service's own config,
+  # not the extended file's top-level volumes: section -- these two must be
+  # declared here too, matching what postgres/redis/s3's own compose.yml
+  # declare for the same named volumes.
+  postgres-data:
+  redis-data:
+  s3-data:

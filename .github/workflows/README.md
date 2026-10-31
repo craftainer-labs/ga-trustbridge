@@ -1,0 +1,400 @@
+# workflows/
+
+- `checks.yml` — runs every `prek`/`pre-commit` hook
+  (`--hook-stage manual`, so both the fast and extensive ones) on push,
+  on pull requests, and on demand — inside the actual devcontainer (via
+  [`devcontainers/ci`](https://github.com/devcontainers/ci)), under a
+  per-run `COMPOSE_PROJECT_NAME` that a final step tears down. Runs as a
+  two-leg `amd64`/`arm64` matrix (see "Architecture matrix" below).
+- `smoke.yml` — builds the `runner` stage of the root `Dockerfile` via
+  the root `compose.yml`, starts it against the real Postgres, RustFS,
+  Redis, and Keycloak backing services, in production mode (TLS and
+  credential guardrails), and confirms `/health/live` and `/health/ready`
+  both return 200 -- on push, on pull requests, and on demand. It does not
+  gate a release; `release-check`'s `stack-smoke` does (NFR-0010). Runs as the same two-leg `amd64`/`arm64` matrix as
+  `checks.yml` — this is the check that would actually catch an
+  arch-specific runtime break (e.g. a C-extension dependency missing an
+  arm64 wheel), since `checks.yml`'s test run uses `MODE=mock`
+  in-process fakes for some paths rather than the built image.
+- `release.yml` — manually triggered. Takes a release channel
+  (`alpha`/`beta`/`rc`/`full`) and a SemVer 2 bump
+  (`major`/`minor`/`patch`/`none`), computes the next tag via
+  `../scripts/compute_next_version.py`, then drives the instance's
+  Makefile release contract (see `../../docs/TEMPLATE.md`'s "Release: a
+  Makefile contract"): `make release-arches` picks the arch matrix;
+  `build`/`sbom`/`release-assets`/`publish` run once per arch, natively
+  (no QEMU — see "Architecture matrix" below), each leg uploading its
+  `dist/` as `release-assets-<arch>`; the `release-check` job then assembles
+  the `dist/`s (failing on a missing arch or a duplicate file name) and
+  runs `make release-check` inside the devcontainer, gating the GitHub
+  release and package publishing (not the per-arch image `publish`, which
+  already ran in `build`); the `release` job runs `make finalize` and
+  creates the GitHub release with everything in `dist/`; only then do
+  `publish-packages` and
+  `verify-published` run, and only for an instance that sets
+  `PYPI_PUBLISH`, `NPM_PUBLISH` or `CARGO_PUBLISH`. A partial registry
+  failure therefore never withholds the release.
+- `migration-compat.yml` — see "Migration compatibility" below.
+- `moderate-bug-triage.yml` / `moderate-bug-fix.yml` /
+  `moderate-bug-fix-apply.yml` / `moderate-feature-triage.yml` /
+  `moderate-feature-build.yml` / `moderate-feature-build-apply.yml` /
+  `moderate-cleanup.yml` / `moderate-setup.yml` — see "Issue moderation"
+  below.
+- `template-sync.yml` — runs in an *instance* of this template, not
+  here (see the root `docs/TEMPLATE.md`'s "Template sync" section and
+  `../template-sync-manifest.yml`'s header for the full design). On a
+  schedule or `workflow_dispatch`, diffs the instance against the
+  template's latest tagged release per the manifest's tiers and opens a
+  PR — never a direct push, never auto-merged.
+  `template_sync.py apply` exits 0 (clean), 1 (merge conflicts, still
+  opens the PR) or 2 (error, e.g. an unreadable manifest or `git
+  merge-file` failing): every failure other than conflicts exits 2. A
+  binary merge-tier file the instance changed cannot be merged, so it is
+  reported as a conflict and the instance's copy is left as it is. A crash before
+  `apply`'s own handler (an import-time `SyntaxError`) also exits 1, so
+  the job runs `template_sync.py check-apply`, which accepts a 0 or 1
+  only when the summary `apply` wrote agrees with it; anything else
+  fails the job before the sync state advances. The job then exits with
+  `apply`'s own status when that is 2 or higher (so the log and the step's
+  exit code tell an error from conflicts) and the summary is printed as valid
+  only after that check.
+
+Every workflow's `runs-on` defaults to `ubuntu-24.04` but can be
+overridden with the `CI_RUNNER` repository/organization variable —
+e.g. to point at self-hosted runners.
+
+## Architecture matrix
+
+`checks.yml`, `smoke.yml`, and `release.yml`'s `build` job each run as a
+two-leg matrix over `amd64`/`arm64`, both legs building/testing natively
+— `ubuntu-24.04-arm` is a real (non-emulated) GitHub-hosted Linux arm64
+runner, free on this public repo and billed as ordinary Actions minutes
+on a private one. No QEMU is involved anywhere in this repo's CI; QEMU
+would only be needed to cross-build one arch on a runner that doesn't
+natively support it, which none of these jobs do.
+
+Each matrix leg can be overridden independently with
+`CI_RUNNER_AMD64` / `CI_RUNNER_ARM64` repository/organization variables
+(each defaulting to the matching `ubuntu-24.04`/`ubuntu-24.04-arm`
+label) — e.g. to point either arch at a self-hosted runner instead of
+GitHub's. This is separate from the plain `CI_RUNNER` variable, which
+still overrides the single-runner jobs (`perf.yml`, `template-sync.yml`,
+and `release.yml`'s `version`/`release-check`/`release`/`publish-packages`/`verify-published` jobs) that aren't
+matrixed by arch.
+
+The devcontainer used for local development (`.devcontainer/Dockerfile`'s `develop`
+stage) is deliberately *not* pinned to a single platform — plain
+`docker build`/`docker compose build` already targets whichever
+architecture the host is on, so an arm64 contributor gets a native
+arm64 devcontainer with no QEMU emulation in their inner loop. Only CI
+needs to prove cross-arch correctness continuously; this was manually
+verified end-to-end on arm64 hardware on 2026-09-06.
+
+## Migration compatibility
+
+`migration-compat.yml` enforces `../../docs/nfrs/NFR-0027-expand-contract-migrations.md`
+on pull requests that touch `alembic/versions/` or the model packages
+(and on demand). Inside the devcontainer, like `checks.yml`, it:
+
+1. lints the PR's new or changed revisions with Squawk
+   (`../../scripts/lint-migrations.sh`);
+2. creates a fresh `migration_compat` database and migrates it to the
+   PR's head;
+3. checks the latest stable release tag (`vMAJOR.MINOR.PATCH`) out into a
+   worktree and runs that tag's `tests/integration` and `tests/e2e`
+   against the migrated database with `RUN_MIGRATIONS_ON_STARTUP=false`,
+   so the previous release has to keep working on the new schema.
+
+**Skips until the first release with `RUN_MIGRATIONS_ON_STARTUP`.** Older
+code always migrates on startup and would try to migrate a database whose
+revision it doesn't know. A first step reads the latest release tag's
+`src/app/config.py`; if there is no stable tag, or the file has no
+`run_migrations_on_startup` setting, the N-1 part is skipped: the job
+writes the reason to the run summary and a notice annotation, still runs
+the lint, and finishes green (steps 2 and 3 are the only ones skipped).
+It starts enforcing on its own once a release containing the setting
+exists.
+
+## Perf and microbenchmarks
+
+`perf.yml` (weekly, `workflow_dispatch`, and pull requests labelled
+`perf`) runs the Locust suite against the production-mode stack layered
+with `../../compose.perf.yml` (`api` capped at 1 vCPU / 2 GB, `SYS_PTRACE`,
+and the per-IP bulk-action rate limit raised because every Locust user
+shares one IP). It has two jobs:
+
+- `fixed` -- the `NFR-0024` absolute p95 ceilings (the locustfile's
+  `quitting` hook) plus a relative check: it downloads the `perf-summary`
+  artifact of the latest successful non-PR run on `main`
+  (`gh run download`, with the job's `actions: read` token) and
+  `../../tests/perf/compare_summary.py` fails the job when the aggregate
+  p95 is more than `PERF_MAX_P95_REGRESSION_PERCENT` (workflow `env`,
+  default 20) worse. With no baseline yet it reports that and passes. It
+  uploads `perf-summary` (the JSON, also the next baseline) and
+  `locust-report` (CSV, HTML, `api` CPU/RSS samples).
+- `capacity` -- `workflow_dispatch` with `mode: capacity` only, report
+  only (no gate). Steps users up, samples `api` CPU/RSS and records a
+  py-spy profile (`../../tests/perf/profile.sh`) inside step 2's hold;
+  uploads everything as `capacity-report`.
+
+Shared runners make wall-clock numbers noisy; point `CI_RUNNER` at a
+dedicated runner to make the relative check trustworthy.
+
+`codspeed.yml` runs `tests/bench` under
+[CodSpeed](https://codspeed.io/) simulation mode (instruction counts, not
+wall-clock) on every pull request and push to `main`, and reports the
+regression on the PR. It uses `uv` directly on the runner rather than the
+devcontainer, because CodSpeed instruments the benchmark process itself,
+and authenticates over OIDC (`id-token: write`), which needs no secret for
+a public repository (`CODSPEED_TOKEN` is only for private ones).
+
+## Issue moderation
+
+`moderate-bug-triage.yml`, `moderate-bug-fix.yml`,
+`moderate-bug-fix-apply.yml`, `moderate-feature-triage.yml`,
+`moderate-feature-build.yml`, `moderate-feature-build-apply.yml`, and
+`moderate-cleanup.yml` run the `claude` CLI as an issue moderator: on a
+bug report, it verifies the report is actionable, reproduces it as a
+failing test on a branch, and asks the reporter to confirm before a
+second stage fixes it and opens a PR; on a feature request, it verifies
+the request fits the project, drafts a plan on a branch, and asks for
+confirmation before a second stage implements it and opens a PR.
+
+**Fix/build is itself split in two, to keep Claude out of any job that
+can push/PR/relabel.** `moderate-bug-fix.yml` /
+`moderate-feature-build.yml` (`issue_comment`-triggered, `permissions:
+contents: read` only) check out the confirmed branch and run Claude
+against the issue's untrusted title/body/comments, but never hold
+write-scoped credentials -- Claude commits locally (or, if it can't
+converge, writes an explanation to `.moderation-outcome.md`) and the job
+packages that as a `moderation-result` artifact (`../scripts/
+moderate_package_result.sh`: a `git format-patch` diff plus a small JSON
+outcome record — data, nothing executable). `moderate-bug-fix-apply.yml`
+/ `moderate-feature-build-apply.yml` (`workflow_run`-triggered on that
+workflow's completion, `permissions: contents: write, issues: write,
+pull-requests: write`) download the artifact and do the actual
+`git am`/push/`gh pr create`/relabel (`../scripts/
+moderate_apply_result.sh`) — the only things this privileged half ever
+executes are `git`/`gh` calls with literal, fixed arguments (plus the
+patch's file contents, applied as a diff, never as a command). This is
+what a job combining Claude-on-untrusted-text with push/PR/label-write
+credentials would otherwise trip on CodeQL's
+`actions/untrusted-checkout`/`actions/untrusted-checkout-toctou`
+(GitHub's own "pwn requests" pattern, adapted here since there's no
+`pull_request`/`workflow_run` pair to lean on directly — the untrusted
+input is issue text, not a fork's commits). The apply workflow
+re-checks the issue's `*:*-ready` label before acting (a no-op, not an
+error, if it's already gone) since it isn't concurrency-grouped with the
+worker the way every other moderation workflow is -- `workflow_run`
+can't see the issue number to key a group on before the artifact is
+downloaded. The triggering worker run also concludes `success` when its
+jobs were all skipped (unrelated comment, missing label, no API key), in
+which case no `moderation-result` artifact exists;
+`actions/download-artifact` has no "if not found" mode, so the apply
+workflows first look the artifact up by name through the run's artifacts API
+(`../scripts/find_moderation_result.sh`; the run's other artifacts are not
+listed, so more than 30 cannot hide it) and skip the download/apply steps
+when it is absent. An expired artifact (the worker keeps it one day) fails
+the job: a result was produced and lost, so a green apply job would hide
+that nothing was applied. The download itself stays strict, so real
+failures still fail the job.
+
+Activating this in a given repo/fork takes two one-time steps, neither
+of which is itself a workflow: provisioning a dedicated Anthropic
+Console workspace (its own `ANTHROPIC_API_KEY`, a monthly spend limit,
+and a usage alert at 80% of it) and storing that key as the
+`ANTHROPIC_API_KEY` repository secret, then running `moderate-setup.yml`
+once to create the labels below.
+
+Two independent label sequences track state, applied by `gh issue edit`
+inside each stage's Claude prompt (`../scripts/prompts/`) or by a
+deterministic workflow step:
+
+- Bug: `bug` → (`bug:needs-info` | `bug:repro-ready`) → `bug:confirmed`
+  → `bug:fixed`.
+- Feature: `enhancement` → (`enhancement:not-a-fit` |
+  `enhancement:plan-ready`) → `enhancement:confirmed` →
+  `enhancement:built`.
+
+Either sequence can end at `needs-human` instead, if Claude can't
+reproduce the bug / can't get the fix passing checks / can't complete
+the feature per the plan — it comments what it tried and stops rather
+than leaving the issue silently stuck. Run `moderate-setup.yml`
+(`workflow_dispatch`) once, any time after adding the secret below, to
+create these labels; it's idempotent, safe to re-run.
+
+**Dormant until configured.** All four Claude-invoking workflows
+(triage ×2, fix/build ×2) run a tiny upstream `gate` job that checks
+`secrets.ANTHROPIC_API_KEY != ''` in a step and exposes it as a job
+output — `secrets` isn't readable from `jobs.<job_id>.if` directly
+(GitHub rejects the workflow as invalid if it is), only from a step or
+`jobs.<job_id>.env`. The real job then carries
+`if: needs.gate.outputs.has-key == 'true' && <trust condition>`,
+checked before checkout — so a fork or clone that hasn't set the
+`ANTHROPIC_API_KEY` repository secret sees every one of these jobs show
+**Skipped**, not **Failed**, and gets no failure-triggered email from
+GitHub's default Actions notifications. `moderate-cleanup.yml` has no
+such gate (see its own header comment) and always runs.
+
+**Trust gate.** The triage and fix/build jobs also skip unless
+`github.event.issue.author_association` is `OWNER`, `MEMBER`, or
+`COLLABORATOR`, or the issue carries a `claude:ok` label (a maintainer
+opt-in for an external reporter) — the issue body and comments are
+untrusted text fed straight into a Claude prompt, and this pipeline
+pushes branches, spends API budget, and opens PRs from repo secrets.
+
+**Reopening restarts triage from scratch.** Whatever stage label an
+issue carried when closed, reopening it strips every `bug:*`/
+`enhancement:*` stage label back to the bare `bug`/`enhancement` label
+(`../scripts/reset_issue_state.sh`) and re-runs triage as if new, rather
+than resuming stale state — the repo may have changed, or a prior
+branch/PR may already be gone via cleanup.
+
+**Environment.** All four Claude-invoking jobs run `claude` the same way
+`checks.yml` runs `prek`: inside the actual devcontainer (`develop`
+stage) via `devcontainers/ci`, so Claude runs the exact CLI build pinned
+in `.devcontainer/Dockerfile`'s `CLAUDE_CODE_VERSION`. Each writes the
+`ANTHROPIC_API_KEY` secret to `.secrets/claude.txt` first (matching
+`.secrets/README.md`'s "one file per secret" convention) and removes it
+in an `if: always()` step; `../scripts/run_claude.sh` reads it, sets a
+dedicated `claude-moderator[bot]` git identity for the commits this
+pipeline makes, and invokes `claude -p <prompt> --model claude-sonnet-5
+--effort medium --max-turns <n> --allowedTools <list>` under a
+`timeout`. Every job caps wall-clock (`timeout-minutes:` 10 for triage,
+20 for fix/build) and turns (15 for triage, 40 for fix/build) so a
+runaway prompt fails closed instead of burning CI/API budget; the actual
+spend cap lives in the Anthropic Console (a dedicated workspace/key with
+a monthly limit), since `claude` itself has no such flag.
+
+**Extra tools.** The read-only Claude jobs are limited to `git`, `gh`,
+file tools and `prek run`. An instance that needs Claude to run more
+(e.g. a targeted repro) sets the optional `MODERATION_EXTRA_TOOLS`
+repository variable to extra comma-separated Claude Code `--allowedTools`
+entries, e.g. `Bash(uv run pytest *)`; it's appended to each read-only
+job's tool list and never applies to the `-apply` workflows, which don't
+run Claude.
+
+A single `moderate-issue-<number>` `concurrency:` group, shared across
+the two triage workflows, the two worker (fix/build) workflows, and
+cleanup, serializes every stage against the same issue — a burst of
+comments can't launch overlapping fix/build jobs, a close landing
+mid-run doesn't race cleanup, and a rapid close-then-reopen runs cleanup
+before the reopened triage's reset step. The two apply workflows sit
+outside that group (see "Fix/build is itself split in two" above) — a
+worker run's own membership in the group is what serializes it against
+everything else, and by the time its artifact exists there's nothing
+left for apply to race except a duplicate apply of the *same* artifact,
+which the label re-check there already makes a no-op.
+
+## Template sync
+
+`template-sync.yml` reads its own operating parameters from repository
+variables/secrets, all optional:
+
+- `TEMPLATE_SYNC_INTERVAL` (variable, `weekly` | `monthly`, default
+  `weekly`) — the workflow still wakes up weekly regardless (cron can't
+  read a repository variable to pick its own schedule); on `monthly` it
+  no-ops except during the first cron-scheduled week of the month.
+- `TEMPLATE_SYNC_CHANNEL` (variable, `stable` | `alpha` | `beta` | `rc`,
+  default `stable`) — which tag channel to sync to.
+- `TEMPLATE_SYNC_TOKEN` (secret) — a PAT used to read the template
+  repository and to push the sync branch / open the sync PR. It needs
+  the `workflow` scope (classic PAT) or **Workflows: read/write**
+  (fine-grained), because the default `GITHUB_TOKEN` can't push
+  changes to `.github/workflows/`, and nearly every sync includes some.
+  Falls back to `GITHUB_TOKEN`, which only works for a public template
+  *and* a sync that touches no workflow file.
+
+## OCI registry
+
+`release.yml` only pushes to a registry when the `OCI_REGISTRY`
+repository/organization variable is set (e.g. `ghcr.io`,
+`docker.io`, or a private registry host) — the push step, the login
+step, and the image-name step are all skipped otherwise, so the
+workflow works with no registry configured at all. When it is set:
+
+- `OCI_IMAGE_NAME` (variable, optional) — the image path within the
+  registry, e.g. `myorg/template-fastapi`. Defaults to the repository's
+  own `owner/repo` (lowercased) if unset.
+- `OCI_REGISTRY_USERNAME` / `OCI_REGISTRY_PASSWORD` (secrets,
+  required whenever `OCI_REGISTRY` is set) — credentials for
+  `docker/login-action`.
+
+## Image labels
+
+The image is built once, with the label set computed by the Makefile's
+`LABELS` (not by `docker/metadata-action`). The registry copy is that same
+tar pushed with skopeo (`make publish`), not a rebuild, so the labels and
+the digest are those of the tested artifact:
+
+- `org.opencontainers.image.title` (the repository name), `.source` and
+  `.url` (the repository), `.version` (`RELEASE_VERSION`), `.revision`
+  (`git rev-parse HEAD`), `.created` (the commit time, not the build
+  time), and `.licenses` (`OCI_LICENSE`,
+  default `GPL-3.0-only`).
+- `org.opencontainers.image.description`, only when the instance sets
+  `OCI_DESCRIPTION` in `image.mk` (the Makefile has no offline source
+  for the repository description).
+- `io.github.<repository_owner>.sbom` — the URL of that release's SPDX
+  SBOM asset. Namespaced under the repo owner (not
+  `org.opencontainers.image.*`, which is reserved for the spec's own
+  keys) and derived from the repository owner alone, so it's one stable
+  prefix per org across every repo/template instance that org owns.
+- `io.github.<repository_owner>.coverage-report`, only when the instance
+  sets `COVERAGE_REPORT` in `image.mk` to the release asset's name.
+- Whatever the instance adds through `EXTRA_LABELS`.
+
+## Release variables and secrets
+
+`release.yml` passes these to the Makefile targets as environment
+variables of the same name; unset ones are empty, and a target should skip
+cleanly when the registry isn't configured.
+
+- `OCI_REGISTRY` (variable) — registry host (e.g. `ghcr.io`).
+- `OCI_IMAGE_NAME` (variable, optional) — image path within the registry.
+- `OCI_REGISTRY_USERNAME` / `OCI_REGISTRY_PASSWORD` (secrets) —
+  registry credentials.
+- `CI_RUNNER_AMD64` / `CI_RUNNER_ARM64` (variables, optional) — runner
+  labels for each arch leg, defaulting to `ubuntu-24.04` /
+  `ubuntu-24.04-arm`.
+- `PYPI_PUBLISH` (variable, optional) — `testpypi` or `pypi`; selects the
+  index `make publish-packages` uploads to via trusted publishing. Unset
+  skips it.
+- `NPM_PUBLISH` / `CARGO_PUBLISH` (variables, optional) — non-empty makes
+  `make publish-packages` push to npm / crates.io; unset skips it. Setting
+  any of the three is what creates the `publish-packages` job at all.
+  They are passed to that job and to `verify-published`, which is where
+  an instance checks what was published (`release-check` runs before
+  publishing and does not receive them).
+- `NPM_TOKEN` / `CARGO_REGISTRY_TOKEN` (secrets, optional) — bootstrap
+  tokens for the first release of a package, before trusted publishing
+  is configured. Exposed only on the `make publish-packages` step's
+  `env:` in the `publish-packages` job, never job-wide or to any other
+  step or job. An unset secret arrives as an empty
+  string, so the Makefile must treat empty as absent. `NPM_TOKEN` is
+  deliberately not mapped to `NODE_AUTH_TOKEN`: npm's OIDC trusted
+  publishing breaks when that variable is set, even to an empty string,
+  so the npm template's Makefile decides what to do with `NPM_TOKEN`.
+
+## Do
+
+- Give `release.yml` and `template-sync.yml` `contents: write` and
+  nothing broader (`template-sync.yml` also needs `pull-requests:
+  write`, for nothing else); leave `checks.yml` at `contents: read`.
+- Keep `id-token: write` on `release.yml`'s `publish-packages` job only
+  (PyPI, npm and crates.io trusted publishing via GitHub OIDC). GitHub
+  permissions are per job, not per step, and that job's `if:` on the
+  `*_PUBLISH` variables means an image-only instance never starts it, so
+  it never requests an OIDC token. `build` (per arch) has no `id-token`.
+- Keep `NPM_TOKEN` and `CARGO_REGISTRY_TOKEN` on the `make
+  publish-packages` step's `env:` only.
+- Pass `GITHUB_TOKEN` to a `devcontainers/ci` or `build-push-action` step
+  that builds the devcontainer image (step `env:`, not the action's
+  `env:` input), so `scripts/develop.sh`'s downloads are authenticated:
+  `compose.yml` hands it to the build as the optional `github_token`
+  secret, never a build arg.
+
+## Don't
+
+- Add a third way to cut a release — extend `release.yml`'s inputs
+  instead, so there's one path and one changelog source.

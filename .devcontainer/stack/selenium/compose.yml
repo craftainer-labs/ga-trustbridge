@@ -1,0 +1,21 @@
+# Stack service: a browser (Selenium Grid's standalone Chromium
+# image) for the e2e suite. tests/e2e/conftest.py's `browser` fixture
+# opens a Selenium WebDriver session against this container purely to
+# obtain its `se:cdp` Chrome DevTools Protocol URL, then hands that to
+# Playwright's `connect_over_cdp` -- so Playwright drives this remote
+# browser instead of a local one, letting the e2e suite run from inside
+# the devcontainer itself (see tests/e2e/README.md).
+services:
+  selenium:
+    image: selenium/standalone-chromium:151.0.7922.108-chromedriver-151.0.7922.108-grid-4.47.0-20260808
+    restart: unless-stopped
+    shm_size: 2gb
+    # The grid reports itself up before its one node finishes registering;
+    # "ready":true (note the space -- pretty-printed JSON) is the signal
+    # tests/e2e/conftest.py's `browser` fixture actually needs: a node to
+    # hand out sessions from.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4444/status | grep -q '\"ready\": true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 15

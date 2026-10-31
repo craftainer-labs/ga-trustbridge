@@ -1,0 +1,23 @@
+# Build context excludes for the runtime image (top-level Dockerfile). The
+# devcontainer image has its own: .devcontainer/Dockerfile.dockerignore.
+**/node_modules
+coverage
+target
+.git
+.github
+.devcontainer
+.secrets
+.vscode
+.claude
+docs
+README.md
+CLAUDE.md
+dist
+# template-fastapi's own entries
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests

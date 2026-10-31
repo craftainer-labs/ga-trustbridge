@@ -1,0 +1,126 @@
+# Claude-driven implementation once a feature request's reporter confirms
+# the plan branch -- see ../workflows/README.md's "Issue moderation"
+# section for the split-workflow design (this half only runs Claude and
+# packages the result; moderate-feature-build-apply.yml does the actual
+# push/PR/relabel). Dormant (job shows Skipped, not Failed) unless the
+# ANTHROPIC_API_KEY repository secret is configured.
+name: Moderate feature build
+
+on:
+  issue_comment:
+    types: [created]
+
+# Read-only: this job runs Claude against the issue's (untrusted) title,
+# body, and comments, so it must never also hold push/PR/label-write
+# credentials -- that's moderate-feature-build-apply.yml's job, triggered
+# by this one's completion via workflow_run, once Claude is done and its
+# result is just a data artifact (a patch + JSON, never executed). See
+# ../workflows/README.md's "Issue moderation" section.
+permissions:
+  contents: read
+
+concurrency:
+  group: moderate-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  # secrets.* isn't readable from jobs.<job_id>.if (GitHub rejects the
+  # workflow as invalid), only from a step or jobs.<job_id>.env -- so the
+  # trust gate below reads this job's output instead. See
+  # ../workflows/README.md's "Issue moderation" section.
+  gate:
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    outputs:
+      has-key: ${{ steps.check.outputs.has-key }}
+      plan-sha: ${{ steps.resolve-sha.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - id: check
+        run: echo "has-key=${{ secrets.ANTHROPIC_API_KEY != '' }}" >> "$GITHUB_OUTPUT"
+      # Resolves the plan branch's tip as early as possible and pins the
+      # rest of this run to that commit (see checkout step below) rather
+      # than the mutable branch name -- otherwise a push to the branch
+      # between this trust check and the later checkout step would run
+      # under this job's write permissions and secrets untested (CodeQL
+      # actions/untrusted-checkout-toctou). Silently empty when the
+      # branch doesn't exist (e.g. an unrelated comment); the `build`
+      # job's own trust condition still gates whether that's used.
+      - id: resolve-sha
+        run: |
+          sha=$(gh api "repos/${{ github.repository }}/commits/feature/${{ github.event.issue.number }}-plan" --jq .sha 2>/dev/null || true)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: gate
+    if: >-
+      ${{ needs.gate.outputs.has-key == 'true' &&
+      contains(github.event.issue.labels.*.name, 'enhancement:plan-ready') &&
+      (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) ||
+       contains(github.event.issue.labels.*.name, 'claude:ok')) &&
+      github.event.comment.user.login == github.event.issue.user.login &&
+      contains(fromJSON('["/confirm","/confirm\n","/confirm\r\n"]'), github.event.comment.body) }}
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 20
+    env:
+      GITHUB_ISSUE_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - name: Check out plan branch
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.plan-sha }}
+
+      # Unique per run so concurrent runs never collide on
+      # container/volume/network names, and so the teardown step below tears
+      # down exactly this run's stack. Mirrors checks.yml.
+      - name: Set compose project name
+        run: echo "COMPOSE_PROJECT_NAME=ci-moderate-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+
+      - name: Write Claude API key
+        run: |
+          install -m 600 /dev/null .secrets/claude.txt
+          printf '%s' "${{ secrets.ANTHROPIC_API_KEY }}" > .secrets/claude.txt
+
+      - name: Run Claude feature build
+        uses: devcontainers/ci@v0.3
+        with:
+          runCmd: >-
+            .github/scripts/run_claude.sh
+            .github/scripts/prompts/feature-build.md
+            "Read,Grep,Glob,Write,Edit,Bash(git *),Bash(prek run *)${{ vars.MODERATION_EXTRA_TOOLS && format(',{0}', vars.MODERATION_EXTRA_TOOLS) || '' }}"
+            40 900
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ISSUE_NUMBER: ${{ github.event.issue.number }}
+
+      - name: Remove Claude API key
+        if: always()
+        run: rm -f .secrets/claude.txt
+
+      # Always packages/uploads, even if Claude's step above failed or
+      # timed out, so the apply workflow still gets a "failed" outcome and
+      # can comment on the issue instead of it going silently stuck.
+      - name: Package result for the apply workflow
+        if: always()
+        run: |
+          .github/scripts/moderate_package_result.sh \
+            "${{ needs.gate.outputs.plan-sha }}" \
+            moderation-result \
+            .moderation-outcome.md
+
+      - name: Upload result artifact
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: moderation-result
+          path: moderation-result
+          retention-days: 1
+
+      - name: Tear down devcontainer stack
+        if: always()
+        run: |
+          docker compose \
+            -p ${{ env.COMPOSE_PROJECT_NAME }} \
+            down --volumes --remove-orphans

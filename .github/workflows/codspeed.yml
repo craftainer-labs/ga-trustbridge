@@ -1,0 +1,53 @@
+# Per-PR microbenchmarks: runs tests/bench under CodSpeed's simulation mode,
+# which counts instructions instead of wall-clock time, so shared-runner noise
+# mostly disappears. Results appear as CodSpeed's PR regression report.
+#
+# Runs with uv directly on the runner, not inside the devcontainer like
+# checks.yml: CodSpeed's runner instruments the benchmark process itself
+# (valgrind-based) and is documented for the plain-runner pattern; wrapping it
+# in a container would hide the process from it. The benchmarks need no
+# backing service (see tests/bench/README.md).
+name: CodSpeed
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets CodSpeed trigger runs to seed baseline data.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmarks:
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      # OIDC authentication with CodSpeed; the action's token input is only
+      # needed for private repositories.
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+          # Same minor as the devcontainer's CPython (.devcontainer/Dockerfile's
+          # PYTHON_VERSION); otherwise uv picks the runner's newest Python that
+          # satisfies requires-python.
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras
+
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@v5.5.0
+        with:
+          mode: simulation
+          # pyproject.toml's cache_dir points into the devcontainer's home, which
+          # doesn't exist on this bare runner; use the runner's temp dir instead.
+          run: uv run pytest tests/bench --no-cov --codspeed -o cache_dir=${{ runner.temp }}/pytest-cache

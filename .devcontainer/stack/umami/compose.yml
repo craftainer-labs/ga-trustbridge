@@ -1,0 +1,67 @@
+# Stack service: Umami (cookieless web analytics), using a separate `umami`
+# database in the stack's existing Postgres. No ports: mapping here -- the
+# dev UI is reached through devcontainer.json's forwardPorts (see
+# ../README.md and the root README's "Don't"). Relative paths below resolve
+# relative to this file's own directory. Configuration comes from umami.env,
+# next to this file.
+services:
+  # One-shot, idempotent: creates the `umami` database if it is missing.
+  # Not docker-entrypoint-initdb.d, which Postgres skips on an existing
+  # volume. Connects with the stack's Postgres credentials.
+  umami-db-init:
+    image: postgres:18.6-alpine
+    restart: "no"
+    env_file:
+      - ../postgres/postgres.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        PGPASSWORD="$$POSTGRES_PASSWORD" psql -v ON_ERROR_STOP=1 -h postgres \
+          -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" <<'SQL'
+        SELECT 'CREATE DATABASE umami'
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'umami') \gexec
+        SQL
+
+  umami:
+    # 3.4.1, pinned by digest. Runs as user `nextjs` on port 3000.
+    image: ghcr.io/umami-software/umami:3.4.1@sha256:e69d1a7932e9dab0fc523edc7be1f3a53f3c261f57856fc2167ae74a8fc022e8
+    restart: unless-stopped
+    env_file:
+      - ./umami.env
+    depends_on:
+      umami-db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/heartbeat"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+
+  # One-shot, idempotent: waits until Umami has run its migrations, then
+  # inserts this repo's website row (ID = ANALYTICS_SITE_ID from umami.env).
+  # user_id is the admin user created by Umami's migration 01_init.
+  umami-seed:
+    image: postgres:18.6-alpine
+    restart: "no"
+    env_file:
+      - ../postgres/postgres.env
+      - ./umami.env
+    depends_on:
+      umami:
+        condition: service_started
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        export PGPASSWORD="$$POSTGRES_PASSWORD"
+        until [ "$$(psql -h postgres -U "$$POSTGRES_USER" -d umami -Atc "SELECT to_regclass('public.website') IS NOT NULL" 2>/dev/null)" = t ]; do
+          echo "waiting for Umami migrations..."; sleep 2
+        done
+        psql -v ON_ERROR_STOP=1 -h postgres -U "$$POSTGRES_USER" -d umami <<SQL
+        INSERT INTO website (website_id, name, domain, user_id)
+        VALUES ('$$ANALYTICS_SITE_ID', 'template-fastapi', 'localhost', '41e2b680-648e-4b09-bcd7-3e2b10c06264')
+        ON CONFLICT (website_id) DO NOTHING;
+        SQL
