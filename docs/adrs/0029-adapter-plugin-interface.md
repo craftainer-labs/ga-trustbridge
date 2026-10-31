@@ -85,8 +85,8 @@ class GitHubHost:
     kind: HostKind        # the core checks it against Capabilities before any call
     api_url: str          # https://api.github.com | https://HOST/api/v3 | https://api.SUB.ghe.com
     oidc_issuer: str      # per host, configured (ADR 0030)
-    oidc_id_claims: bool  # tokens from this host carry repository_id / repository_owner_id (ADR 0030)
-    registry_host: str    # ghcr.io | containers.HOST | SUB.ghe.com container registry host
+    oidc_id_claims: bool  # tokens from this host carry the id claims (repository_owner_id always, repository_id for repo scopes; ADR 0030)
+    registry_host: str    # ghcr.io | containers.HOST | containers.SUB.ghe.com container registry host
 
 @dataclass(frozen=True, slots=True)
 class Tenant:
@@ -178,7 +178,7 @@ class Applied:
 class OidcTrust:
     issuer: str                       # the host's oidc_issuer
     audience: str | None
-    claims: Mapping[str, str]         # claim -> value the platform must require: repository_id, repository_owner_id (+ environment); never `sub`, never the name claims
+    claims: Mapping[str, str]         # claim -> value the platform must require: repository_owner_id always, repository_id when the scope has one, environment when the scope has one (A6); never `sub`, never the name claims
 
 @dataclass(frozen=True, slots=True)
 class IssuedSecret:
@@ -291,17 +291,21 @@ Decisions that shape the adapter contract:
   persists and delivers (invariants A8, and 0028 invariants 21 and 23).
 - **OIDC first.** `ensure_credential` returns `OidcTrust` when
   `capabilities().oidc` is true, the host's `kind` is in `oidc_hosts` and
-  `GitHubHost.oidc_id_claims` is true. Otherwise it falls back to
-  `IssuedSecret`. `NoCiCredential` means trustbridge provisions nothing for
+  `GitHubHost.oidc_id_claims` is true. Otherwise (including
+  `oidc_id_claims=False`, where no `OidcTrust` and so no `claims` exist) it
+  falls back to `IssuedSecret`. The core never calls `rotate_begin` for a
+  scope whose current credential is an `OidcTrust`; `rotation` describes
+  the `IssuedSecret` only. `NoCiCredential` means trustbridge provisions nothing for
   CI (Argo CD, GHCR). A `Change` with `NEEDS_MANUAL_ACTION` (and
   `credential=None`) means the adapter cannot finish via API (Docker Hub's
   OIDC connection): the core surfaces `manual_action` in the UI and as a
   check-run note, and re-runs the operation until the platform reports the
   trust. For trust, `current.delivered` is `True` (nothing secret to
   deliver); the core writes the outputs idempotently every time.
-- **OIDC trust claims.** `OidcTrust.claims` carries `repository_id` and
-  `repository_owner_id` as strings (`repository_owner_id` only for an
-  org-wide scope), plus `environment` when the scope has one: the claims
+- **OIDC trust claims.** `OidcTrust.claims` always carries
+  `repository_owner_id` and, when `CredentialScope.repository_id` is not
+  `None`, `repository_id`, both as strings (an org-wide scope has only
+  `repository_owner_id`), plus `environment` when the scope has one: the claims
   GitHub documents as not changing on rename or transfer. The mutable
   `repository` / `repository_owner` names are never used for trust. The
   adapter maps the claims to the platform's identity-mapping syntax (for
@@ -352,7 +356,7 @@ Decisions that shape the adapter contract:
 
 | Adapter | Provisions | `oidc` / `oidc_hosts` | `ci_credential` | `rotation` | Webhook auth | `github_hosts` | Privileged credential held |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| JFrog Artifactory | project, repos, OIDC identity mapping (`/access/api/v1/oidc`) | yes, all three kinds (Enterprise X/Enterprise+; GHES/GHE.com via `generic` provider with the host's issuer; mappings on `repository_id`/`repository_owner_id`, so GHES and GHE.com also need `oidc_id_claims`) | yes | none (trust, no secret) | `HMAC` or `STATIC_HEADER` depending on whether a webhook secret is set (JFrog is reported to sign with HMAC-SHA256 in `X-JFrog-Event-Auth`; not confirmed against current JFrog docs, NG5 fixtures settle it); trigger-only | all | admin access token |
+| JFrog Artifactory | project, repos, OIDC identity mapping (`/access/api/v1/oidc`) | yes, all three kinds (Enterprise X/Enterprise+; GHES/GHE.com via `generic` provider with the host's issuer; mappings on `repository_owner_id` and, for repo scopes, `repository_id`, so GHES and GHE.com also need `oidc_id_claims`) | yes | `single` (applies to the fallback secret only; an `OidcTrust` has no secret to rotate) | `HMAC` or `STATIC_HEADER` depending on whether a webhook secret is set (JFrog is reported to sign with HMAC-SHA256 in `X-JFrog-Event-Auth`; not confirmed against current JFrog docs, NG5 fixtures settle it); trigger-only | all | admin access token |
 | Harbor / MSR 4 (2.11-2.13) | project, robot account, webhook policy | no (no upstream OIDC federation); `oidc_hosts` empty | yes, robot token | `two_phase` (two robots) | `STATIC_HEADER` (Harbor webhook auth header); trigger-only | all | system or project admin robot |
 | Docker Hub | repository, org access token | partial: OIDC connection is UI-only and github.com-only, so `NEEDS_MANUAL_ACTION`; `oidc_hosts = {github.com}` | yes, OAT (fallback); `credential_limit=10` | `two_phase` (watch the 10-OAT Team limit) | `NONE` (Docker Hub webhooks are unauthenticated); trigger-only | all (OAT path) | **org-owner PAT** (see G-api) |
 | Argo CD | repository Secret using GitHub App credentials, AppProject, Application/ApplicationSet | n/a; `oidc_hosts` empty | **no** (`NoCiCredential`, pull-based) | none | `STATIC_HEADER` bearer, per tenant, constant-time compare; trigger-only | all | Kubernetes ServiceAccount with narrow RBAC; **raw App private key** held in the repo Secret (see G-api) |
@@ -386,8 +390,10 @@ cited as "0028 invariant n").
   only the scope part, deterministically (0028 invariant 24).
 - **A5.** No `Change.detail`, exception message or log line produced by an
   adapter contains secret material, and no adapter makes a call to GitHub.
-- **A6.** `OidcTrust.claims` contains only `repository_id`,
-  `repository_owner_id` and `environment`, never `sub` or the name claims,
+- **A6.** `OidcTrust.claims` contains `repository_owner_id` always,
+  `repository_id` exactly when the scope's `repository_id` is not `None`,
+  and `environment` exactly when the scope has one, and nothing else (never
+  `sub` or the name claims),
   and the core offers trust only when the capability, the host kind and
   `oidc_id_claims` all allow it.
 - **A7.** `Capabilities.oidc_hosts` is empty when `oidc` is false and is a
@@ -428,7 +434,7 @@ cited as "0028 invariant n").
    orphans to the customer. Lean: as written.
 4. **Resumable two-phase rotation** (`rotate_begin`/`rotate_finish` by
    state; the core sets `retire_after` after delivery). Lean: as written.
-5. **OIDC trust on `repository_id` and `repository_owner_id`**, not the
+5. **OIDC trust on `repository_owner_id` (and `repository_id` for repo scopes)**, not the
    name claims NR5 named. Trade-off: durable across rename and transfer,
    but GHES and GHE.com availability of the two claims is unconfirmed, so
    `oidc_id_claims` defaults to false there and NG4 settles it; JFrog
@@ -479,7 +485,7 @@ cited as "0028 invariant n").
     (Nexus out). Lean: approve.
 12. **Open design question: what OIDC trust can enforce for different
     permissions.** The trust conditions are `repository_id` (or
-    `repository_owner_id` for an org-wide scope) plus an optional
+    `repository_owner_id` alone for an org-wide scope) plus an optional
     environment. Two scopes that differ only in `permission` (`pull`
     versus `push` or `admin`) therefore produce identical claims, so a
     trust cannot tell them apart, and any workflow in the repository (or
@@ -497,6 +503,15 @@ cited as "0028 invariant n").
 
 ## Open issues
 
+- The mechanism for passing tenant and connection data to adapter methods
+  (including `delete` and `health_check`) is settled in NG5; the
+  `AdapterConfig` wording in the loading paragraph is provisional until
+  then, and `AdapterConfig`, `AdapterError`, `ProjectSpec` and
+  `ADAPTERS_ENABLED` are defined there.
+- Whether the core, a contract invariant or the adapter enforces "no
+  `rotate_begin` for an `OidcTrust` scope", and the rotation behaviour when
+  a scope switches between `OidcTrust` and `IssuedSecret`, is settled by NG4.- The `api_version` compatibility rule (equality or a range, and how a
+  single integer expresses it) is settled by NG4.
 - The value store backend (Kubernetes Secret, Vault KV) and its interface
   are named here but specified in NG3; any backend must support create,
   read and delete by operation id and encrypt at rest (also an open issue

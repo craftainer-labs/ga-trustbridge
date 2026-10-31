@@ -58,7 +58,7 @@ instance code can live under `src/` at all. Findings from this repo:
 5. **What the template does about migrations at startup.**
    `src/app/main.py:49-58` defines `_run_migrations`
    (`command.upgrade(Config("alembic.ini"), "head")`), and the template's
-   `lifespan` (`main.py:86-104`) calls it in the api process when
+   `lifespan` (`main.py:86-124`) calls it (lines 103-104) in the api process when
    `settings.run_migrations_on_startup` (default `true`,
    `src/app/config.py:110`) and `mode != "mock"`. `scripts/runner.sh`
    only starts uvicorn or granian (lines 9-30) and never migrates;
@@ -107,7 +107,8 @@ NG3 implements and tests; the mechanics are NG3's to design within them.
 The template builds one module-level app with `FastAPI(...,
 lifespan=lifespan)` (`src/app/main.py:197-199`); its lifespan migrates
 when enabled, prefetches JWKS, starts cache invalidation and yields
-`None` (lines 86-113), so the hook is taken and a second `lifespan=`
+`None` and, in its `finally`, shuts down health checks, analytics and
+the engine (lines 86-124), so the hook is taken and a second `lifespan=`
 cannot be passed later. FastAPI hands that lifespan to its router
 (`fastapi/applications.py:990`) and Starlette's `Router.lifespan` enters
 `self.lifespan_context` at server start (`starlette/routing.py:639-648`,
@@ -172,9 +173,12 @@ documented in the README. No local-manifest ignore entries are needed.
   runtime processes run as a non-owner application role subject to RLS with
   no DDL rights. Both are supplied through the `POSTGRES_*` variables the
   template already reads.
-- Runtime processes gate on the schema: they wait for a schema at or after
-  the revision the code requires and stay compatible with a newer schema
-  (rollback), per NFR-0027's expand/contract rule (invariants 12-13).
+- Runtime processes gate on the schema through one **schema-compatibility
+  integer**: a single-row table (the schema-compatibility table) that every
+  migration writes, compared with the integer the running code requires.
+  They wait until the database's integer is at least the required one and
+  stay compatible with a higher one (rollback), per NFR-0027's
+  expand/contract rule (invariants 12-13).
 
 ### Migrations: one history, extended through a thin wrapper
 
@@ -388,12 +392,14 @@ are in ADR 0030.
 
 **Schema, startup and health**
 
-12. The runtime role can read the schema version table the gate depends
-    on, and a test running as that role passes the gate.
-13. The schema gate accepts a database whose revision is newer than, and
-    unknown to, the running code (rolled-back code against a newer schema)
-    and rejects one older than the revision the code requires, without the
-    code needing to know the database's revision.
+12. The runtime role can read the schema-compatibility table (invariant
+    13) the gate depends on, and a test running as that role passes the gate.
+13. The schema gate compares the database's schema-compatibility integer
+    (a single-row table written by every migration) with the integer the
+    running code requires: it accepts a database whose integer is equal or
+    greater (rolled-back code against a newer schema) and rejects a lower
+    one, without needing the database's revision id to be known to the
+    code.
 14. While the schema is not current, the api and the long-running
     processes stay alive (liveness passes) and report not ready, and they
     exit non-zero only after `SCHEMA_WAIT_SECONDS`; waiting never fails
@@ -485,6 +491,8 @@ labeled as a lean; the defaults named below are proposals too.
     (c) neither, documented. Lean: (a).
 
 ## Open issues
+
+- The schema-compatibility table's name and column are NG3's to choose.
 
 - ADR 0031 must settle RLS for `webhook_deliveries` (host-scoped, written
   before the tenant is known) and how the relay and reconciler read across
