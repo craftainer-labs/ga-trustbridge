@@ -12,7 +12,7 @@
 BUILD_ARGS = --build-arg APP_VERSION=$(RELEASE_VERSION) --build-arg APP_COMMIT=$(shell git rev-parse HEAD)
 
 OCI_LICENSE := Apache-2.0
-OCI_DESCRIPTION := FastAPI REST service with generic CRUD, OIDC auth and health checks
+OCI_DESCRIPTION := Self-hosted OIDC-first GitHub App that provisions registry and GitOps access for repositories
 
 # Written to dist/ by `unit-tests` below (a release-check step) and attached
 # to the release; the image label points at it.
