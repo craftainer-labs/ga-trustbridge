@@ -174,7 +174,10 @@ start (non-zero exit, or a failed lifespan) on the first failure:
 3. Issuer validation: fetch the discovery document (through the configured
    CA and proxy) and compare its `issuer` with the configured
    `oidc_issuer`; a mismatch refuses that host.
-4. Schema gate (ADR 0028, "Processes and database roles").
+The schema gate (ADR 0028, "Processes and database roles") is not part of
+`run_startup_checks`: every process calls `wait_for_schema()` after it, and
+the api does so after entering the template's lifespan so that the
+template's dev-time migration has already run.
 
 Readiness: the api registers a `SignerHealthCheck` on the template's health
 registry (the cached `get_health_registry()` the health router reads), so
@@ -251,6 +254,15 @@ consumption.
 
 ## Open issues
 
+- Signer health gates the whole api: a signer or Vault outage, or one
+  unreachable GHES host at startup, makes the api unready or unable to
+  start, including webhook ingress for healthy hosts, although ingress
+  needs no signer (ADR 0028's outbox is meant to keep it independent).
+  The alternative is to degrade per host (that host's events wait in the
+  outbox, the signer is excluded from the api's readiness, startup checks
+  mark a host unavailable instead of refusing the process). This is
+  Decision 4's trade-off made sharper; it is the user's call (G-api), and
+  the text above keeps the current proposal.
 - Argo CD option A applies only to the `file` signer (a non-exportable
   signer has no key to hand over); the claim is narrowed to that and
   production needs the separate read-only App (option B).

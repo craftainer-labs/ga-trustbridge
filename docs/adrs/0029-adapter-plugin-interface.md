@@ -140,7 +140,7 @@ class ResourceState:
 @dataclass(frozen=True, slots=True)
 class CredentialSlot:
     generation: int                   # 1-based; part of the deterministic name
-    name: str                         # tb-<tenant uuid[:8]>-<scope.key[:10]>-g<generation>; adapters may shorten it deterministically
+    name: str                         # tb-<tenant uuid hex, 32 chars>-<scope.key[:16]>-g<generation>; an adapter may shorten only the scope part, never the tenant id
     ref: Mapping[str, str]            # platform ids; empty until the platform confirmed creation
     delivered: bool                   # the core wrote the values to GitHub (True for OIDC trust: nothing secret to deliver)
     retire_after: datetime | None = None   # set by the core on a slot being replaced; adapters ignore it
@@ -229,7 +229,7 @@ class PlatformAdapter(Protocol):
     async def rotate_begin(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome: ...
     async def rotate_finish(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome: ...
     async def delete_credential(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome: ...
-    async def list_credentials(self, t: Tenant) -> Sequence[ListedCredential]: ...   # trustbridge-named ones only (prefix tb-<tenant8>-), for the orphan sweep
+    async def list_credentials(self, t: Tenant) -> Sequence[ListedCredential]: ...   # trustbridge-named ones only (prefix tb-<tenant uuid hex>-), for the orphan sweep
 
     def github_outputs(
         self, s: CredentialScope, credential: OidcTrust | IssuedSecret | NoCiCredential
@@ -257,9 +257,9 @@ lease. What an adapter author needs to know:
   `adapter_credentials` (credentials). An adapter keeps nothing between
   calls, so any worker, or the same worker after a restart, can continue.
 - **One operation per scope at a time.** The core holds the lease on
-  `(tenant, adapter, scope_key)` around every call that can create or
+  `(tenant, adapter, lease_key)` (the scope's `scope_key` by default) around every call that can create or
   delete something. Adapters declaring `credential_limit` are leased on
-  `(tenant, adapter, "*")`, so the cap is counted while no other worker
+  `(tenant, adapter, lease_key="*")`, so the cap is counted while no other worker
   creates credentials for that tenant and adapter. The core refuses to
   create past the limit, counting `current` and `previous` slots of all
   scopes plus in-flight operations, and returns a non-retryable
@@ -347,10 +347,10 @@ lease. What an adapter author needs to know:
   finish. Harbor overlaps with two robots; Docker Hub with two OATs, so
   its `credential_limit=10` counts both.
 - **Orphan sweep.** Because the name is stored before the platform holds
-  the credential, a credential matching the `tb-<tenant8>-` prefix that
+  the credential, a credential matching the full `tb-<tenant uuid hex>-` prefix (the whole 128-bit tenant id, so tenants sharing one platform account cannot match each other) that
   appears in no `current`/`previous` slot and no non-terminal operation is
   an orphan. The reconciler lists with `list_credentials(t)` under the
-  `(tenant, adapter, "*")` lease and deletes orphans with
+  `(tenant, adapter, lease_key="*")` lease and deletes orphans with
   `delete_credential`. An operation that exhausts its attempts without
   delivery is `failed`; for an initial issue the core then deletes the
   credential (no orphan, no unusable credential kept); for a rotation the
@@ -469,8 +469,16 @@ definition. Nexus stays out of the MVP.
   scope has one, and GitHub documents no immutable id for it. Accepted:
   environment names are controlled by the repository owner the trust
   already names by id.
+- The OIDC trust conditions are `repository_id` (or `repository_owner_id`
+  for an org-wide scope) plus an optional environment; no claim limits the
+  ref or workflow, so a `push` or `admin` scope trusts every workflow in
+  the repository (or org) that can obtain a token. Whether `push`/`admin`
+  should require a protected environment, or a `ref` / `job_workflow_ref`
+  condition, is a design question for the user (G-api), not settled here.
 - Platform name length limits (Harbor robot names, OAT labels) may force
-  an adapter to shorten `name`; the shortening must be deterministic and
+  an adapter to shorten `name`; the shortening may touch only the scope
+  part (the full tenant id must remain for the orphan sweep, otherwise the
+  adapter must record the mapping in `ref`), must be deterministic and
   still unique per generation. NG5 contract tests check this.
 - JFrog accepting `repository_id` / `repository_owner_id` as mapping
   claims, and GHES/GHE.com tokens carrying them, are unconfirmed (NG5 and

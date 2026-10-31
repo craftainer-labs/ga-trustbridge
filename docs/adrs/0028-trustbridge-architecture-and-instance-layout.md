@@ -129,10 +129,11 @@ _template_lifespan = app.router.lifespan_context   # the template's, as FastAPI 
 @asynccontextmanager
 async def _lifespan(app_: FastAPI) -> AsyncIterator[object]:
     settings = get_trustbridge_settings()          # validates; refuses bad config
-    runtime = await run_startup_checks(settings)   # ADR 0030: signers, issuers, schema gate
+    runtime = await run_startup_checks(settings)   # ADR 0030: settings, signers, issuers (no schema gate yet)
     get_health_registry().register(SignerHealthCheck(runtime))   # readiness hook (same cached registry the health router uses)
     try:
-        async with _template_lifespan(app_) as state:   # template's migrate (off in production), JWKS, cache, GC freeze
+        async with _template_lifespan(app_) as state:   # template's migrate (dev/compose/tests only), JWKS, cache, GC freeze
+            await runtime.wait_for_schema()        # schema gate, after any template migration
             yield state
     finally:
         await runtime.aclose()                     # trustbridge's own clients, after the template's shutdown
@@ -142,16 +143,22 @@ app.router.lifespan_context = _lifespan
 app.include_router(webhooks_router, prefix="/webhooks")
 ```
 
-Order: trustbridge's startup checks run first, so a bad signer, issuer or
-schema refuses to start before the template touches the database; on
-shutdown the template unwinds first, then trustbridge's resources.
+Order: trustbridge's startup checks (settings, signers, issuers) run
+first, so a bad signer or issuer refuses to start before the template
+touches the database. The schema gate runs after the template's lifespan
+has been entered, because in dev, compose and tests the template's own
+lifespan performs the migration (`RUN_MIGRATIONS_ON_STARTUP=true`) and
+the gate would otherwise fail on an empty database; in production the
+template migrates nothing and the gate simply waits for the migrate Job.
+On shutdown the template unwinds first, then trustbridge's resources.
 `lifespan_context` is an attribute of Starlette's router, not a documented
 extension point; the instance smoke test enters the lifespan with
 `TestClient(app)` as a context manager and asserts the startup checks ran
 and the webhook route exists, so a sync that changes the template's
 construction fails visibly. The worker, reconciler and migrate commands
 do not use FastAPI, so they call the same `run_startup_checks` from their
-own `main()` (see "Processes and database roles").
+own `main()` and then call `wait_for_schema()` (see "Processes and
+database roles").
 
 ### Settings
 
@@ -170,9 +177,14 @@ without `dotenv_filtering="only_existing"`, because a shared dotenv file
 would otherwise fail on every key one of the two classes does not know;
 (b) a misspelt trustbridge variable is silently ignored, so settings
 whose absence is dangerous (`GITHUB_HOSTS`, `SIGNERS`) have no default and
-fail validation when missing, and trustbridge-only variables are named
-`TB_*`-prefixed aliases checked at startup: any `TB_*` environment
-variable that matches no field is an error. Production also refuses
+fail validation when missing. Trustbridge-only variables are not prefixed,
+so a typo cannot be told from an unrelated variable by prefix; instead
+startup compares every environment variable name with the trustbridge
+field names (`difflib.get_close_matches`, cutoff 0.85) and fails on a
+near-miss that is not itself a field name (`LEASE_TTL_SECOND`), and logs
+the effective value of every trustbridge setting that has a default
+(retention, TTLs, caps) so a silently applied default is visible.
+Production also refuses
 `RUN_MIGRATIONS_ON_STARTUP=true` (below). Installed pydantic-settings is
 2.15.0.
 
@@ -215,9 +227,10 @@ documented in the README. No local-manifest ignore entries are needed.
   `alembic_version` is at or after `REQUIRED_REVISION`, a constant in
   `trustbridge.startup` updated in the commit that first needs a schema
   change (so a rollback to older code against a newer schema still starts,
-  per NFR-0027's expand/contract rule). The api reports not ready until
-  then; worker and reconciler retry for `SCHEMA_WAIT_SECONDS` (default 300)
-  and then exit non-zero. A pod that starts before the Job finishes
+  per NFR-0027's expand/contract rule). `wait_for_schema()` retries for
+  `SCHEMA_WAIT_SECONDS` (default 300) in every process, the api included
+  (a lifespan that has not yet yielded is not serving or ready), and then
+  fails (non-zero exit). A pod that starts before the Job finishes
   therefore waits instead of racing it.
 
 ### Migrations: one history, extended through a thin wrapper
@@ -259,14 +272,19 @@ contract between 0028, 0029 and the later ADRs):
 | --- | --- |
 | `tenants` | surrogate `id` (UUID) for `(host, installation_id)`, unique on that pair |
 | `webhook_deliveries` | the ingest outbox and dedupe record; see "Request path" |
-| `scope_leases` | `(tenant_id, adapter, scope_key)` primary key; `holder`, `fence` (bigint), `expires_at` |
+| `scope_leases` | `(tenant_id, adapter, lease_key)` primary key; `holder`, `fence` (bigint), `expires_at` |
 | `adapter_resources` | `(tenant_id, adapter, resource_key)` primary key; `ResourceState` as `name`, `ref` (jsonb) |
 | `adapter_credentials` | `(tenant_id, adapter, scope_key)` primary key; `CredentialState` as jsonb; `version` |
 | `credential_operations` | write-ahead log: `id`, `tenant_id`, `adapter`, `scope_key`, `kind` (`issue`, `rotate`, `delete`), `generation`, `name`, `state` (`intent`, `platform_done`, `delivered`, `awaiting_retire`, `finished`, `failed`), `attempts`, `fence`, `created_at`, `updated_at`; a partial unique index allows one non-terminal row per `(tenant_id, adapter, scope_key)` |
 
-**Lease.** Serialisation is per `(tenant, adapter, scope_key)` (for an
-adapter that declares `credential_limit`, `scope_key` is the constant `*`,
-so a platform cap is counted without a concurrent creator). It is a lease
+**Lease.** Serialisation is per `(tenant, adapter, lease_key)`.
+`lease_key` is the scope's `scope_key`, except for an adapter that
+declares `credential_limit`, where it is the constant `*` so a platform
+cap is counted without a concurrent creator. `lease_key` is only the
+lease's key: `adapter_credentials` and `credential_operations` always
+carry the real `scope_key`, so scopes of one tenant keep separate state
+and separate one-non-terminal-operation slots (a scope parked at
+`NEEDS_MANUAL_ACTION` does not block the others). It is a lease
 row, not a Postgres advisory lock: the lock must outlive a transaction
 while an HTTP call runs, and session-level advisory locks do not survive
 PgBouncer in transaction mode (`DB_POOL_MODE=external`, ADR 0022), while
@@ -274,17 +292,26 @@ holding a transaction open across a platform call would pin a connection
 and an RLS setting. Acquire:
 
 ```sql
-INSERT INTO scope_leases (tenant_id, adapter, scope_key, holder, fence, expires_at)
+INSERT INTO scope_leases (tenant_id, adapter, lease_key, holder, fence, expires_at)
 VALUES (:t, :a, :k, :me, 1, now() + :ttl)
-ON CONFLICT (tenant_id, adapter, scope_key) DO UPDATE
+ON CONFLICT (tenant_id, adapter, lease_key) DO UPDATE
    SET holder = :me, fence = scope_leases.fence + 1, expires_at = now() + :ttl
- WHERE scope_leases.expires_at < now() OR scope_leases.holder = :me
+ WHERE scope_leases.expires_at < now()
 RETURNING fence;
 ```
 
-No row returned means someone else holds it: the message goes back to the
-retry path with a delay and does not count as a failed attempt. The holder
-renews at a third of the TTL (`LEASE_TTL_SECONDS`, default 120) and every
+`:me` is a fresh UUID generated per unit of work (one task handling one
+scope), never a worker or consumer id, so a redelivery of the same message
+to the same consumer, or two tasks in one process, cannot both hold the
+lease. No row returned means someone else holds it: the message goes back
+to the retry path (below) without counting as a failed attempt. The holder
+renews at a third of the TTL (`LEASE_TTL_SECONDS`, default 120) with
+`UPDATE scope_leases SET expires_at = now() + :ttl WHERE ... AND holder =
+:me AND fence = :fence` (no fence bump, so the `fence` the holder keeps in
+memory stays valid; zero rows updated means the lease was lost and the
+unit of work aborts). When the unit of work ends the holder releases with
+`UPDATE ... SET expires_at = now() WHERE ... AND holder = :me AND fence =
+:fence`, so the next message for the scope does not wait out the TTL. Every
 write to `credential_operations`, `adapter_credentials` and
 `adapter_resources` carries `AND EXISTS (SELECT 1 FROM scope_leases WHERE
 ... AND fence = :fence AND holder = :me)`, so a holder that lost the lease
@@ -313,8 +340,10 @@ a sweep deletes credentials that no slot or operation accounts for.
    signature validation, a 2xx within 10 s, process asynchronously,
    `X-GitHub-Delivery` for replay detection, redelivery after downtime).
    This is a **transactional outbox**:
-   - Read the raw body (bounded by `WEBHOOK_MAX_BODY_BYTES`, default
-     25 MiB, GitHub's documented payload cap; NG3 confirms) and verify
+   - Reject at once with 413 when `Content-Length` exceeds
+     `WEBHOOK_MAX_BODY_BYTES` (default 25 MiB, GitHub's documented payload
+     cap; NG3 confirms), read the raw body as a stream that aborts when the
+     cap is passed, and verify
      `X-Hub-Signature-256` with `hmac.compare_digest` before parsing JSON.
      The secret is per App (per GitHub host, selected by the `{host}` path
      segment), never in the URL.
@@ -324,22 +353,27 @@ a sweep deletes credentials that no slot or operation accounts for.
      `X-GitHub-Hook-ID`, `X-GitHub-Hook-Installation-Target-ID`,
      `X-GitHub-Hook-Installation-Target-Type`; never the signature),
      `body` (bytea), `received_at`, `state='received'`,
-     `relayed_at` null, `attempts` 0, `tenant_id` null (resolved by the
-     worker). `INSERT ... ON CONFLICT (delivery_id) DO NOTHING`; a
+     `relayed_at` null, `retry_at` null, `attempts` 0, `tenant_id` null
+     (resolved by the worker). `INSERT ... ON CONFLICT (delivery_id) DO NOTHING`; a
      conflict is a redelivery or replay and returns 2xx. Commit, then
      return 202. The 2xx is therefore sent only after the event is
-     durable in Postgres, and Valkey is not on the request path.
-   - After the commit the handler makes one best-effort relay of its own
-     row (below) for latency; a failure is ignored. No GitHub or adapter
+     durable in Postgres, and the response never waits for Valkey.
+   - After the response (a background task) the handler makes one
+     best-effort relay of its own row (below) for latency, with a Valkey
+     socket timeout of 1 second; a failure is ignored. No GitHub or adapter
      call happens on the request path.
 2. **Relay** (a task in the reconciler, plus the best-effort call above):
-   `SELECT ... WHERE relayed_at IS NULL ORDER BY received_at FOR UPDATE
+   `SELECT ... WHERE state = 'received' AND relayed_at IS NULL AND
+   (retry_at IS NULL OR retry_at <= now()) ORDER BY received_at FOR UPDATE
    SKIP LOCKED LIMIT n`, `XADD tb:events` with the **delivery id only**,
    `UPDATE ... SET relayed_at = now()`, commit. A crash after the `XADD`
    and before the commit relays a second time; handlers are idempotent and
-   the worker skips a delivery already `processed`. The same task re-relays
-   rows still `received` more than `RELAY_RECHECK_MINUTES` (default 15)
-   after `relayed_at`, which recovers a Valkey that lost its data. The
+   the worker skips a delivery already `processed`, and a duplicate claim
+   does not touch `attempts` (below). The same task re-relays rows still
+   `received`, with `retry_at` null, more than `RELAY_RECHECK_MINUTES`
+   (default 15) after `relayed_at`, which recovers a Valkey that lost its
+   data or a trimmed entry; rows waiting in a delayed retry are left to
+   their `retry_at`. The
    handler and the relay are interchangeable, so several reconciler
    standbys may run it.
 3. **Worker**: the same image, command `python -m trustbridge.worker`.
@@ -348,11 +382,18 @@ a sweep deletes credentials that no slot or operation accounts for.
    `(host, installation_id)` to `tenant_id`, sets the RLS setting, runs the
    handlers, marks the row `processed` and `XACK`s. `XAUTOCLAIM` reclaims
    entries idle past a threshold from dead consumers. `attempts` on the
-   row counts claims; after `MAX_DELIVERY_ATTEMPTS` the worker sets the row
-   `dead`, `XADD`s `{delivery_id, error}` to `tb:events:dead`, and `XACK`s.
-   The dead-letter stream carries no body: the admin API reads the body
-   from the row, and "requeue" resets the row to `received` with
-   `relayed_at` null. A row whose body was purged (below) before it was
+   row counts **failed handling only**: it is incremented when a handler
+   raises (a retryable or non-retryable `AdapterError`, or any other
+   error), not on a claim, a redelivered duplicate, a re-relay or a busy
+   lease. Retry path: for a busy lease or a retryable error the worker, in
+   one transaction, sets `relayed_at = null` and `retry_at = now() +
+   backoff` (bounded exponential, 5 s to 5 min; for a failure also
+   `attempts + 1`) and then `XACK`s the entry; the relay re-adds the row
+   once `retry_at` passes. After `MAX_DELIVERY_ATTEMPTS` failures the
+   worker sets the row `dead`, `XADD`s `{delivery_id, error}` to
+   `tb:events:dead`, and `XACK`s. The dead-letter stream carries no body:
+   the admin API reads the body from the row, and "requeue" resets the row
+   to `received` with `relayed_at` null, `retry_at` null and `attempts` 0. A row whose body was purged (below) before it was
    processed goes to `dead` with reason `body_purged`. Handlers are
    idempotent (reconcile-style, ADR 0029), so at-least-once delivery is
    safe. Leader election is not needed for workers (the consumer group
@@ -373,13 +414,14 @@ a sweep deletes credentials that no slot or operation accounts for.
      `DELIVERY_ID_RETENTION_DAYS` (default 30) so a late redelivery is
      still deduplicated, then is deleted.
    - `tb:events` is trimmed by the reconciler with `XTRIM tb:events MINID
-     <t>`, where `t = min(oldest pending id of the group, the group's
-     last-delivered-id, now - STREAM_RETENTION_HOURS)`. With nothing
-     pending the bound is the older of the retention window and the group's
-     last-delivered id, so unread entries are never trimmed and the bound
-     is defined when the pending list is empty. An entry trimmed
-     unprocessed is recovered by the re-relay sweep (the row is still
-     `received`), because Postgres, not the stream, is the source of
+     <t>`, where `t = min(oldest pending id of the group, now -
+     STREAM_RETENTION_HOURS)` and, with nothing pending, `t = now -
+     STREAM_RETENTION_HOURS`. The stream is therefore bounded by the
+     retention window even when the group is stalled or lagging (signer or
+     schema-wait outage), and entries being worked (pending) are not
+     trimmed. An entry trimmed unread is recovered by the re-relay sweep
+     (the row is still `received`, `relayed_at` older than the recheck
+     window), because Postgres, not the stream, is the source of
      truth. `tb:events:dead` is trimmed by age,
      `DEAD_LETTER_RETENTION_DAYS`.
 6. **Installation tokens**: minted with the signer-backed App JWT
@@ -490,6 +532,10 @@ TTLs) are proposals too.
   this ADR and was not re-fetched in this pass; NG3 confirms it.
 - `lifespan_context` is not a documented Starlette extension point; the
   smoke test is the guard.
+- The unauthenticated webhook route buffers up to the body cap before the
+  signature can be checked. Rate limiting per source address at the
+  ingress controller (or an application limiter) is not decided here; it
+  is a deployment question for NG7 and the user.
 
 ## Consequences
 
