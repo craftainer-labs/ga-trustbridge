@@ -337,7 +337,8 @@ Valkey so that all api replicas share them, and **fails open**.
   before the `Content-Length` check, before any body byte is read or
   buffered and before the signature check, so a request with a bad
   signature counts against its source address. A request over the limit
-  gets 429 with `Retry-After` and its body is never read. GitHub treats
+  gets 429 with `Retry-After` (the whole seconds left in the current
+  window, at least 1) and its body is never read. GitHub treats
   that as a failed delivery, and the delivery reconciler (item 4)
   redelivers it once its host is `ready`, because listing and
   redelivering need the host's App JWT.
@@ -348,8 +349,9 @@ Valkey so that all api replicas share them, and **fails open**.
   within `WEBHOOK_RATE_LIMIT_WINDOW_SECONDS` is a rejection. The key is the
   address alone, shared by all `/webhooks/github/{host}` routes. An IPv6
   address is reduced to its /64 prefix before keying.
-- **Fail open.** Each Valkey call is bounded by
-  `WEBHOOK_RATE_LIMIT_TIMEOUT_MS`. A connection error, a timeout or any
+- **Fail open.** The whole limiter check (connect, if needed, plus the one
+  atomic command) is bounded by a single budget,
+  `WEBHOOK_RATE_LIMIT_TIMEOUT_MS`, not per call. A connection error, a timeout or any
   other Valkey error lets the request through to normal handling and
   increments a metric and a rate-limited log line. Ingest therefore
   survives a Valkey outage through the outbox. Accepted consequence: while
@@ -536,12 +538,12 @@ are in ADR 0030.
 24. A platform-side credential name contains the full tenant id, and an
     adapter that shortens a name shortens only the scope part.
 
-**Abuse limits and host availability**
+**Abuse limits**
 
 25. A webhook request whose source address is over
     `WEBHOOK_RATE_LIMIT_REQUESTS` in the current
-    `WEBHOOK_RATE_LIMIT_WINDOW_SECONDS` gets 429 with `Retry-After`
-    without any of its body being read, requests with an invalid signature
+    `WEBHOOK_RATE_LIMIT_WINDOW_SECONDS` gets 429 with `Retry-After` set to
+    the seconds left in that window (at least 1) without any of its body being read, requests with an invalid signature
     count toward the limit, and an address in
     `WEBHOOK_RATE_LIMIT_EXEMPT_CIDRS` is never limited.
 26. The limiter keys on `request.client.host` only and never parses
@@ -555,11 +557,14 @@ are in ADR 0030.
 28. When Valkey errors or exceeds `WEBHOOK_RATE_LIMIT_TIMEOUT_MS`, the
     limiter lets the request through to normal handling (a valid delivery
     still gets its 2xx after the commit), emits its metric, and adds at
-    most that timeout to the request.
+    most that timeout in total to the request.
+
+**Host availability** (the model is in ADR 0030)
+
 29. A webhook for a host that is `unregistered` gets 503 with its body
     unread, and a webhook for a host that is `unavailable` (not
     `unregistered`) is verified, stored and answered 2xx like any other
-    (0030 invariants 7-10).
+    (0030 invariants 7-11).
 
 ## Decisions (G-api, 2026-11-01)
 
@@ -636,8 +641,11 @@ wrong):
   proxy's address and the limiter throttles them together; the deployment
   must configure the proxy, which the Helm chart (NG7) documents.
 - Where a webhook secret is read from (the secret store) is outside the
-  limiter: if the secret store is unavailable the route cannot verify and
-  answers 503; NG3 decides the exact response.
+  limiter; see 0030 invariant 11 for a secret-store outage.
+- Host state is held per process (api replica, worker, reconciler); the
+  admin API shows the answering replica's view. A shared source of truth
+  (for example a table) would remove the disagreement and is NG3's to
+  propose if the views diverge in practice.
 
 ## Consequences
 

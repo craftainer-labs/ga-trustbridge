@@ -259,12 +259,15 @@ NG3 must implement and test", cited as "0028 invariant n").
    (0029 invariants A6 and A7).
 7. A signer, Vault, GitHub or issuer failure for one host leaves the api
    process alive and ready, every other host's state unchanged, and
-   webhook ingress for every host (except `unregistered`) accepting
-   deliveries.
+   webhook ingress for every host (except `unregistered`, and subject to
+   invariant 11) accepting deliveries.
 8. A delivery for an `unavailable` host is neither handled nor counted as
    a failure nor dead-lettered (including by the stream's delivery count,
    0028 invariant 4) while the host is `unavailable`, and is handled
-   without a GitHub redelivery once the host is `ready` again.
+   without a GitHub redelivery once the host is `ready` again: the
+   transition to `ready` in a worker re-adds that host's waiting rows
+   itself, so they are handled within `HOST_RECHECK_SECONDS` plus normal
+   processing and do not wait for the periodic re-relay sweep.
 9. Every process that runs the startup checks (api, worker, reconciler)
    rechecks an `unavailable` host every `HOST_RECHECK_SECONDS`, and the
    host becomes `ready` in that process without a restart when its checks
@@ -274,6 +277,11 @@ NG3 must implement and test", cited as "0028 invariant n").
 10. The signer health check, if registered, is registered once however many
     times the lifespan is entered (0028 invariant 16), makes no GitHub call
     per probe, and does not affect the api's readiness.
+11. Webhook secrets are resolved on first use and cached in process
+    memory, so a secret-store or Vault outage after a successful read does
+    not stop signature verification or ingress; a process with no cached
+    secret for a host answers 503 for it (its failed delivery is
+    redelivered by the reconciler once the host is `ready`).
 
 ## Decisions (G-api, 2026-11-01)
 
@@ -352,8 +360,14 @@ wrong):
   webhook secret reference) is persisted when the operator's `GITHUB_HOSTS`
   entry is read-only, and how it overlays that entry, are settled by NG4
   (0028 lists no table for it).
-- A webhook for a host whose secret store is unreachable cannot be
-  verified; the response and the host state in that case are NG3's.
+- A process that has never read a host's webhook secret while the secret
+  store is down cannot verify, so ingress then answers 503 for that host
+  only (invariant 11); a short, cache-warming read at startup narrows the
+  window and is NG3's to design.
+- Host state is per process and the admin API reports the answering
+  replica's view; the registration record NG4 designs must be readable by
+  every process so each picks a registration up at its next recheck
+  (invariant 9).
 - The Argo CD read-only App's PEM is not imported into a signer: it is
   handed to Argo CD's cluster Secret (ADR 0029). How the manifest-flow
   callback passes it to the adapter's tenant connection data is settled by

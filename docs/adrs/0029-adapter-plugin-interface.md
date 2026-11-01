@@ -541,10 +541,17 @@ for Accepted now.
   must show that selection, or the adapter must give each permission a
   distinct audience or mapping name.
 - A Docker Hub tenant is capped at 10 OATs in total. Every scope needs one
-  and a rotation needs a second briefly, so a tenant has at most 10 scopes
-  and a rotation that would pass the limit is refused with a visible
+  and a rotation needs a second briefly (the core serialises rotations
+  adapter-wide), so a tenant can rotate with up to 9 scopes; with 10
+  scopes rotation is refused, and a rotation that would pass the limit is
+  refused with a visible
   condition while the old credential stays valid (the core's
   `credential_limit` rule); the Docker Hub documentation states this.
+- Eligibility (A12) is re-evaluated at each reconcile, so a trust stays
+  in force until the next reconcile after an environment loses its
+  protection or becomes shared; the exposure window is the reconcile
+  interval, and NG4 narrows it by re-evaluating on any GitHub event about
+  environment changes that its fixtures show exists.
 - How the core reads an environment's protection rules (required
   reviewers, deployment branch policy) for A12, and which of them count as
   "protected", is settled by NG4.
