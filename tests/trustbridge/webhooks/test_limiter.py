@@ -100,7 +100,7 @@ async def test_valkey_error_fails_open_and_counts_a_metric(
     valkey.down = True
     added: list[int] = []
     monkeypatch.setattr(
-        "trustbridge.webhooks.limiter.metrics.limiter_failopen.add", lambda n: added.append(n)
+        "trustbridge.webhooks.limiter.metrics.limiter_failopen.add", added.append
     )
     limiter = _limiter(ValkeyWindowCounter(as_redis(valkey)), requests=1)
     for _ in range(3):

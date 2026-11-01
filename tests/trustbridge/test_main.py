@@ -13,6 +13,7 @@ import sys
 import types
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -20,9 +21,11 @@ from craftainer_observability.health.registry import HealthRegistry
 from fastapi import FastAPI
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+import trustbridge.main as main_module
 from tests.trustbridge.fakes import FakeHostChecker, FakeRedis, FakeSecretStore
 from tests.trustbridge.helpers import SIGNERS, as_redis, host, make_settings, sign
 from trustbridge.github.availability import HostState
+from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.main import Overrides, install
 from trustbridge.worker.schema import REQUIRED_SCHEMA_VERSION
 
@@ -47,7 +50,8 @@ async def test_startup_checks_run_before_the_template_and_resources_outlive_it(
     checker = FakeHostChecker(failing={"bad"})
 
     class Spy(FakeHostChecker):
-        async def get_app_id(self, host, jwt):  # type: ignore[no-untyped-def]  # noqa: ANN001
+        async def get_app_id(self, host: GitHubHostConfig, jwt: str) -> int:
+            """Record the check, then answer like the wrapped checker."""
             events.append(f"check:{host.name}")
             return await checker.get_app_id(host, jwt)
 
@@ -128,7 +132,7 @@ async def test_the_lifespan_can_be_entered_repeatedly_registering_each_check_onc
         Overrides(
             checker=FakeHostChecker(),
             redis=as_redis(FakeRedis()),
-            session_factory=lambda: Session(),  # type: ignore[arg-type,return-value]
+            session_factory=Session,  # type: ignore[arg-type]
             health_registry=lambda: registry,
         ),
     )
@@ -145,7 +149,7 @@ def test_install_is_idempotent_and_adds_the_proxy_middleware_once() -> None:
     app = _template([])
     settings = make_settings(trusted_proxies=["10.0.0.0/8"])
     assert install(app, settings) is install(app, settings)
-    proxies = [m for m in app.user_middleware if m.cls is ProxyHeadersMiddleware]
+    proxies = [m for m in app.user_middleware if cast("Any", m.cls) is ProxyHeadersMiddleware]
     assert len(proxies) == 1
     assert proxies[0].kwargs["trusted_hosts"] == ["10.0.0.0/8"]
     assert [getattr(r, "path", "") for r in app.routes].count("/webhooks/github/{host}") == 1
@@ -155,7 +159,9 @@ def test_unset_trusted_proxies_outside_production_trusts_loopback_only() -> None
     """Unset trusted proxies outside production trusts loopback only."""
     app = _template([])
     install(app, make_settings())
-    (proxy,) = (m for m in app.user_middleware if m.cls is ProxyHeadersMiddleware)
+    (proxy,) = (
+        m for m in app.user_middleware if cast("Any", m.cls) is ProxyHeadersMiddleware
+    )
     assert proxy.kwargs["trusted_hosts"] == "127.0.0.1"
 
 
@@ -217,3 +223,17 @@ def test_smoke_the_real_entrypoint_enters_its_lifespan_and_serves_the_route() ->
     )
     assert done.returncode == 0, done.stderr[-3000:]
     assert "SMOKE-OK" in done.stdout
+
+
+def test_the_app_attribute_is_built_on_first_access_and_nothing_else_is_exported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Importing the module builds nothing; `app` installs on the template once."""
+    template = _template([])
+    monkeypatch.setattr(main_module, "template_app", template)
+    monkeypatch.setattr(main_module, "get_trustbridge_settings", make_settings)
+    built = main_module.app
+    assert built is template
+    assert main_module.app is template  # installed once
+    with pytest.raises(AttributeError):
+        _ = main_module.nothing_else

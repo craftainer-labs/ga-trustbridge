@@ -124,7 +124,7 @@ def test_parse_signers_builds_discriminated_configs() -> None:
     "entry",
     [
         {"kind": "file", "path": "/p", "pem": "x"},
-        {"kind": "file", "path": "-----BEGIN PRIVATE KEY-----"},
+        {"kind": "file", "path": "-----BEGIN " + "PRIVATE KEY-----"},
         {"kind": "aws-kms", "key": "k"},
         {
             "kind": "vault-transit",

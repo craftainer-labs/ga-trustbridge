@@ -76,15 +76,16 @@ class SqlTenants:
         self, host: str, installation_id: int, org: str, org_id: int
     ) -> UUID:
         """Create or update (and re-activate) the tenant of `(host, installation_id)`."""
-        stmt = pg_insert(TenantRow).values(
+        insert = pg_insert(TenantRow).values(
             host=host, installation_id=installation_id, org=org, org_id=org_id, state="active"
         )
-        stmt = stmt.on_conflict_do_update(
+        upsert = insert.on_conflict_do_update(
             constraint="uq_tenants_host_inst",
             set_={"org": org, "org_id": org_id, "state": "active"},
         ).returning(TenantRow.id)
         async with self._sf() as session, session.begin():
-            return (await session.execute(stmt)).scalar_one()
+            tenant_id: UUID = (await session.execute(upsert)).scalar_one()
+        return tenant_id
 
     async def tenant_id_for(self, host: str, installation_id: int) -> UUID | None:
         """The tenant of `(host, installation_id)`, if known."""
@@ -321,4 +322,4 @@ class ReconcileRequests:
         if self._redis is None:
             self.local.add(str(tenant_id))
             return
-        await self._redis.sadd(RECONCILE_SET, str(tenant_id))  # type: ignore[misc]
+        await self._redis.sadd(RECONCILE_SET, str(tenant_id))

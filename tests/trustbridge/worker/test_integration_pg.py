@@ -11,8 +11,10 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
+from craftainer_crud.models.base import Base
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
@@ -40,7 +42,6 @@ from trustbridge.worker.lease import (
     guarded_execute,
 )
 from trustbridge.worker.models import (
-    Base,
     SchemaCompat,
     ScopeLease,
     Tenant,
@@ -124,7 +125,7 @@ async def test_sql_relay_rules_match_the_in_memory_rules(ids: list[str]) -> None
     store = PgDeliveryStore(session_factory)
     now = datetime.now(UTC)
     past, future = now - timedelta(minutes=5), now + timedelta(minutes=5)
-    scenarios = {
+    scenarios: dict[str, dict[str, Any]] = {
         "fresh": {},
         "relayed": {"last_relayed_at": past},
         "delayed": {"next_attempt_at": future, "last_relayed_at": past},
@@ -148,7 +149,7 @@ async def test_sql_relay_rules_match_the_in_memory_rules(ids: list[str]) -> None
         record = await store.get(delivery.delivery_id)
         assert record is not None
         records[delivery.delivery_id] = record
-        scenarios[name]["id"] = delivery.delivery_id  # type: ignore[assignment]
+        scenarios[name]["id"] = delivery.delivery_id
     for mode, before in (("tick", None), ("resweep", past + timedelta(minutes=1)), ("host", None)):
         wanted = {
             i
@@ -397,7 +398,7 @@ async def test_two_concurrent_migrate_runs_do_not_interleave_and_report_the_role
         migrate.run_upgrade(settings, upgrade=upgrade("a")),
         migrate.run_upgrade(settings, upgrade=upgrade("b")),
     )
-    assert codes == [0, 0]
+    assert list(codes) == [0, 0]
     labels = [label for label, _ in sorted(spans, key=lambda s: s[1])]
     assert labels in (["a-start", "a-end", "b-start", "b-end"], ["b-start", "b-end", "a-start", "a-end"])
 

@@ -31,7 +31,6 @@ from app.health_checks import get_health_registry
 from app.main import app as template_app
 from trustbridge.github.availability import HostChecker
 from trustbridge.github.ports import SecretReader
-from trustbridge.github.runtime import HostRuntime
 from trustbridge.github.webhook_secrets import WebhookSecretResolver
 from trustbridge.settings import TrustbridgeSettings, get_trustbridge_settings
 from trustbridge.webhooks.argocd import router as argocd_router
@@ -61,7 +60,6 @@ def _trusted_hosts(settings: TrustbridgeSettings) -> list[str] | str:
 class Overrides:
     """Collaborators a test (or NG4) can substitute; every field defaults to the real thing."""
 
-    runtime: HostRuntime | None = None
     checker: HostChecker | None = None
     redis: Redis | None = None
     session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -97,7 +95,8 @@ def install(
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_hosts(settings))
     app.include_router(webhook_router)
     app.include_router(argocd_router)
-    app.router.lifespan_context = lifespan
+    # Not a documented Starlette attribute (see the module docstring); the smoke test guards it.
+    app.router.lifespan_context = lifespan  # type: ignore[assignment]
     app.state.trustbridge_installed = True
     return app
 
@@ -119,7 +118,6 @@ async def _trustbridge_resources(
         settings,
         redis=redis,
         session_factory=sessions,
-        runtime=overrides.runtime,
         checker=overrides.checker,
     )
     monitor = core.runtime.monitor
@@ -177,4 +175,12 @@ async def _trustbridge_resources(
             await owned_redis.aclose()
 
 
-app: FastAPI = install(template_app, get_trustbridge_settings())
+def __getattr__(name: str) -> FastAPI:
+    """Build `trustbridge.main:app` on first access (uvicorn's `module:attr` lookup).
+
+    Importing this module must not read the environment or mutate the template app, so the
+    unit tests can import `install` and `Overrides`; the first access to `app` does both.
+    """
+    if name != "app":
+        raise AttributeError(name)
+    return install(template_app, get_trustbridge_settings())

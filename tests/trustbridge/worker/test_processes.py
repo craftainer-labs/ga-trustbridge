@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from craftainer_crud.models.base import Base
 
 from tests.trustbridge.fakes import FakeHostChecker, FakeRedis
 from tests.trustbridge.helpers import as_redis, make_settings
@@ -66,7 +67,7 @@ async def test_the_process_exits_non_zero_when_the_schema_never_becomes_current(
         settings,
         ProcessOverrides(
             redis=as_redis(FakeRedis()),
-            session_factory=lambda: Session(),  # type: ignore[arg-type,return-value]
+            session_factory=Session,  # type: ignore[arg-type]
             checker=FakeHostChecker(),
             stop=asyncio.Event(),
         ),
@@ -208,11 +209,13 @@ def test_migrate_cli_rejects_unknown_commands_and_wraps_autogenerate(
     assert migrate.main([]) == 2
     assert migrate.main(["downgrade"]) == 2
     called: list[list[str]] = []
-    monkeypatch.setattr(migrate, "alembic_main", lambda argv: called.append(argv))
+
+    def fake_alembic(argv: list[str]) -> None:
+        called.append(argv)
+
+    monkeypatch.setattr(migrate, "alembic_main", fake_alembic)
     assert migrate.main(["revision", "--autogenerate", "-m", "x"]) == 0
     assert called == [["revision", "--autogenerate", "-m", "x"]]
-    from trustbridge.worker import models  # noqa: PLC0415
-
     # webhook_deliveries (NG3), adapter_credentials and github_host_registrations (NG4)
-    tables = models.Base.metadata.tables
+    tables = Base.metadata.tables
     assert {"webhook_deliveries", "adapter_credentials", "github_host_registrations"} <= set(tables)

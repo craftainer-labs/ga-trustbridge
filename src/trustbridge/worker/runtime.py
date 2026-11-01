@@ -15,10 +15,10 @@ import logging
 import signal
 import socket
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from craftainer_observability.logs import configure_logging
 from redis.asyncio import Redis
@@ -87,14 +87,13 @@ def build_core(
     *,
     redis: Redis | None,
     session_factory: async_sessionmaker[AsyncSession] | None,
-    runtime: HostRuntime | None = None,
     readd_on_ready: bool = False,
     checker: HostChecker | None = None,
 ) -> Core:
     """Assemble the store, queue, relay, leases, GitHub runtime and schema gate.
 
     `readd_on_ready` (the worker) makes a host that turns `ready` re-add its waiting rows to
-    the stream (ADR 0030 invariant 8). A given `runtime` replaces the real GitHub side (tests).
+    the stream (ADR 0030 invariant 8). `checker` replaces the network host checks (tests).
     """
     store: DeliveryStore
     lease_store: LeaseStore
@@ -128,7 +127,7 @@ def build_core(
             count = await relay.relay_host(host.name)
             logger.info("re-relayed rows of a host that became ready", extra={"host": host.name, "count": count})
 
-    runtime = runtime or build_host_runtime(
+    runtime = build_host_runtime(
         settings,
         RuntimeDeps(
             installations=tenants,
@@ -165,7 +164,6 @@ class ProcessOverrides:
 
     redis: Redis | None = None
     session_factory: async_sessionmaker[AsyncSession] | None = None
-    runtime: HostRuntime | None = None
     checker: HostChecker | None = None
     stop: asyncio.Event | None = None
 
@@ -197,7 +195,6 @@ async def run_process(
             settings,
             redis=client,
             session_factory=sessions,
-            runtime=chosen.runtime,
             readd_on_ready=kind == "worker",
             checker=chosen.checker,
         )
@@ -246,7 +243,9 @@ def _install_signal_handlers(stop: asyncio.Event) -> None:
             logger.debug("cannot install a handler for %s", sig)
 
 
-def main(kind: ProcessKind, runner: Callable[..., object] = asyncio.run) -> int:
+def main(
+    kind: ProcessKind, runner: Callable[[Coroutine[Any, Any, int]], int] = asyncio.run
+) -> int:
     """Synchronous entry for `python -m trustbridge.worker [worker|reconciler]`."""
     configure_logging()
-    return int(runner(run_process(kind)))  # type: ignore[call-overload]
+    return runner(run_process(kind))

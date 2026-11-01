@@ -231,7 +231,11 @@ async def test_requeue_refuses_a_row_whose_body_was_purged() -> None:  # inv. 7
 
 async def test_infrastructure_errors_re_add_the_entry_without_counting() -> None:
     """Infrastructure errors re add the entry without counting."""
-    h = await Harness({"push": lambda ctx: None}).start()  # type: ignore[dict-item]
+
+    async def noop(ctx: EventContext) -> None:
+        del ctx
+
+    h = await Harness({"push": noop}).start()
     await h.add("d1")
     real_get = h.store.get
     boom = {"on": True}

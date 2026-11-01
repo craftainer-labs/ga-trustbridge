@@ -41,7 +41,7 @@ def grant_runtime_access(role: str = RUNTIME_ROLE) -> None:
             END IF;
         END
         $$
-        """
+        """  # noqa: S608 -- constants and ints only
     )
 
 
@@ -102,7 +102,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.execute(
-        "INSERT INTO schema_compat (id, version) VALUES (1, "
+        "INSERT INTO schema_compat (id, version) VALUES (1, "  # noqa: S608 -- constants and ints only
         f"{SCHEMA_COMPAT_VERSION}) ON CONFLICT (id) DO UPDATE SET version = "
         f"GREATEST(schema_compat.version, {SCHEMA_COMPAT_VERSION})"
     )

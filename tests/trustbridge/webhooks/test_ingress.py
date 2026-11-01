@@ -32,8 +32,9 @@ class Setup:
 
     def __init__(self, **settings_kw: Any) -> None:  # noqa: ANN401
         """Initialise."""
-        self.ok = host("ok", webhook_secret_ref="env:OK")
-        self.bad = host("bad", webhook_secret_ref="env:BAD")
+        ok_ref, bad_ref = "env:OK", "env:BAD"
+        self.ok = host("ok", webhook_secret_ref=ok_ref)
+        self.bad = host("bad", webhook_secret_ref=bad_ref)
         self.fresh = host("fresh", app_id=None, webhook_secret_ref=None)
         self.settings = make_settings([self.ok, self.bad, self.fresh], **settings_kw)
         self.store = InMemoryDeliveryStore()
@@ -78,18 +79,16 @@ class Setup:
         *,
         delivery: str | None = "d-1",
         signature: str | None = "auto",
-        secret: str = SECRET,
-        extra: dict[str, str] | None = None,
+        signed_with: str = SECRET,
     ) -> httpx.Response:
         """Post."""
         headers = {"x-github-event": "installation", "content-type": "application/json"}
         if delivery is not None:
             headers["x-github-delivery"] = delivery
         if signature == "auto":
-            headers["x-hub-signature-256"] = sign(secret.encode(), body)
+            headers["x-hub-signature-256"] = sign(signed_with.encode(), body)
         elif signature is not None:
             headers["x-hub-signature-256"] = signature
-        headers.update(extra or {})
         transport = httpx.ASGITransport(app=self.app, client=("203.0.113.5", 1234))
         async with httpx.AsyncClient(transport=transport, base_url="http://tb") as client:
             return await client.post(f"/webhooks/github/{name}", content=body, headers=headers)
@@ -160,11 +159,13 @@ async def test_signature_is_checked_with_compare_digest_before_anything_is_store
     """Signature is checked with compare digest before anything is stored."""
     calls: list[int] = []
     real = hmac.compare_digest
-    monkeypatch.setattr(
-        "trustbridge.webhooks.ingress.hmac.compare_digest",
-        lambda a, b: calls.append(1) or real(a, b),
-    )
-    assert (await tb.post(secret="wrong")).status_code == 401
+
+    def counting(a: bytes, b: bytes) -> bool:
+        calls.append(1)
+        return real(a, b)
+
+    monkeypatch.setattr("trustbridge.webhooks.ingress.hmac.compare_digest", counting)
+    assert (await tb.post(signed_with="wrong")).status_code == 401
     assert (await tb.post(signature=None)).status_code == 401
     assert (await tb.post(signature="sha1=abc")).status_code == 401
     assert tb.store.rows == {}
@@ -271,9 +272,9 @@ async def test_over_limit_is_429_with_retry_after_without_reading_the_body() -> 
 async def test_invalid_signatures_count_toward_the_limit() -> None:  # inv. 25
     """Invalid signatures count toward the limit."""
     tb = await Setup(webhook_rate_limit_requests=2).start()
-    assert (await tb.post(secret="wrong")).status_code == 401
-    assert (await tb.post(secret="wrong")).status_code == 401
-    assert (await tb.post(secret="wrong")).status_code == 429
+    assert (await tb.post(signed_with="wrong")).status_code == 401
+    assert (await tb.post(signed_with="wrong")).status_code == 401
+    assert (await tb.post(signed_with="wrong")).status_code == 429
     assert (await tb.post()).status_code == 429  # even a valid one now
 
 
@@ -289,11 +290,11 @@ async def test_unregistered_host_is_503_with_its_body_unread(tb: Setup) -> None:
 
 async def test_unavailable_host_is_verified_stored_and_answered_2xx(tb: Setup) -> None:  # inv. 29
     """Unavailable host is verified stored and answered 2xx."""
-    assert tb.monitor.status("bad").state.value == "unavailable"  # type: ignore[union-attr]
-    response = await tb.post("bad", secret="other")
+    assert tb.monitor.status("bad").state.value == "unavailable"
+    response = await tb.post("bad", signed_with="other")
     assert response.status_code == 202
     assert tb.store.rows["d-1"].host == "bad"
-    assert (await tb.post("bad", delivery="d-2", secret="wrong")).status_code == 401
+    assert (await tb.post("bad", delivery="d-2", signed_with="wrong")).status_code == 401
 
 
 async def test_unknown_host_is_404(tb: Setup) -> None:
@@ -315,7 +316,7 @@ async def test_secret_store_outage_after_a_successful_read_does_not_stop_ingest(
     assert (await tb.post(delivery="d-1")).status_code == 202  # first use reads and caches
     tb.secret_store.down = True
     assert (await tb.post(delivery="d-2")).status_code == 202
-    assert (await tb.post(delivery="d-3", secret="wrong")).status_code == 401
+    assert (await tb.post(delivery="d-3", signed_with="wrong")).status_code == 401
 
 
 async def test_no_cached_secret_while_the_store_is_down_is_503() -> None:  # 0030 inv. 11
@@ -331,5 +332,5 @@ async def test_a_rotated_secret_is_picked_up_after_a_mismatch() -> None:
     tb = await Setup(webhook_secret_refresh_min_seconds=0).start()
     assert (await tb.post(delivery="d-1")).status_code == 202
     tb.secret_store.secrets["env:OK"] = "rotated"
-    assert (await tb.post(delivery="d-2", secret="rotated")).status_code == 202
-    assert (await tb.post(delivery="d-3", secret=SECRET)).status_code == 401  # the old one is gone
+    assert (await tb.post(delivery="d-2", signed_with="rotated")).status_code == 202
+    assert (await tb.post(delivery="d-3", signed_with=SECRET)).status_code == 401  # the old one is gone

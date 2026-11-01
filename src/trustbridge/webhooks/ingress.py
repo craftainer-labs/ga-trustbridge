@@ -196,4 +196,3 @@ async def receive_webhook(
     if created and runtime.relay is not None:
         background.add_task(runtime.relay.relay_one, delivery_id)
     return JSONResponse({"status": "accepted" if created else "duplicate"}, status_code=202)
-

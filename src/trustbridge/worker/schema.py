@@ -34,7 +34,7 @@ SCHEMA_CHECK_NAME = "schema"
 def bump_schema_compat_sql(version: int) -> str:
     """The statement every migration runs to record its schema-compatibility integer."""
     return (
-        "INSERT INTO schema_compat (id, version) VALUES (1, "
+        "INSERT INTO schema_compat (id, version) VALUES (1, "  # noqa: S608 -- constants and ints only
         f"{int(version)}) ON CONFLICT (id) DO UPDATE SET version = "
         f"GREATEST(schema_compat.version, {int(version)})"
     )

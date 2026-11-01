@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Literal, Protocol
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import ColumnElement, and_, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -425,7 +425,7 @@ class PgDeliveryStore:
         if mode == "host":
             cond = and_(t.host == host, due)
         elif mode == "resweep":
-            stale = t.last_relayed_at.is_(None)
+            stale: ColumnElement[bool] = t.last_relayed_at.is_(None)
             if resweep_before is not None:
                 stale = or_(stale, t.last_relayed_at < resweep_before)
             cond = and_(due, stale)

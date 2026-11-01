@@ -1,6 +1,7 @@
 """The delivery reconciler and retention (0028 invariants 7 and 8)."""
 
 import asyncio
+from collections.abc import Sequence
 from datetime import timedelta
 
 from tests.trustbridge.fakes import FakeHookClient
@@ -75,7 +76,7 @@ async def test_a_row_stored_between_listing_and_redelivery_is_not_redelivered() 
     real = h.store.existing_ids
     calls = {"n": 0}
 
-    async def existing(ids: list[str]) -> set[str]:
+    async def existing(ids: Sequence[str]) -> set[str]:
         calls["n"] += 1
         if calls["n"] == 1:
             return set()  # the batch check ran before the ingress stored it
@@ -133,7 +134,7 @@ async def test_retention_purges_bodies_then_expired_ids_and_keeps_dead_bodies_lo
     recon = _recon(h, None)
     h.advance(8 * 86400)
     await recon.retention()
-    processed, dead, pending = (await h.store.get(i) for i in ("processed", "dead", "pending"))
+    processed, dead, pending = [await h.store.get(i) for i in ("processed", "dead", "pending")]
     assert processed is not None
     assert processed.body is None  # purged, but the row remains to dedupe a late redelivery
     assert dead is not None

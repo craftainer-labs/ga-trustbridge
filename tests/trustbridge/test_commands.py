@@ -20,7 +20,12 @@ def test_shims_forward_to_the_worker_dispatcher(
 ) -> None:
     """Shims forward to the worker dispatcher."""
     seen: list[list[str]] = []
-    monkeypatch.setattr(commands, "main", lambda argv: seen.append(argv) or 7)
+
+    def fake_main(argv: list[str]) -> int:
+        seen.append(argv)
+        return 7
+
+    monkeypatch.setattr(commands, "main", fake_main)
     monkeypatch.setattr("sys.argv", ["prog", "x"])
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_module(module, run_name="__main__")

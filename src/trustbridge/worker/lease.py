@@ -34,7 +34,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
 
 from sqlalchemy import ColumnElement, Delete, Table, Update, exists, func, literal, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -43,7 +43,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from trustbridge.worker.models import ScopeLease
 
 logger = logging.getLogger(__name__)
-_T = TypeVar("_T")
 
 
 class LeaseBusy(Exception):  # noqa: N818 -- a control-flow signal, not a failure
@@ -269,7 +268,7 @@ class LeaseManager:
                     await asyncio.shield(self._store.release(lease))
 
 
-async def bounded_call(awaitable: Awaitable[_T], timeout: float) -> _T:
+async def bounded_call[T](awaitable: Awaitable[T], timeout: float) -> T:
     """Await `awaitable` for at most `timeout` seconds (shorter than the lease TTL)."""
     async with asyncio.timeout(timeout):
         return await awaitable

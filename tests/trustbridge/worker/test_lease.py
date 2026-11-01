@@ -134,7 +134,8 @@ async def test_a_holder_that_lost_its_lease_gets_lease_lost() -> None:  # inv. 1
 
 
 def _sql(stmt: Any) -> str:  # noqa: ANN401
-    return str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": False}))
+    dialect = postgresql.dialect()  # type: ignore[no-untyped-call]
+    return str(stmt.compile(dialect=dialect, compile_kwargs={"literal_binds": False}))
 
 
 def test_the_guard_checks_holder_fence_and_expiry_in_the_same_statement() -> None:  # inv. 10

@@ -124,7 +124,7 @@ class FakeRedis:
                 out.append([name, fresh])
         return out
 
-    async def xautoclaim(  # noqa: PLR0913
+    async def xautoclaim(  # noqa: PLR0913, PLR0917
         self,
         name: str,
         groupname: str,
