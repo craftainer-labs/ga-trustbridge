@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-11-01, with the G-api decisions recorded below). Builds on [0013](0013-valkey-over-redis-licensing.md) (Valkey
+Proposed. The user approved the G-api decisions on 2026-11-01; the ADR becomes Accepted when the implementation (NG3-NG5) merges. Builds on [0013](0013-valkey-over-redis-licensing.md) (Valkey
 server, redis-py client), [0026](0026-resource-server-metadata-and-bff.md)
 (resource-server validation, which the admin UI's BFF relies on) and
 [0027](0027-product-analytics-with-track.md); all three are inherited from
@@ -608,9 +608,6 @@ wrong):
   through uvicorn's `ProxyHeadersMiddleware`; `*` and an unset value are
   refused in production.
 - A request that fails the signature check still counts toward the limit.
-- Status is Accepted as of this decision although `docs/adrs/README.md`
-  says an ADR becomes Accepted when its implementation merges; the user
-  asked for Accepted now.
 
 ## Open issues
 

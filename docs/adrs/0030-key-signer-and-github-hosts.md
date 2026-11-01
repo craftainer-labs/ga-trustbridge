@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted (2026-11-01, with the G-api decisions recorded below). Part of
-the set [0028](0028-trustbridge-architecture-and-instance-layout.md) and
+Proposed. The user approved the G-api decisions on 2026-11-01; the ADR
+becomes Accepted when the implementation (NG3-NG5) merges. Part of the set [0028](0028-trustbridge-architecture-and-instance-layout.md) and
 [0029](0029-adapter-plugin-interface.md). The signer interface and the host
 configuration schema are operator-facing APIs.
 
@@ -320,9 +320,6 @@ wrong):
   to express `unregistered`; an unregistered host's webhook route answers
   503.
 - The recheck interval `HOST_RECHECK_SECONDS` (default 60) is new.
-- Status is Accepted as of this decision although `docs/adrs/README.md`
-  says an ADR becomes Accepted when its implementation merges; the user
-  asked for Accepted now.
 
 ## Consequences
 
