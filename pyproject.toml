@@ -167,7 +167,7 @@ cache_dir = "/home/vscode/.cache/mypy"
 [tool.pytest.ini_options]
 # cache_dir: see the cache-dir comment under [tool.ruff] above -- same reasoning.
 cache_dir = "/home/vscode/.cache/pytest"
-addopts = "--strict-markers --strict-config -ra --ignore=tests/e2e --ignore=tests/bench --cov=app --cov-report=term-missing"
+addopts = "--strict-markers --strict-config -ra --ignore=tests/e2e --ignore=tests/bench --cov=app --cov=trustbridge --cov-report=term-missing"
 # Lets an `async def test_...` run without a per-test @pytest.mark.asyncio marker --
 # needed once tests exercise app.interfaces/app.repositories/health directly (not just
 # through TestClient, which stays sync regardless of this setting).

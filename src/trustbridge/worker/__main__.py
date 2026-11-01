@@ -19,5 +19,5 @@ def main(argv: list[str]) -> int:
     return 2
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover -- exercised by the shims and the commands
     sys.exit(main(sys.argv[1:]))
