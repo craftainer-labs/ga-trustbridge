@@ -265,9 +265,9 @@ class LeaseManager:
             keepalive.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await keepalive
-            if not lost.is_set():
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(self._store.release(lease))
+            # Releasing is a no-op for a lost lease (the holder and fence no longer match).
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._store.release(lease))
 
 
 async def bounded_call[T](awaitable: Awaitable[T], timeout: float) -> T:

@@ -111,9 +111,11 @@ async def test_a_host_whose_signer_is_missing_is_unavailable() -> None:
     assert mon.status("github.com").reason == "signer 'main' is not available"
 
 
-async def test_the_recheck_task_starts_once_stops_idempotently_and_survives_a_failed_round() -> None:
+async def test_the_recheck_task_starts_once_stops_cleanly_and_survives_a_failed_round() -> None:
     """`start` twice keeps one task, `stop` without a task is fine, a failing round is logged."""
-    mon = HostMonitor([make_host_config()], {"main": KeySigner()}, MonitorDeps(checker=FakeChecker()))
+    mon = HostMonitor(
+        [make_host_config()], {"main": KeySigner()}, MonitorDeps(checker=FakeChecker())
+    )
     await mon.stop()  # nothing started yet
     rounds: list[int] = []
 
@@ -186,7 +188,10 @@ async def test_the_gateway_forgets_a_renamed_repository(env: Env) -> None:
     assert await env.gateway.full_name(env.tenant, 10) == "acme/web2"
 
 
-def _handlers(with_callback: bool) -> tuple[InstallationHandlers, MemoryTenants, ReconcileRequests, list[tuple[str, int]]]:
+Wired = tuple[InstallationHandlers, MemoryTenants, ReconcileRequests, list[tuple[str, int]]]
+
+
+def _handlers(with_callback: bool) -> Wired:
     tenants = MemoryTenants(lambda _name: make_host_config().to_host())
     scheduler = ReconcileRequests()
     changed: list[tuple[str, int]] = []
@@ -360,7 +365,9 @@ def test_a_non_rsa_public_key_never_verifies() -> None:
 
 async def test_an_unready_host_raises_for_gateway_users() -> None:
     """Sanity: `require_ready` is the single gate."""
-    mon = HostMonitor([make_host_config()], {"main": KeySigner()}, MonitorDeps(checker=FakeChecker()))
+    mon = HostMonitor(
+        [make_host_config()], {"main": KeySigner()}, MonitorDeps(checker=FakeChecker())
+    )
     with pytest.raises(HostNotReadyError):
         mon.require_ready("github.com")
     assert mon.status("github.com").state is HostState.UNAVAILABLE

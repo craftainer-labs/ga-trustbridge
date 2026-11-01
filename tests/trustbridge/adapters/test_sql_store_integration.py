@@ -218,11 +218,13 @@ async def test_operations_are_read_by_id_and_a_credential_can_be_saved_alone(
 async def test_a_guard_that_fails_between_the_two_upserts_rolls_everything_back(
     engine: AsyncEngine,
 ) -> None:
-    """If the lease is lost after the credential row, the operation write fails and nothing stays."""
+    """A lease lost after the credential row fails the operation write; nothing stays."""
     store, tenant = make_store(engine), uuid4()
     state = CredentialState(CredentialSlot(1, "n1"), None)
     with pytest.raises(LeaseLostError):
         await store.save(
-            CountGuardLease(tenant), stored(tenant, state), operation(tenant, OperationStatus.INTENT)
+            CountGuardLease(tenant),
+            stored(tenant, state),
+            operation(tenant, OperationStatus.INTENT),
         )
     assert await store.get_credential(tenant, "fake", "k1") is None

@@ -76,7 +76,7 @@ async def test_the_migrate_job_runs_alembic_upgrade_head(monkeypatch: pytest.Mon
     """`_alembic_upgrade` upgrades to head; `main upgrade` runs the locked job."""
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        migrate.command, "upgrade", lambda cfg, rev: calls.append((cfg.config_file_name or "", rev))
+        "alembic.command.upgrade", lambda cfg, rev: calls.append((cfg.config_file_name or "", rev))
     )
     migrate._alembic_upgrade()  # noqa: SLF001
     assert calls == [("alembic.ini", "head")]
@@ -96,7 +96,7 @@ async def test_a_delivery_reconciler_with_nothing_failed_redelivers_nothing() ->
     assert await _reconciler(h, client).reconcile_host(h.settings.github_hosts[0]) == 0
 
 
-async def test_failing_periodic_jobs_and_failing_host_reconciliation_are_logged_not_raised() -> None:
+async def test_failing_jobs_and_failing_host_reconciliation_are_logged_not_raised() -> None:
     """One bad job or host never stops the reconciler."""
     stop = asyncio.Event()
 

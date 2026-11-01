@@ -6,7 +6,12 @@ from typing import Any
 import pytest
 
 from tests.trustbridge.adapters.conftest import PULL, World, make_tenant
-from trustbridge.adapters.fake import FakeAdapter, FakePlatform, fake_capabilities, make_fake_adapter
+from trustbridge.adapters.fake import (
+    FakeAdapter,
+    FakePlatform,
+    fake_capabilities,
+    make_fake_adapter,
+)
 from trustbridge.adapters.interface import (
     AdapterConfig,
     AdapterError,
@@ -55,7 +60,7 @@ async def test_the_fake_adapter_needs_a_current_slot_and_reports_manual_steps() 
     assert outcome.change.state is ChangeState.NEEDS_MANUAL_ACTION
 
 
-async def test_an_already_delivered_secret_is_left_alone_and_rotation_finish_is_idempotent() -> None:
+async def test_a_delivered_secret_is_left_alone_and_rotation_finish_is_idempotent() -> None:
     """Re-ensuring a delivered secret changes nothing; finishing without a previous deletes none."""
     platform, adapter, scope = _adapter()
     state = CredentialState(current=_slot(scope))
@@ -72,6 +77,9 @@ async def test_an_already_delivered_secret_is_left_alone_and_rotation_finish_is_
 async def test_the_fake_adapter_has_no_outputs_without_a_ci_credential_and_is_healthy() -> None:
     """`NoCiCredential` yields no GitHub outputs; the health check passes."""
     _, adapter, scope = _adapter()
+    _, no_ci, _ = _adapter(ci_credential=False)
+    outcome = await no_ci.ensure_credential(scope, CredentialState(current=_slot(scope)))
+    assert isinstance(outcome.credential, NoCiCredential)
     assert list(adapter.github_outputs(scope, NoCiCredential("none"))) == []
     assert (await adapter.health_check()).ok is True
 
@@ -81,7 +89,8 @@ async def test_webhooks_and_resources_converge_through_the_resource_core(
 ) -> None:
     """Webhook creation is idempotent; a timeout is a retryable adapter error."""
     w = secret_world
-    resources = ResourceCore(w.deps, CoreSettings(lease_ttl_seconds=1, adapter_call_timeout_seconds=0.01))
+    fast = CoreSettings(lease_ttl_seconds=1, adapter_call_timeout_seconds=0.01)
+    resources = ResourceCore(w.deps, fast)
     target = WebhookTarget(w.tenant, "https://tb.example/hook", ("push",))
     first = await resources.ensure_webhook(w.tenant, "fake", "main", target)
     second = await resources.ensure_webhook(w.tenant, "fake", "main", target)

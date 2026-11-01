@@ -47,8 +47,7 @@ class Relay:
                 await self._queue.add(delivery_id)
                 relayed.append(delivery_id)
         finally:
-            if relayed:
-                await self._store.mark_relayed(relayed, self._clock())
+            await self._store.mark_relayed(relayed, self._clock())
         return len(relayed)
 
     async def relay_one(self, delivery_id: str) -> None:

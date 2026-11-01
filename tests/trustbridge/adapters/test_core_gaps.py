@@ -50,7 +50,7 @@ async def _stuck_parked(w: World) -> Operation:
     w.writer.fail_next = [OutputError("GitHub 502")]
     with pytest.raises(RetryableOperationError):
         await w.core.ensure_scope(w.tenant, "fake", PUSH_PROD)
-    return next(iter(w.store.operations.values()))
+    return next(o for o in w.store.operations.values() if o.status is OperationStatus.PARKED)
 
 
 async def test_an_adapter_that_is_not_enabled_is_a_configuration_error(secret_world: World) -> None:
@@ -146,10 +146,10 @@ async def test_resume_all_continues_after_a_failure_and_skips_finished_operation
     assert await w.core.sweep_parked_values() == 0  # the open operation keeps its values
     assert stuck.id in w.values.parked
 
-    async def only_terminal():  # type: ignore[no-untyped-def]  # noqa: ANN202
-        return [replace(stuck, status=OperationStatus.FINISHED)]
+    async def unknown_operation() -> list[Operation]:
+        return [replace(stuck, id=uuid4())]
 
-    w.store.list_open_operations = only_terminal  # type: ignore[method-assign]
+    w.store.list_open_operations = unknown_operation  # type: ignore[method-assign]
     assert await w.core.resume_all() == []
 
 
@@ -196,7 +196,9 @@ def _adapter(platform: FakePlatform, wrong: str) -> type:
     base: Any = make_fake_adapter(platform, fake_capabilities(oidc=True))
 
     class Odd(base):  # type: ignore[misc]
-        async def ensure_credential(self, s, prior):  # type: ignore[no-untyped-def]  # noqa: ANN001, ANN201
+        async def ensure_credential(
+            self, s: CredentialScope, prior: CredentialState
+        ) -> CredentialOutcome:
             if wrong == "secret-on-refresh" and prior.current and prior.current.delivered:
                 return CredentialOutcome(
                     Change(ChangeState.UPDATED), prior, IssuedSecret({"t": SecretStr("v")})

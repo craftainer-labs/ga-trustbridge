@@ -158,7 +158,7 @@ async def test_the_client_is_created_lazily_with_the_ca_bundle_and_closed(tmp_pa
 
 async def test_the_file_signer_refuses_small_or_non_rsa_keys(tmp_path: Path) -> None:
     """Keys under 2048 bits and non-RSA keys are refused."""
-    small = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    small = rsa.generate_private_key(public_exponent=65537, key_size=1024)  # noqa: S505
     path = tmp_path / "small.pem"
     path.write_text(pem_of(small))
     path.chmod(0o600)

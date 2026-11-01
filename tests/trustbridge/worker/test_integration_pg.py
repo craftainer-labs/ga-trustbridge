@@ -169,6 +169,7 @@ async def test_sql_relay_rules_match_the_in_memory_rules(ids: list[str]) -> None
 
 
 async def test_the_sql_store_runs_the_whole_delivery_lifecycle(ids: list[str]) -> None:
+    """Every state change of the outbox works against Postgres."""
     store = PgDeliveryStore(session_factory)
     now = datetime.now(UTC)
     later = now + timedelta(hours=1)
@@ -187,9 +188,7 @@ async def test_the_sql_store_runs_the_whole_delivery_lifecycle(ids: list[str]) -
     await store.defer(failing.delivery_id, later)
     await store.mark_dead(dead.delivery_id, "poison", now)
 
-    row_ok, row_failing, row_dead = (
-        await store.get(d.delivery_id) for d in (ok, failing, dead)
-    )
+    row_ok, row_failing, row_dead = [await store.get(d.delivery_id) for d in (ok, failing, dead)]
     assert row_ok is not None
     assert row_failing is not None
     assert row_dead is not None
