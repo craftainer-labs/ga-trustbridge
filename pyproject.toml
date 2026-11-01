@@ -141,12 +141,27 @@ layers = [
 
 # trustbridge is the instance package beside the template's `app` (ADR 0028): it may import
 # `app`, never the other way round. Its own layers, top to bottom: main, webhooks, worker,
-# settings (worker is the shared runtime core: queue, leases, hosts, schema gate, stores).
+# settings (worker is the shared runtime core: queue, leases, schema gate, stores, ports).
+# `github` (the GitHub core) sits beside the layers because `settings` types its fields with
+# `github.hosts` and `github.runtime` takes the settings; the contracts below keep the
+# plugin-facing packages (`adapters`, `signer`) free of it.
 [[tool.importlinter.contracts]]
 name = "app never imports trustbridge"
 type = "forbidden"
 source_modules = ["app"]
 forbidden_modules = ["trustbridge"]
+
+[[tool.importlinter.contracts]]
+name = "adapters never import the GitHub core"
+type = "forbidden"
+source_modules = ["trustbridge.adapters"]
+forbidden_modules = ["trustbridge.github"]
+
+[[tool.importlinter.contracts]]
+name = "signers never import the GitHub core"
+type = "forbidden"
+source_modules = ["trustbridge.signer"]
+forbidden_modules = ["trustbridge.github"]
 
 [[tool.importlinter.contracts]]
 name = "trustbridge layers"

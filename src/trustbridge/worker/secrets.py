@@ -1,47 +1,62 @@
-"""Webhook-secret store interface and the per-process cache (ADR 0030 invariant 11).
+"""The secret store behind `SecretReader`, `SecretWriter` and the parked-value store.
 
-A `SecretStore` resolves a `webhook_secret_ref` (the same store serves client secrets and
-signer credentials). Refs are `file:/path` (a mounted secret; trailing newline stripped) or
-`env:NAME`; an external store (Vault, a cloud secret manager) implements the same Protocol.
-`WebhookSecrets` reads a host's secret on first use and caches it in process memory, so a
-store outage after one successful read never stops signature verification. A refresh on a
-signature mismatch (rotation) is rate limited and keeps the cached value if the store fails.
+References are `file:/path` (a mounted secret; trailing newline stripped) and `env:NAME`
+(read-only), and `store:<name>` (read, write, delete and list; files under `SECRET_STORE_DIR`,
+mode 0600, names limited to `[A-Za-z0-9._/-]` without `..`). An external store (Vault KV, a
+cloud secret manager) implements the same methods. `MemorySecrets` is the `MODE=mock`
+and unit-test twin. Values are `SecretStr` and never logged; failures carry no reference.
 """
 
 import asyncio
-import logging
 import os
-import time
-from collections.abc import Callable
+import re
 from pathlib import Path
-from typing import Protocol
 
-logger = logging.getLogger(__name__)
+from pydantic import SecretStr
+
+_STORE_NAME = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+_STORE_PREFIX = "store:"
 
 
 class SecretUnavailable(Exception):  # noqa: N818 -- a result, named for what it says
-    """The secret could not be read (store down, ref unknown, empty value)."""
+    """The secret could not be read or written (store down, ref unknown, empty value)."""
 
 
-class SecretStore(Protocol):
-    """Resolves a secret reference to its value."""
+def _store_name(ref: str) -> str:
+    """The validated `store:` name of `ref`; anything else is not writable."""
+    name = ref.removeprefix(_STORE_PREFIX)
+    bad = (
+        not ref.startswith(_STORE_PREFIX)
+        or not _STORE_NAME.match(name)
+        or ".." in name
+        or name.startswith("/")
+    )
+    if bad:
+        raise SecretUnavailable("not a writable secret reference")
+    return name
 
-    async def read(self, ref: str) -> str:
-        """Return the secret for `ref`; raise `SecretUnavailable` if it cannot be read."""
-        ...
 
+class LocalSecrets:
+    """`file:` and `env:` references to read; `store:` references under a directory to write."""
 
-class FileEnvSecretStore:
-    """`file:<path>` and `env:<NAME>` references."""
+    def __init__(self, store_dir: Path | None = None) -> None:
+        """`store_dir` None makes every `store:` operation fail closed."""
+        self._dir = store_dir
 
-    async def read(self, ref: str) -> str:
-        """Read the referenced file or environment variable."""
+    def _path(self, ref: str) -> Path:
+        if self._dir is None:
+            raise SecretUnavailable("no writable secret store configured")
+        return self._dir / _store_name(ref)
+
+    async def read(self, ref: str) -> SecretStr:
+        """Read the referenced value; raise `SecretUnavailable` if it cannot be read."""
         scheme, _, target = ref.partition(":")
         if scheme == "env":
             value = os.environ.get(target, "")
-        elif scheme == "file":
+        elif scheme in {"file", "store"}:
+            path = Path(target) if scheme == "file" else self._path(ref)
             try:
-                value = await asyncio.to_thread(Path(target).read_text, "utf-8")
+                value = await asyncio.to_thread(path.read_text, "utf-8")
             except OSError as exc:
                 raise SecretUnavailable("secret file unreadable") from exc
         else:
@@ -49,68 +64,85 @@ class FileEnvSecretStore:
         value = value.rstrip("\r\n")
         if not value:
             raise SecretUnavailable("secret is empty")
-        return value
+        return SecretStr(value)
 
-
-class WebhookSecrets:
-    """Per-host webhook secrets, resolved on first use and cached in process memory."""
-
-    def __init__(
-        self,
-        store: SecretStore,
-        *,
-        read_timeout: float,
-        refresh_min_seconds: float,
-        monotonic: Callable[[], float] = time.monotonic,
-    ) -> None:
-        """Bind the store, the per-read timeout and the minimum gap between refreshes."""
-        self._store = store
-        self._read_timeout = read_timeout
-        self._refresh_min = refresh_min_seconds
-        self._monotonic = monotonic
-        self._cache: dict[str, tuple[bytes, float]] = {}
-        self._refs: dict[str, str] = {}
-
-    async def _read(self, ref: str) -> bytes | None:
-        """One bounded store read; None on any failure (the failure is logged without ref)."""
+    async def write(self, ref: str, value: SecretStr) -> None:
+        """Write (or replace) a `store:` secret with mode 0600."""
+        path = self._path(ref)
         try:
-            async with asyncio.timeout(self._read_timeout):
-                return (await self._store.read(ref)).encode()
-        except (SecretUnavailable, TimeoutError):
-            return None
-        except Exception:
-            logger.exception("secret store read failed")
-            return None
+            await asyncio.to_thread(self._write, path, value.get_secret_value())
+        except OSError as exc:
+            raise SecretUnavailable("secret file unwritable") from exc
 
-    async def get(self, host: str, ref: str) -> bytes | None:
-        """The secret of `host`: cached, else read now. None when it cannot be read."""
-        cached = self._cache.get(host)
-        if cached is not None and self._refs.get(host) == ref:
-            return cached[0]
-        value = await self._read(ref)
-        if value is not None:
-            self._cache[host] = (value, self._monotonic())
-            self._refs[host] = ref
-        return value
+    @staticmethod
+    def _write(path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        tmp.replace(path)
 
-    async def refreshed(self, host: str, ref: str) -> bytes | None:
-        """Re-read the secret after a signature mismatch, at most every `refresh_min` seconds.
+    async def delete(self, ref: str) -> None:
+        """Remove a `store:` secret; absent is fine."""
+        path = self._path(ref)
+        try:
+            await asyncio.to_thread(path.unlink, missing_ok=True)
+        except OSError as exc:
+            raise SecretUnavailable("secret file undeletable") from exc
 
-        Returns the new value only if it differs from the cached one; None means "nothing
-        new to try" (too soon, store failure or unchanged). A failure keeps the cache.
-        """
-        cached = self._cache.get(host)
-        if cached is not None and self._monotonic() - cached[1] < self._refresh_min:
-            return None
-        value = await self._read(ref)
-        if value is None:
-            return None
-        previous = cached[0] if cached is not None else None
-        self._cache[host] = (value, self._monotonic())
-        self._refs[host] = ref
-        return value if value != previous else None
+    async def list_refs(self, prefix: str) -> list[str]:
+        """The `store:` references whose name starts with `prefix` (a directory-style prefix)."""
+        if self._dir is None:
+            raise SecretUnavailable("no writable secret store configured")
+        root = self._dir
+        base = _store_name(_STORE_PREFIX + prefix.rstrip("/")) if prefix else ""
+        target = root / base
 
-    async def warm(self, refs: dict[str, str]) -> None:
-        """Best-effort cache warming at startup (`{host: ref}`); failures are ignored."""
-        for host, ref in refs.items():
-            await self.get(host, ref)
+        def _scan() -> list[str]:
+            if not target.is_dir():
+                return []
+            return sorted(
+                f"{_STORE_PREFIX}{p.relative_to(root).as_posix()}"
+                for p in target.rglob("*")
+                if p.is_file() and not p.name.endswith(".tmp")
+            )
+
+        return await asyncio.to_thread(_scan)
+
+
+class MemorySecrets:
+    """Dict-backed `store:` secrets (mock mode and unit tests); `down` simulates an outage.
+
+    `file:` and `env:` references are still read from the real file system and environment.
+    """
+
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        """Start with `{ref: value}`."""
+        self.values = dict(values or {})
+        self.down = False
+        self.reads = 0
+        self._fallback = LocalSecrets()
+
+    async def read(self, ref: str) -> SecretStr:
+        """Return the value or fail like an outage."""
+        self.reads += 1
+        if self.down:
+            raise SecretUnavailable("unavailable")
+        if not ref.startswith(_STORE_PREFIX):
+            return await self._fallback.read(ref)
+        if ref not in self.values:
+            raise SecretUnavailable("unavailable")
+        return SecretStr(self.values[ref])
+
+    async def write(self, ref: str, value: SecretStr) -> None:
+        """Store the value."""
+        self.values[_STORE_PREFIX + _store_name(ref)] = value.get_secret_value()
+
+    async def delete(self, ref: str) -> None:
+        """Remove the value; absent is fine."""
+        self.values.pop(ref, None)
+
+    async def list_refs(self, prefix: str) -> list[str]:
+        """The references starting with `store:<prefix>`."""
+        return sorted(r for r in self.values if r.startswith(_STORE_PREFIX + prefix))

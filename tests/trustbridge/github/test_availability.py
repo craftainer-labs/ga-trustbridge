@@ -198,3 +198,39 @@ async def test_recheck_loop_runs_until_stopped() -> None:
     await mon.stop()
     assert mon.status("github.com").state is HostState.READY
     assert mon.statuses()["github.com"].state is HostState.READY
+
+
+async def test_names_and_is_ready_cover_every_configured_host_and_no_other() -> None:
+    """`is_ready` is False for an unchecked, an unavailable and an unknown host."""
+    mon = HostMonitor(
+        [make_host_config("a"), make_host_config("b"), make_host_config("c", app_id=None)],
+        {"main": KeySigner()},
+        MonitorDeps(checker=FakeChecker(app_id=77)),
+    )
+    assert mon.names() == ["a", "b", "c"]
+    assert not mon.is_ready("a")  # not checked yet
+    await mon.check_all()
+    assert (mon.is_ready("a"), mon.is_ready("c"), mon.is_ready("nope")) == (True, False, False)
+
+
+class HangingChecker(FakeChecker):
+    """A checker whose `GET /app` never answers."""
+
+    async def get_app_id(self, host: GitHubHostConfig, jwt: str) -> int:
+        """Hang until cancelled."""
+        del host, jwt
+        await asyncio.sleep(10)
+        return self.app_id
+
+
+async def test_a_check_that_hangs_is_cut_off_by_the_timeout() -> None:
+    """One slow host is `unavailable` with a reason; the round still completes."""
+    mon = HostMonitor(
+        [make_host_config()],
+        {"main": KeySigner()},
+        MonitorDeps(checker=HangingChecker(), check_timeout=0.01),
+    )
+    await mon.check_all()
+    status = mon.status("github.com")
+    assert status.state is HostState.UNAVAILABLE
+    assert status.reason == "check timed out"

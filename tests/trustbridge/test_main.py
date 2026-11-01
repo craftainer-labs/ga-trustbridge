@@ -22,9 +22,8 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from tests.trustbridge.fakes import FakeHostChecker, FakeRedis, FakeSecretStore
 from tests.trustbridge.helpers import SIGNERS, as_redis, host, make_settings, sign
+from trustbridge.github.availability import HostState
 from trustbridge.main import Overrides, install
-from trustbridge.worker.hosts import HostState
-from trustbridge.worker.runtime import HostRuntime
 from trustbridge.worker.schema import REQUIRED_SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,32 +39,40 @@ def _template(events: list[str]) -> FastAPI:
     return FastAPI(lifespan=lifespan)
 
 
-async def test_startup_checks_run_before_the_template_and_resources_outlive_it() -> None:
+async def test_startup_checks_run_before_the_template_and_resources_outlive_it(
+    key_signers: None,
+) -> None:
+    """Startup checks run before the template and resources outlive it."""
     events: list[str] = []
     checker = FakeHostChecker(failing={"bad"})
 
     class Spy(FakeHostChecker):
-        async def check(self, host):  # type: ignore[no-untyped-def]  # noqa: ANN001, ANN201
+        async def get_app_id(self, host, jwt):  # type: ignore[no-untyped-def]  # noqa: ANN001
             events.append(f"check:{host.name}")
-            await checker.check(host)
+            return await checker.get_app_id(host, jwt)
 
     app = _template(events)
     settings = make_settings([host("ok"), host("bad"), host("new", app_id=None, webhook_secret_ref=None)])
-    install(app, settings, Overrides(runtime=HostRuntime(checker=Spy()), redis=as_redis(FakeRedis())))
+    install(app, settings, Overrides(checker=Spy(), redis=as_redis(FakeRedis())))
     async with app.router.lifespan_context(app):
         assert events[-1] == "template-start"
         assert sorted(e for e in events if e.startswith("check:")) == ["check:bad", "check:ok"]
-        hosts = app.state.trustbridge.hosts
+        hosts = app.state.trustbridge.monitor
         # a failed check never stops the process (0030 invariant 7); the host is just unavailable
         assert hosts.status("bad").state is HostState.UNAVAILABLE
         assert hosts.status("ok").state is HostState.READY
         assert hosts.status("new").state is HostState.UNREGISTERED
-        assert "/webhooks/github/{host}" in {getattr(r, "path", "") for r in app.routes}
+        paths = {getattr(r, "path", "") for r in app.routes}
+        assert {"/webhooks/github/{host}", "/webhooks/argocd/{tenant_id}"} <= paths
+        assert app.state.trustbridge.argocd.handler is None  # until NG5d supplies a state source
     assert events[-1] == "template-end"
     assert not hasattr(app.state, "trustbridge")  # released after the template shut down
 
 
-async def test_the_webhook_route_works_through_the_wrapped_app_with_valkey_down() -> None:
+async def test_the_webhook_route_works_through_the_wrapped_app_with_valkey_down(
+    key_signers: None,
+) -> None:
+    """The webhook route works through the wrapped app with valkey down."""
     app = _template([])
     valkey = FakeRedis()
     secret_store = FakeSecretStore({"env:SECRET_OK": "s3cret"})
@@ -74,9 +81,9 @@ async def test_the_webhook_route_works_through_the_wrapped_app_with_valkey_down(
         app,
         settings,
         Overrides(
-            runtime=HostRuntime(checker=FakeHostChecker()),
+            checker=FakeHostChecker(),
             redis=as_redis(valkey),
-            secret_store=secret_store,
+            secret_reader=secret_store,
         ),
     )
     valkey.down = True  # the limiter fails open, the relay fails quietly: the outbox still takes it
@@ -97,12 +104,15 @@ async def test_the_webhook_route_works_through_the_wrapped_app_with_valkey_down(
         assert (await app.state.trustbridge.store.get("abc-1")) is not None
 
 
-async def test_the_lifespan_can_be_entered_repeatedly_registering_each_check_once() -> None:
+async def test_the_lifespan_can_be_entered_repeatedly_registering_each_check_once(
+    key_signers: None,
+) -> None:
+    """The lifespan can be entered repeatedly registering each check once."""
     registry = HealthRegistry()  # 0028 invariant 16
     app = _template([])
 
     class Session:
-        async def __aenter__(self) -> "Session":
+        async def __aenter__(self) -> Session:
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
@@ -116,7 +126,7 @@ async def test_the_lifespan_can_be_entered_repeatedly_registering_each_check_onc
         app,
         settings,
         Overrides(
-            runtime=HostRuntime(checker=FakeHostChecker()),
+            checker=FakeHostChecker(),
             redis=as_redis(FakeRedis()),
             session_factory=lambda: Session(),  # type: ignore[arg-type,return-value]
             health_registry=lambda: registry,
@@ -131,6 +141,7 @@ async def test_the_lifespan_can_be_entered_repeatedly_registering_each_check_onc
 
 
 def test_install_is_idempotent_and_adds_the_proxy_middleware_once() -> None:
+    """Install is idempotent and adds the proxy middleware once."""
     app = _template([])
     settings = make_settings(trusted_proxies=["10.0.0.0/8"])
     assert install(app, settings) is install(app, settings)
@@ -141,6 +152,7 @@ def test_install_is_idempotent_and_adds_the_proxy_middleware_once() -> None:
 
 
 def test_unset_trusted_proxies_outside_production_trusts_loopback_only() -> None:
+    """Unset trusted proxies outside production trusts loopback only."""
     app = _template([])
     install(app, make_settings())
     (proxy,) = (m for m in app.user_middleware if m.cls is ProxyHeadersMiddleware)
@@ -148,12 +160,14 @@ def test_unset_trusted_proxies_outside_production_trusts_loopback_only() -> None
 
 
 def test_install_fails_loudly_if_the_template_stops_exposing_lifespan_context() -> None:  # inv. 20
+    """Install fails loudly if the template stops exposing lifespan context."""
     fake = types.SimpleNamespace(router=types.SimpleNamespace(), state=types.SimpleNamespace())
     with pytest.raises(RuntimeError, match="lifespan_context"):
         install(fake, make_settings())  # type: ignore[arg-type]
 
 
 def test_install_works_on_an_app_whose_middleware_stack_was_already_built() -> None:
+    """Install works on an app whose middleware stack was already built."""
     app = _template([])
     app.middleware_stack = app.build_middleware_stack()  # as after the template's own tests ran
     install(app, make_settings())
@@ -168,11 +182,11 @@ async def main() -> None:
     assert hasattr(app.router, "lifespan_context")
     async with app.router.lifespan_context(app):
         runtime = app.state.trustbridge
-        statuses = {n: runtime.hosts.status(n) for n in runtime.hosts.names()}
+        statuses = runtime.monitor.statuses()
         assert statuses, "the startup checks did not run"
         assert all(s.state.value in ("ready", "unavailable") for s in statuses.values()), statuses
         paths = {getattr(r, "path", "") for r in app.routes}
-        assert "/webhooks/github/{host}" in paths
+        assert {"/webhooks/github/{host}", "/webhooks/argocd/{tenant_id}"} <= paths
         assert "/health/live" in paths or any(p.startswith("/health") for p in paths)
 
 asyncio.run(main())
@@ -181,6 +195,7 @@ print("SMOKE-OK")
 
 
 def test_smoke_the_real_entrypoint_enters_its_lifespan_and_serves_the_route() -> None:  # inv. 20
+    """Smoke the real entrypoint enters its lifespan and serves the route."""
     env = {
         **os.environ,
         "MODE": "mock",

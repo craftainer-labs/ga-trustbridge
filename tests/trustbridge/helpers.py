@@ -6,14 +6,17 @@ from typing import Any, cast
 
 from redis.asyncio import Redis
 
-from tests.trustbridge.fakes import FakeRedis
-from trustbridge.settings import GitHubHostConfig, TrustbridgeSettings
+from tests.trustbridge.fakes import FakeHostChecker, FakeRedis
+from tests.trustbridge.github.conftest import KeySigner
+from trustbridge.github.availability import HostMonitor, MonitorDeps
+from trustbridge.github.hosts import GitHubHostConfig, load_hosts
+from trustbridge.settings import TrustbridgeSettings
 
 SIGNERS: dict[str, Any] = {"dev": {"kind": "file", "path": "/run/secrets/app.pem"}}
 
 
-def host(name: str = "github.com", **overrides: Any) -> GitHubHostConfig:  # noqa: ANN401
-    """A registered github.com-shaped host (override fields as needed)."""
+def host_dict(name: str = "github.com", **overrides: Any) -> dict[str, Any]:  # noqa: ANN401
+    """The raw entry of a registered github.com-shaped host (override fields as needed)."""
     data: dict[str, Any] = {
         "name": name,
         "kind": "github.com",
@@ -26,11 +29,16 @@ def host(name: str = "github.com", **overrides: Any) -> GitHubHostConfig:  # noq
         "webhook_secret_ref": f"env:SECRET_{name.upper().replace('.', '_')}",
     }
     data.update(overrides)
-    return GitHubHostConfig.model_validate(data)
+    return data
+
+
+def host(name: str = "github.com", **overrides: Any) -> GitHubHostConfig:  # noqa: ANN401
+    """A parsed host (the loader applies the kind-dependent `oidc_id_claims` default)."""
+    return load_hosts([host_dict(name, **overrides)])[0]
 
 
 def make_settings(
-    hosts: list[GitHubHostConfig] | None = None, **overrides: Any  # noqa: ANN401
+    hosts: list[Any] | None = None, **overrides: Any  # noqa: ANN401
 ) -> TrustbridgeSettings:
     """Mock-mode settings for unit tests (no database, no Valkey required)."""
     values: dict[str, Any] = {
@@ -41,6 +49,17 @@ def make_settings(
     }
     values.update(overrides)
     return TrustbridgeSettings(**values)
+
+
+def make_monitor(
+    hosts: list[GitHubHostConfig],
+    checker: FakeHostChecker | None = None,
+    **deps: Any,  # noqa: ANN401
+) -> HostMonitor:
+    """A real `HostMonitor` whose signer is an in-memory RSA key and whose network is scripted."""
+    return HostMonitor(
+        hosts, {"dev": KeySigner()}, MonitorDeps(checker=checker or FakeHostChecker(), **deps)
+    )
 
 
 def sign(secret: bytes, body: bytes) -> str:

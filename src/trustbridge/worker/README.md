@@ -3,22 +3,22 @@
 The runtime core of trustbridge, shared by the api, the worker and the reconciler
 ([ADR 0028](../../../docs/adrs/0028-trustbridge-architecture-and-instance-layout.md),
 [0030](../../../docs/adrs/0030-key-signer-and-github-hosts.md)). Import order inside
-`trustbridge` is `main` > `webhooks` > `worker` > `settings` (import-linter, `pyproject.toml`).
+`trustbridge` is `main` > `webhooks` > `worker` > `settings` (import-linter, `pyproject.toml`);
+`trustbridge.github` sits beside these layers (see `../README.md`).
 
 | Module | What it is |
 | --- | --- |
-| `models.py` | Tables on the template's shared `Base`: `webhook_deliveries`, `scope_leases`, `tenants`, `schema_compat`. The revision in `alembic/versions/c3a5e7d91f42_*.py` is the schema of record. |
+| `models.py` | Tables on the template's shared `Base`: `webhook_deliveries`, `scope_leases`, `tenants` (with `org`, `org_id`, `state`), `tenant_repositories`, `schema_compat`. The revisions `c3a5e7d91f42` and `5d1f3a7c9e24` in `alembic/versions/` are the schema of record. |
 | `deliveries.py` | `DeliveryStore` (Protocol), `PgDeliveryStore`, `InMemoryDeliveryStore` (mock mode and unit tests), the relay rules (`is_relayable`) and the retry backoff. |
 | `queue.py` | `StreamQueue`: `tb:events` (ids only), `tb:events:dead` (`{delivery_id, error}`), consumer group `tb-workers`, safe trimming, lag. redis-py `redis.asyncio` against Valkey (ADR 0013). |
 | `relay.py` | Adds delivery ids from the outbox to the stream (tick, re-relay sweep, host-ready). |
-| `worker.py` | The consumer and the handler interface (`HandlerContext`, `HandlerMap`). |
+| `worker.py` | The consumer; dispatches through the GitHub core's `HandlerRegistry` (`EventContext`). |
 | `reconciler.py` | The reconciler process: relay tick, sweep, delivery reconciliation (`HookDeliveryClient`), retention, trimming. |
-| `lease.py` | Fenced scope leases (`LeaseManager`, `guarded_execute`, `guarded_insert`, `bounded_call`). |
-| `hosts.py` | Per-host availability: `unregistered` / `unavailable` / `ready`, the recheck loop, `HostChecker`. |
-| `secrets.py` | `SecretStore` (`file:` / `env:` refs) and the per-process webhook-secret cache. |
+| `lease.py` | Fenced scope leases (`LeaseManager`, `guarded_execute`, `guarded_insert`, `bounded_call`); `LeaseManager` and `Lease.guard()` are the adapter core's `LeaseProvider` and `Lease`. |
+| `secrets.py` | `LocalSecrets` (`file:` / `env:` refs to read, `store:` refs under `SECRET_STORE_DIR` to read, write, delete and list) and its in-memory twin; the `SecretReader` / `SecretWriter` of the GitHub core. |
+| `ports.py` | The ports of the GitHub and adapter cores over these components: `SqlTenants` / `MemoryTenants` (installation store, installation resolver, tenant resolver), `ParkedValues` (value store, in the secret store), `ConnectionData` (tenant connection store, config resolver), `ReconcileRequests`. |
 | `schema.py` | The schema gate (`schema_compat` integer) and its readiness check. |
-| `tenants.py` | `(host, installation_id)` to tenant UUID; `set_tenant` for the RLS setting. |
-| `runtime.py` | Bootstrap for the worker and reconciler commands, and the `HostRuntime` hook for NG4. |
+| `runtime.py` | `build_core` (stores, ports, GitHub runtime) and the bootstrap of the worker and reconciler commands (`monitor.check_all` / `start` / `stop`). |
 | `migrate.py` | The migrate Job and the autogenerate wrapper. |
 | `metrics.py` | OpenTelemetry instruments (no-ops without a MeterProvider). |
 
@@ -68,21 +68,22 @@ effective defaults are logged at startup.
 | `HOST_RECHECK_SECONDS` | 60 | Recheck of `unavailable` and `unregistered` hosts. |
 | `MIGRATE_EXPECTED_ROLE` | unset | The migrate Job refuses to run as any other database role. |
 
-## Interface for NG4 and later items
+## Interfaces for the adapters (NG5) and the admin API (NG6)
 
-- `lease.py`: `LeaseManager(PgLeaseStore(session_factory), ttl_seconds=...)`, `hold(tenant_id,
-  adapter, key)`, `Lease.valid_clause()`, `guarded_execute`, `guarded_insert`, `bounded_call`.
-  Docstring at the top of the module.
-- `../settings.py`: `TrustbridgeSettings`, `get_trustbridge_settings()`, `GitHubHostConfig`,
-  `SignerConfig` (only the `file` and `vault-transit` kinds; NG4 extends them).
-- `runtime.py`: NG4 provides `trustbridge.github.runtime.build_host_runtime(settings) ->
-  HostRuntime(checker, deliveries, hosts_provider, handlers)`. Until it exists every registered
-  host is `unavailable` ("no host checker installed"): fail closed. `checker` runs the signer
-  self-test, the `GET /app` id match and the issuer check (raise `HostCheckFailed(reason)`).
-  `deliveries` implements `HookDeliveryClient` (list failed attempts, redeliver). `hosts_provider`
-  overlays registration results on the configured hosts so a registered host is picked up at the
-  next recheck. `handlers` maps a GitHub event name to `async def handler(ctx: HandlerContext)`.
-- `worker.py`: handlers must be idempotent; raise `LeaseBusy` for a taken lease (no failure is
+- `lease.py`: `LeaseManager(PgLeaseStore(session_factory), ttl_seconds=...)`; `hold(tenant_id=...,
+  adapter=..., key=...)` and `Lease.guard()` are what `CredentialCore` uses (`LeaseProvider`,
+  `Lease`). Docstring at the top of the module.
+- `../settings.py`: `TrustbridgeSettings`, `get_trustbridge_settings()`, `GitHubHostConfig`
+  (`trustbridge.github.hosts`), `SignerConfig` (`trustbridge.signer.config`).
+- `runtime.py`: `build_core(...)` returns a `Core` with the stores, the `HostRuntime`
+  (`trustbridge.github.runtime`), the secret store, `ParkedValues` (the credential core's value
+  store) and `ConnectionData` (its config resolver and the tenant connection store). The web
+  processes override pieces through `main.Overrides`.
+- `SECRET_STORE_DIR` (unset by default): the directory behind `store:` secret references (parked
+  values, tenant connection data). Without it every `store:` write fails closed. Vault KV or a
+  cloud secret manager implement the same four methods (`read`, `write`, `delete`,
+  `list_refs`) in `secrets.py`'s place.
+- `worker.py`: handlers (registered in the `HandlerRegistry`) must be idempotent; raise `LeaseBusy` for a taken lease (no failure is
   counted), any other exception is a counted failure.
 - Migrations: bump the schema-compatibility integer in every revision with
   `INSERT INTO schema_compat (id, version) VALUES (1, N) ON CONFLICT (id) DO UPDATE SET version =

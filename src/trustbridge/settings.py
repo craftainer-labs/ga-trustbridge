@@ -20,127 +20,58 @@ import re
 from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
-from urllib.parse import urlsplit
+from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
 from pydantic.functional_validators import BeforeValidator
 from pydantic_settings import NoDecode, SettingsConfigDict
 
 from app.config import Settings
+from trustbridge.github.hosts import (
+    DEFAULT_HOST_RECHECK_SECONDS,
+    GitHubHostConfig,
+    HostSettingsError,
+    load_hosts,
+    validate_hosts,
+)
+from trustbridge.signer.config import FileSignerConfig, SignerConfig, parse_signers
 
 logger = logging.getLogger(__name__)
-
-HostKind = Literal["github.com", "ghes", "ghe.com"]
 
 # GitHub documents a 25 MB payload cap (ADR 0028 open issue: not re-fetched in this pass).
 DEFAULT_WEBHOOK_MAX_BODY_BYTES = 25 * 1024 * 1024
 _HOST_NAME = re.compile(r"^[a-z0-9][a-z0-9.-]{0,62}$")
-_GHES_API_PATH = "/api/v3"
+
+__all__ = [
+    "GitHubHostConfig",
+    "SettingsError",
+    "SignerConfig",
+    "TrustbridgeSettings",
+    "check_environment",
+    "get_trustbridge_settings",
+    "known_env_names",
+    "load_trustbridge_settings",
+    "log_effective_settings",
+]
 
 
 class SettingsError(ValueError):
     """The process environment holds a setting the process must refuse to start with."""
 
 
-class VaultAuth(BaseModel):
-    """How a `vault-transit` signer authenticates; credentials are file references only."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    method: Literal["kubernetes", "approle"]
-    role: str
-    secret_id_file: Path | None = None
-    jwt_file: Path | None = None
-
-
-class FileSignerConfig(BaseModel):
-    """A PEM on disk (dev only; refused in production)."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    kind: Literal["file"]
-    path: Path
+def _load_hosts(value: Any) -> Any:  # noqa: ANN401 -- pydantic hook
+    """Parse `GITHUB_HOSTS` (JSON text or decoded entries), applying the kind-dependent default."""
+    if isinstance(value, list) and all(isinstance(item, GitHubHostConfig) for item in value):
+        return value
+    try:
+        return load_hosts(value)
+    except HostSettingsError as exc:
+        raise ValueError(str(exc)) from exc
 
 
-class VaultTransitSignerConfig(BaseModel):
-    """A non-exportable Vault Transit RSA key."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    kind: Literal["vault-transit"]
-    addr: str
-    mount: str = "transit"
-    key: str
-    auth: VaultAuth
-
-
-SignerConfig = Annotated[FileSignerConfig | VaultTransitSignerConfig, Field(discriminator="kind")]
-
-
-class GitHubHostConfig(BaseModel):
-    """One configured GitHub host (ADR 0030 "Hosts").
-
-    `app_id` and `webhook_secret_ref` are both set or both absent; absent means the host is
-    `unregistered`. `oidc_id_claims` has no field default: the loader below applies the
-    kind-dependent default (True for github.com, False for ghes and ghe.com) when an entry
-    omits it, and an explicit value always wins.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    name: str
-    kind: HostKind
-    web_url: str
-    api_url: str
-    oidc_issuer: str
-    registry_host: str
-    oidc_id_claims: bool
-    app_id: int | None = None
-    signer: str
-    webhook_secret_ref: str | None = None
-    ca_bundle: Path | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _apply_oidc_id_claims_default(cls, data: Any) -> Any:  # noqa: ANN401 -- pydantic hook
-        """Default `oidc_id_claims` by `kind` when the entry omits it."""
-        if isinstance(data, dict) and "oidc_id_claims" not in data:
-            return {**data, "oidc_id_claims": data.get("kind") == "github.com"}
-        return data
-
-    @property
-    def registered(self) -> bool:
-        """Whether the host has an App (both `app_id` and `webhook_secret_ref` set)."""
-        return self.app_id is not None and self.webhook_secret_ref is not None
-
-    def problems(self, *, allow_http: bool) -> list[str]:
-        """Settings-only problems with this entry (every one is fatal at startup)."""
-        found: list[str] = []
-        if not _HOST_NAME.match(self.name):
-            found.append(f"host name {self.name!r} must match {_HOST_NAME.pattern}")
-        for label, url in (("web_url", self.web_url), ("api_url", self.api_url)):
-            scheme = urlsplit(url).scheme
-            if scheme != "https" and not (allow_http and scheme == "http"):
-                found.append(f"host {self.name}: {label} must be https")
-        if (self.app_id is None) != (self.webhook_secret_ref is None):
-            found.append(
-                f"host {self.name}: app_id and webhook_secret_ref must be both set or both absent"
-            )
-        found.extend(self._api_url_shape())
-        return found
-
-    def _api_url_shape(self) -> list[str]:
-        """The `api_url` shape for this host kind (ADR 0030 table)."""
-        parts = urlsplit(self.api_url)
-        host = parts.hostname or ""
-        path = parts.path.rstrip("/")
-        ok = {
-            "github.com": host == "api.github.com" and path == "",
-            "ghes": bool(host) and not host.startswith("api.") and path == _GHES_API_PATH,
-            "ghe.com": host.startswith("api.") and host.endswith(".ghe.com") and path == "",
-        }[self.kind]
-        return [] if ok else [f"host {self.name}: api_url has the wrong shape for kind {self.kind}"]
+def _load_signers(value: Any) -> Any:  # noqa: ANN401 -- pydantic hook
+    """Parse `SIGNERS` given as JSON text (a decoded mapping goes through normal validation)."""
+    return parse_signers(value) if isinstance(value, str) else value
 
 
 def _split_proxies(value: Any) -> Any:  # noqa: ANN401 -- pydantic hook
@@ -167,8 +98,8 @@ class TrustbridgeSettings(Settings):
     model_config = SettingsConfigDict(extra="forbid")  # no env_file, no secrets_dir
 
     # No defaults: absence is dangerous (ADR 0028 "Settings").
-    github_hosts: list[GitHubHostConfig]
-    signers: dict[str, SignerConfig]
+    github_hosts: Annotated[list[GitHubHostConfig], NoDecode, BeforeValidator(_load_hosts)]
+    signers: Annotated[dict[str, SignerConfig], NoDecode, BeforeValidator(_load_signers)]
     # Flagged dev mode: allows http:// host URLs. Refused in production.
     allow_insecure_github_urls: bool = False
 
@@ -219,13 +150,17 @@ class TrustbridgeSettings(Settings):
     lease_ttl_seconds: float = Field(default=120.0, gt=0)
     adapter_call_timeout_seconds: float = Field(default=30.0, gt=0)
 
+    # Directory of the writable local secret store (`store:<name>` references: parked values,
+    # tenant connection data). Unset: such writes fail closed (ADR 0029 value store).
+    secret_store_dir: Path | None = None
+
     # The migrate Job refuses to run as any other database role when set (the owner role).
     migrate_expected_role: str | None = None
 
     # Startup, schema and hosts.
     schema_wait_seconds: float = Field(default=300.0, gt=0)
     schema_poll_seconds: float = Field(default=2.0, gt=0)
-    host_recheck_seconds: float = Field(default=60.0, gt=0)
+    host_recheck_seconds: float = Field(default=float(DEFAULT_HOST_RECHECK_SECONDS), gt=0)
     host_check_timeout_seconds: float = Field(default=10.0, gt=0)
 
     @property
@@ -237,21 +172,27 @@ class TrustbridgeSettings(Settings):
     def _validate_trustbridge(self) -> Self:
         """Collect every settings-only problem and raise once (all are fatal)."""
         problems: list[str] = []
-        names = [host.name for host in self.github_hosts]
-        if len(set(names)) != len(names):
-            problems.append("GITHUB_HOSTS names must be unique")
+        problems.extend(
+            f"host name {host.name!r} must match {_HOST_NAME.pattern}"
+            for host in self.github_hosts
+            if not _HOST_NAME.match(host.name)
+        )
         allow_http = self.allow_insecure_github_urls and not self.production
         if self.allow_insecure_github_urls and self.production:
             problems.append("ALLOW_INSECURE_GITHUB_URLS is refused when MODE=production")
-        for host in self.github_hosts:
-            problems.extend(host.problems(allow_http=allow_http))
-            if host.signer not in self.signers:
-                problems.append(f"host {host.name}: signer {host.signer!r} is not in SIGNERS")
+        warnings: list[str] = []
+        try:
+            # The file signer is refused per signer here (stricter than per used signer).
+            warnings = validate_hosts(
+                self.github_hosts, self.signers, production=False, dev_mode=allow_http
+            )
+        except HostSettingsError as exc:
+            problems.extend(exc.problems)
         if self.production:
             problems.extend(
                 f"signer {name}: the file kind is refused when MODE=production"
                 for name, signer in self.signers.items()
-                if signer.kind == "file"
+                if isinstance(signer, FileSignerConfig)
             )
             problems.extend(self._production_problems())
         if self.adapter_call_timeout_seconds >= self.lease_ttl_seconds:
@@ -260,9 +201,8 @@ class TrustbridgeSettings(Settings):
             problems.append("RETRY_BACKOFF_MAX_SECONDS must be >= RETRY_BACKOFF_BASE_SECONDS")
         if problems:
             raise ValueError("; ".join(problems))
-        used = {host.signer for host in self.github_hosts}
-        for name in sorted(set(self.signers) - used):
-            logger.warning("signer %s is configured but no host uses it", name)
+        for warning in warnings:
+            logger.warning(warning)
         return self
 
     def _production_problems(self) -> list[str]:

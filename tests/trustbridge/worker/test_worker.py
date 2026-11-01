@@ -3,19 +3,21 @@
 Covers 0028 invariants 3, 4, 7 and 0030 invariant 8.
 """
 
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
 
 from tests.trustbridge.worker.harness import Harness, WorkerDied
+from trustbridge.github.handlers import EventContext
 from trustbridge.worker.lease import LeaseBusy
-from trustbridge.worker.worker import HandlerContext
 
 
-async def test_success_resolves_the_tenant_and_marks_processed() -> None:
-    seen: list[HandlerContext] = []
+async def test_success_dispatches_the_event_context_and_marks_processed() -> None:
+    """Success dispatches the event context and marks processed."""
+    seen: list[EventContext] = []
 
-    async def handler(ctx: HandlerContext) -> None:
+    async def handler(ctx: EventContext) -> None:
         seen.append(ctx)
 
     h = await Harness({"push": handler}).start()
@@ -25,11 +27,13 @@ async def test_success_resolves_the_tenant_and_marks_processed() -> None:
     assert row is not None
     assert (row.status, row.attempts) == ("processed", 0)
     assert seen[0].payload == {"installation": {"id": 7}}
-    assert seen[0].tenant_id is not None
+    assert (seen[0].host, seen[0].event, seen[0].delivery_id) == ("ok", "push", "d1")
+    assert seen[0].action is None
     assert (await h.valkey.xpending("tb:events", "tb-workers"))["pending"] == 0
 
 
 async def test_an_event_without_a_handler_is_processed_as_a_no_op() -> None:
+    """An event without a handler is processed as a no op."""
     h = await Harness({}).start()
     await h.add("d1", event="ping")
     await h.worker.run_once()
@@ -37,9 +41,10 @@ async def test_an_event_without_a_handler_is_processed_as_a_no_op() -> None:
 
 
 async def test_the_failure_counter_increases_only_on_handler_failures_with_backoff() -> None:  # 3
+    """The failure counter increases only on handler failures with backoff."""
     outcomes = iter([RuntimeError("boom"), RuntimeError("boom"), None])
 
-    async def handler(ctx: HandlerContext) -> None:
+    async def handler(ctx: EventContext) -> None:
         if (error := next(outcomes)) is not None:
             raise error
 
@@ -67,7 +72,8 @@ async def test_the_failure_counter_increases_only_on_handler_failures_with_backo
 
 
 async def test_exhausting_the_attempts_dead_letters_with_no_body() -> None:  # inv. 3, 4, 7
-    async def handler(ctx: HandlerContext) -> None:
+    """Exhausting the attempts dead letters with no body."""
+    async def handler(ctx: EventContext) -> None:
         raise RuntimeError("always")
 
     h = await Harness({"push": handler}).start()
@@ -86,6 +92,7 @@ async def test_exhausting_the_attempts_dead_letters_with_no_body() -> None:  # i
 
 
 async def test_relay_duplicates_and_re_relays_never_increase_the_counter() -> None:  # inv. 3
+    """Relay duplicates and re relays never increase the counter."""
     h = await Harness({}).start()
     await h.add("d1")
     await h.queue.add("d1")  # a relay duplicate
@@ -99,7 +106,8 @@ async def test_relay_duplicates_and_re_relays_never_increase_the_counter() -> No
 
 
 async def test_a_busy_lease_defers_without_counting() -> None:  # inv. 3
-    async def handler(ctx: HandlerContext) -> None:
+    """A busy lease defers without counting."""
+    async def handler(ctx: EventContext) -> None:
         raise LeaseBusy("adapter/key")
 
     h = await Harness({"push": handler}).start()
@@ -113,10 +121,11 @@ async def test_a_busy_lease_defers_without_counting() -> None:  # inv. 3
 
 
 async def test_a_host_that_is_not_ready_is_neither_handled_counted_nor_dead_lettered() -> None:
+    """A host that is not ready is neither handled counted nor dead lettered."""
     called: list[str] = []
 
-    async def handler(ctx: HandlerContext) -> None:
-        called.append(ctx.delivery.delivery_id)
+    async def handler(ctx: EventContext) -> None:
+        called.append(ctx.delivery_id)
 
     h = await Harness({"push": handler}, failing_hosts={"bad"}).start()  # 3, 4, 0030-8
     await h.add("d1", host_name="bad")
@@ -133,10 +142,11 @@ async def test_a_host_that_is_not_ready_is_neither_handled_counted_nor_dead_lett
 
 
 async def test_a_host_becoming_ready_re_adds_its_waiting_rows_without_the_periodic_sweep() -> None:
+    """A host becoming ready re adds its waiting rows without the periodic sweep."""
     called: list[str] = []
 
-    async def handler(ctx: HandlerContext) -> None:
-        called.append(ctx.delivery.delivery_id)
+    async def handler(ctx: EventContext) -> None:
+        called.append(ctx.delivery_id)
 
     h = await Harness({"push": handler}, failing_hosts={"bad"}).start()  # 0030 invariant 8
     await h.add("d1", host_name="bad")
@@ -144,17 +154,18 @@ async def test_a_host_becoming_ready_re_adds_its_waiting_rows_without_the_period
     await h.worker.run_once()
     assert called == ["d2"]
     h.checker.failing.clear()
-    await h.hosts.check_all(only_not_ready=True)  # the recheck: bad -> ready fires the listener
+    await h.hosts.recheck()  # the recheck: bad -> ready fires the on_ready hook
     await h.worker.run_once()
     assert called == ["d2", "d1"]
     assert (await h.store.get("d1")).status == "processed"  # type: ignore[union-attr]
 
 
 async def test_a_worker_that_keeps_dying_dead_letters_by_stream_delivery_count() -> None:  # inv. 4
+    """A worker that keeps dying dead letters by stream delivery count."""
     calls: list[str] = []
 
-    async def handler(ctx: HandlerContext) -> None:
-        calls.append(ctx.delivery.delivery_id)
+    async def handler(ctx: EventContext) -> None:
+        calls.append(ctx.delivery_id)
         raise WorkerDied
 
     h = await Harness({"push": handler}).start()  # MAX_DELIVERY_ATTEMPTS = 3
@@ -180,9 +191,10 @@ async def test_a_worker_that_keeps_dying_dead_letters_by_stream_delivery_count()
 
 
 async def test_requeue_makes_exactly_that_row_deliverable_with_a_reset_counter() -> None:  # inv. 7
+    """Requeue makes exactly that row deliverable with a reset counter."""
     mode = {"fail": True}
 
-    async def handler(ctx: HandlerContext) -> None:
+    async def handler(ctx: EventContext) -> None:
         if mode["fail"]:
             raise RuntimeError("down")
 
@@ -208,6 +220,7 @@ async def test_requeue_makes_exactly_that_row_deliverable_with_a_reset_counter()
 
 
 async def test_requeue_refuses_a_row_whose_body_was_purged() -> None:  # inv. 7
+    """Requeue refuses a row whose body was purged."""
     h = await Harness({}).start()
     await h.add("d1")
     await h.store.mark_dead("d1", "x", h.clock())
@@ -217,6 +230,7 @@ async def test_requeue_refuses_a_row_whose_body_was_purged() -> None:  # inv. 7
 
 
 async def test_infrastructure_errors_re_add_the_entry_without_counting() -> None:
+    """Infrastructure errors re add the entry without counting."""
     h = await Harness({"push": lambda ctx: None}).start()  # type: ignore[dict-item]
     await h.add("d1")
     real_get = h.store.get
@@ -235,3 +249,38 @@ async def test_infrastructure_errors_re_add_the_entry_without_counting() -> None
     assert row.attempts == 0
     assert len(h.valkey.entries("tb:events")) == 2  # re-added as a fresh entry
     assert (await h.valkey.xpending("tb:events", "tb-workers"))["pending"] == 0
+
+
+async def test_the_payload_action_reaches_the_handler() -> None:
+    """The payload action reaches the handler."""
+    seen: list[EventContext] = []
+
+    async def handler(ctx: EventContext) -> None:
+        seen.append(ctx)
+
+    h = await Harness({"installation": handler}).start()
+    await h.add("d1", event="installation", body=b'{"action": "created"}')
+    await h.add("d2", event="installation", body=b'{"action": 5}')
+    await h.worker.run_once()
+    assert sorted((c.delivery_id, c.action) for c in seen) == [("d1", "created"), ("d2", None)]
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [(b"[1]", "TypeError: webhook payload is not a JSON object"), (None, "ValueError: delivery body")],
+)
+async def test_an_unusable_body_is_a_counted_handler_failure(body: bytes | None, error: str) -> None:
+    """An unusable body is a counted handler failure."""
+    async def handler(ctx: EventContext) -> None:
+        raise AssertionError("not reached")
+
+    h = await Harness({"push": handler}).start()
+    await h.add("d1", body=body if body is not None else b"{}")
+    if body is None:  # the retention job purged the body of a row that is still pending
+        h.store.rows["d1"] = replace(h.store.rows["d1"], body=None)
+    await h.worker.run_once()
+    row = await h.store.get("d1")
+    assert row is not None
+    assert (row.status, row.attempts) == ("pending", 1)
+    assert row.last_error is not None
+    assert row.last_error.startswith(error)

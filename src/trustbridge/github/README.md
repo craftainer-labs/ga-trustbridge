@@ -21,10 +21,15 @@ The GitHub core ([ADR 0028](../../../docs/adrs/0028-trustbridge-architecture-and
   is re-read through the Argo CD adapter (`DeploymentStateSource`).
 - `manifest.py` — the manifest flow for trustbridge's own App and the per-tenant read-only Argo CD
   App, and the manual fallback. `models.py` stores a host's registration for every process.
-- `handlers.py` — the handler registry NG3's worker calls, and the installation lifecycle
-  handlers. `webhook_secrets.py` caches webhook secrets (0030 invariant 11).
-- `ports.py` — the Protocols this package needs from NG3 (secret store, tenants, nonces,
-  reconcile scheduling).
+- `handlers.py` — the handler registry the worker dispatches through, and the installation
+  lifecycle handlers. `webhook_secrets.py` caches webhook secrets (0030 invariant 11) and
+  re-reads one after a signature mismatch (rotation).
+- `hook_deliveries.py` — `GET /app/hook/deliveries` (cursor pagination) and redelivery, for the
+  reconciler.
+- `runtime.py` — `build_host_runtime(settings, deps)`: signers, `HostMonitor`, tokens, gateway,
+  hook client, `HandlerRegistry` (core handlers registered) and the Argo CD handler.
+- `ports.py` — the Protocols this package needs from the rest of the app (secret store, tenants,
+  nonces, reconcile scheduling); `trustbridge.worker.ports` implements them.
 
 ## Registering an App
 

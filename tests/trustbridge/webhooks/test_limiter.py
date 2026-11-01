@@ -33,6 +33,7 @@ def _limiter(counter: object, **kw: object) -> WebhookLimiter:
 
 
 async def test_over_limit_is_rejected_with_the_seconds_left_in_the_window() -> None:  # inv. 25
+    """Over limit is rejected with the seconds left in the window."""
     limiter = _limiter(InMemoryWindowCounter())
     for _ in range(3):
         assert (await limiter.check("203.0.113.5")).allowed
@@ -44,12 +45,14 @@ async def test_over_limit_is_rejected_with_the_seconds_left_in_the_window() -> N
 
 
 async def test_retry_after_is_at_least_one_second() -> None:
+    """Retry after is at least one second."""
     limiter = _limiter(InMemoryWindowCounter(), requests=1, clock=lambda: 59.9999)
     await limiter.check("a")
     assert (await limiter.check("a")).retry_after == 1
 
 
 async def test_exempt_cidr_is_never_limited_and_others_are() -> None:  # inv. 25
+    """Exempt cidr is never limited and others are."""
     limiter = _limiter(
         InMemoryWindowCounter(), requests=1, exempt=[ipaddress.ip_network("192.0.2.0/24")]
     )
@@ -60,12 +63,14 @@ async def test_exempt_cidr_is_never_limited_and_others_are() -> None:  # inv. 25
 
 
 async def test_disabled_limiter_allows_everything() -> None:
+    """Disabled limiter allows everything."""
     limiter = _limiter(InMemoryWindowCounter(), enabled=False, requests=1)
     for _ in range(5):
         assert (await limiter.check("a")).allowed
 
 
 def test_keys_ipv6_by_slash_64_missing_client_as_unknown() -> None:  # inv. 26
+    """Keys ipv6 by slash 64 missing client as unknown."""
     assert source_key("2001:db8:1:2:aaaa:bbbb:cccc:dddd") == source_key("2001:db8:1:2::1")
     assert source_key("2001:db8:1:2::1") != source_key("2001:db8:1:3::1")
     assert source_key(None) == "unknown"
@@ -76,6 +81,7 @@ def test_keys_ipv6_by_slash_64_missing_client_as_unknown() -> None:  # inv. 26
 
 
 async def test_two_api_instances_share_one_valkey_count() -> None:  # inv. 27
+    """Two api instances share one valkey count."""
     valkey = FakeRedis()
     a = _limiter(ValkeyWindowCounter(as_redis(valkey)), requests=4)
     b = _limiter(ValkeyWindowCounter(as_redis(valkey)), requests=4)
@@ -89,6 +95,7 @@ async def test_two_api_instances_share_one_valkey_count() -> None:  # inv. 27
 async def test_valkey_error_fails_open_and_counts_a_metric(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # inv. 28
+    """Valkey error fails open and counts a metric."""
     valkey = FakeRedis()
     valkey.down = True
     added: list[int] = []
@@ -103,6 +110,7 @@ async def test_valkey_error_fails_open_and_counts_a_metric(
 
 async def test_a_slow_valkey_costs_at_most_the_timeout() -> None:  # inv. 28
 
+    """A slow valkey costs at most the timeout."""
     class Slow:
         async def incr(self, key: str, ttl_seconds: int) -> int:
             await asyncio.sleep(5)
@@ -135,11 +143,13 @@ async def _who(app: FastAPI, peer: str, forwarded: list[str]) -> str:
 
 
 async def test_forwarded_header_from_an_untrusted_peer_does_not_change_the_key() -> None:  # 26
+    """Forwarded header from an untrusted peer does not change the key."""
     app = _echo_app(["10.0.0.0/8"])
     assert await _who(app, "203.0.113.50", ["198.51.100.99"]) == "203.0.113.50"
 
 
 async def test_trusted_chain_keys_on_the_rightmost_untrusted_entry() -> None:  # inv. 26
+    """Trusted chain keys on the rightmost untrusted entry."""
     app = _echo_app(["10.0.0.0/8"])
     # client -> 10.1.1.1 (proxy) -> 10.0.0.9 (proxy, the peer); a forged left entry is ignored.
     key = await _who(app, "10.0.0.9", ["6.6.6.6, 198.51.100.7", "10.1.1.1"])
@@ -147,4 +157,5 @@ async def test_trusted_chain_keys_on_the_rightmost_untrusted_entry() -> None:  #
 
 
 async def test_empty_trusted_list_means_use_the_socket_peer() -> None:  # inv. 26
+    """Empty trusted list means use the socket peer."""
     assert await _who(_echo_app([]), "10.0.0.9", ["198.51.100.7"]) == "10.0.0.9"

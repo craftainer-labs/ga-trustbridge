@@ -4,23 +4,20 @@ The database-backed parts of the migrate Job are in `test_integration_pg.py`.
 """
 
 import asyncio
-import sys
 import types
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from tests.trustbridge.fakes import FakeHostChecker, FakeRedis
 from tests.trustbridge.helpers import as_redis, make_settings
+from trustbridge.github.availability import HostState
 from trustbridge.worker import migrate, runtime
-from trustbridge.worker.hosts import HostState, UninstalledHostChecker
-from trustbridge.worker.runtime import (
-    HostRuntime,
-    ProcessOverrides,
-    build_core,
-    load_host_runtime,
-)
+from trustbridge.worker.deliveries import NewDelivery
+from trustbridge.worker.runtime import ProcessOverrides, build_core
 from trustbridge.worker.schema import REQUIRED_SCHEMA_VERSION
+from trustbridge.worker.secrets import MemorySecrets
 
 
 @pytest.fixture
@@ -37,24 +34,24 @@ def no_migrations(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.parametrize("kind", ["worker", "reconciler"])
 async def test_runtime_processes_start_and_stop_without_migrating_or_touching_a_db(
-    kind: str, no_migrations: None
+    kind: str, no_migrations: None, key_signers: None
 ) -> None:  # inv. 15 and 17
+    """Runtime processes start and stop without migrating or touching a db."""
     stop = asyncio.Event()
     stop.set()
     checker = FakeHostChecker()
-    overrides = ProcessOverrides(
-        redis=as_redis(FakeRedis()), runtime=HostRuntime(checker=checker), stop=stop
-    )
+    overrides = ProcessOverrides(redis=as_redis(FakeRedis()), checker=checker, stop=stop)
     code = await runtime.run_process(kind, make_settings(), overrides)  # type: ignore[arg-type]
     assert code == 0
     assert checker.calls == ["github.com"]  # the startup checks ran, as in the api
 
 
 async def test_the_process_exits_non_zero_when_the_schema_never_becomes_current(
-    no_migrations: None,
+    no_migrations: None, key_signers: None
 ) -> None:  # inv. 14
+    """The process exits non zero when the schema never becomes current."""
     class Session:
-        async def __aenter__(self) -> "Session":
+        async def __aenter__(self) -> Session:
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
@@ -70,52 +67,57 @@ async def test_the_process_exits_non_zero_when_the_schema_never_becomes_current(
         ProcessOverrides(
             redis=as_redis(FakeRedis()),
             session_factory=lambda: Session(),  # type: ignore[arg-type,return-value]
-            runtime=HostRuntime(checker=FakeHostChecker()),
+            checker=FakeHostChecker(),
             stop=asyncio.Event(),
         ),
     )
     assert code == 1
 
 
-def test_without_the_github_runtime_module_every_registered_host_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def missing(name: str) -> None:
-        raise ModuleNotFoundError(name=name)
-
-    monkeypatch.setattr(runtime.importlib, "import_module", missing)
-    loaded = load_host_runtime(make_settings())
-    assert isinstance(loaded.checker, UninstalledHostChecker)
-
-
-def test_the_github_runtime_hook_is_called_when_the_module_exists(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sentinel = HostRuntime(checker=FakeHostChecker())
-    hook = types.ModuleType("trustbridge.github.runtime")
-    hook.build_host_runtime = lambda settings: sentinel  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "trustbridge.github.runtime", hook)
-    assert load_host_runtime(make_settings()) is sentinel
-
-
-def test_a_broken_hook_module_is_not_mistaken_for_a_missing_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def broken(name: str) -> None:
-        raise ModuleNotFoundError(name="some_third_party")
-
-    monkeypatch.setattr(runtime.importlib, "import_module", broken)
-    with pytest.raises(ModuleNotFoundError):
-        load_host_runtime(make_settings())
-
-
-async def test_build_core_uses_in_memory_stores_in_mock_mode() -> None:  # inv. 15
-    core = build_core(make_settings(), redis=None, session_factory=None, runtime=HostRuntime(FakeHostChecker()))
+async def test_build_core_uses_in_memory_stores_in_mock_mode(key_signers: None) -> None:  # inv. 15
+    """Build core uses in memory stores in mock mode."""
+    core = build_core(make_settings(), redis=None, session_factory=None, checker=FakeHostChecker())
     assert core.queue is None
     assert core.relay is None
     assert core.gate.current
-    await core.hosts.check_all()
-    assert core.hosts.status("github.com").state is HostState.READY  # type: ignore[union-attr]
+    assert isinstance(core.secrets, MemorySecrets)
+    monitor = core.runtime.monitor
+    await monitor.check_all()
+    assert monitor.status("github.com").state is HostState.READY
+    tenant_id = await core.tenants.upsert_installation("github.com", 7, "acme", 1)
+    assert (await core.tenants.get_tenant(tenant_id)).github_host.name == "github.com"
+    assert core.runtime.argocd is None  # until NG5d supplies a DeploymentStateSource
+
+
+async def test_a_worker_re_adds_the_waiting_rows_of_a_host_that_turns_ready(
+    key_signers: None,
+) -> None:  # ADR 0030 invariant 8
+    """A worker re adds the waiting rows of a host that turns ready."""
+    valkey = FakeRedis()
+    core = build_core(
+        make_settings(),
+        redis=as_redis(valkey),
+        session_factory=None,
+        readd_on_ready=True,
+        checker=FakeHostChecker(),
+    )
+    await core.store.insert(NewDelivery("d-1", "github.com", "push", {}, b"{}", datetime.now(UTC)))
+    assert valkey.ids_of("tb:events") == []
+    await core.runtime.monitor.check_all()
+    assert valkey.ids_of("tb:events") == ["d-1"]
+
+
+async def test_the_readd_hook_does_nothing_without_a_stream(key_signers: None) -> None:
+    """The readd hook does nothing without a stream."""
+    core = build_core(
+        make_settings(),
+        redis=None,
+        session_factory=None,
+        readd_on_ready=True,
+        checker=FakeHostChecker(),
+    )
+    await core.runtime.monitor.check_all()
+    assert core.runtime.monitor.is_ready("github.com")
 
 
 # --- the migrate Job -------------------------------------------------------------------------
@@ -123,15 +125,19 @@ async def test_build_core_uses_in_memory_stores_in_mock_mode() -> None:  # inv. 
 
 class _Conn:
     def __init__(self, log: list[str], role: str) -> None:
+        """Initialise."""
         self.log, self.role = log, role
 
-    async def __aenter__(self) -> "_Conn":
+    async def __aenter__(self) -> _Conn:
+        """Implement __aenter__."""
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
+        """Implement __aexit__."""
         return None
 
     async def execute(self, stmt: Any, params: Any = None) -> Any:  # noqa: ANN401
+        """Execute."""
         text = str(stmt)
         self.log.append(text)
         return types.SimpleNamespace(scalar_one=lambda: self.role)
@@ -139,12 +145,15 @@ class _Conn:
 
 class _Engine:
     def __init__(self, log: list[str], role: str) -> None:
+        """Initialise."""
         self.log, self.role = log, role
 
     def connect(self) -> _Conn:
+        """Connect."""
         return _Conn(self.log, self.role)
 
     async def dispose(self) -> None:
+        """Dispose."""
         self.log.append("dispose")
 
 
@@ -155,6 +164,7 @@ def _patch_engine(monkeypatch: pytest.MonkeyPatch, log: list[str], role: str = "
 async def test_migrate_runs_upgrade_under_the_lock_and_exits_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # inv. 18
+    """Migrate runs upgrade under the lock and exits zero."""
     log: list[str] = []
     _patch_engine(monkeypatch, log)
     result = await migrate.run_upgrade(make_settings(), upgrade=lambda: log.append("upgrade"))
@@ -167,6 +177,7 @@ async def test_migrate_runs_upgrade_under_the_lock_and_exits_zero(
 async def test_a_failed_migration_fails_the_job_and_still_unlocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # inv. 18
+    """A failed migration fails the job and still unlocks."""
     log: list[str] = []
     _patch_engine(monkeypatch, log)
 
@@ -180,6 +191,7 @@ async def test_a_failed_migration_fails_the_job_and_still_unlocks(
 async def test_the_job_refuses_to_run_as_any_role_but_the_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # inv. 18
+    """The job refuses to run as any role but the owner."""
     log: list[str] = []
     _patch_engine(monkeypatch, log, role="trustbridge_app")
     ran: list[str] = []
@@ -192,6 +204,7 @@ async def test_the_job_refuses_to_run_as_any_role_but_the_owner(
 def test_migrate_cli_rejects_unknown_commands_and_wraps_autogenerate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Migrate cli rejects unknown commands and wraps autogenerate."""
     assert migrate.main([]) == 2
     assert migrate.main(["downgrade"]) == 2
     called: list[list[str]] = []
@@ -200,4 +213,6 @@ def test_migrate_cli_rejects_unknown_commands_and_wraps_autogenerate(
     assert called == [["revision", "--autogenerate", "-m", "x"]]
     from trustbridge.worker import models  # noqa: PLC0415
 
-    assert "webhook_deliveries" in models.Base.metadata.tables  # registered for autogenerate
+    # webhook_deliveries (NG3), adapter_credentials and github_host_registrations (NG4)
+    tables = models.Base.metadata.tables
+    assert {"webhook_deliveries", "adapter_credentials", "github_host_registrations"} <= set(tables)

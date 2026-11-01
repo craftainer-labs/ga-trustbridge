@@ -15,7 +15,8 @@ import asyncio
 import logging
 from collections.abc import Callable
 
-from alembic.config import Config, main as alembic_main
+from alembic.config import Config
+from alembic.config import main as alembic_main
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
@@ -66,7 +67,12 @@ def main(argv: list[str]) -> int:
         logger.error("usage: migrate upgrade | migrate revision [alembic revision args]")
         return 2
     if argv[0] == "revision":
-        from trustbridge.worker import models  # noqa: F401, PLC0415 -- registers tables on Base
+        from trustbridge.adapters import models as adapter_models  # noqa: PLC0415
+        from trustbridge.github import models as github_models  # noqa: PLC0415
+        from trustbridge.worker import models  # noqa: PLC0415
+
+        # Importing registers every trustbridge table on the shared `Base` for autogenerate.
+        del adapter_models, github_models, models
 
         alembic_main(argv=argv)
         return 0

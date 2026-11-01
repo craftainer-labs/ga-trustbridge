@@ -18,6 +18,7 @@ from trustbridge.worker import migrate, runtime
 def test_shims_forward_to_the_worker_dispatcher(
     module: str, expected: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Shims forward to the worker dispatcher."""
     seen: list[list[str]] = []
     monkeypatch.setattr(commands, "main", lambda argv: seen.append(argv) or 7)
     monkeypatch.setattr("sys.argv", ["prog", "x"])
@@ -28,6 +29,7 @@ def test_shims_forward_to_the_worker_dispatcher(
 
 
 def test_dispatcher_routes_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dispatcher routes commands."""
     monkeypatch.setattr(commands, "configure_logging", lambda: None)
     monkeypatch.setattr(migrate, "main", lambda argv: 3 if argv == ["upgrade"] else 9)
     monkeypatch.setattr(runtime, "main", lambda kind: {"worker": 0, "reconciler": 1}[kind])
@@ -41,6 +43,7 @@ def test_dispatcher_routes_commands(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_runtime_main_runs_the_process_and_returns_its_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Runtime main runs the process and returns its code."""
     monkeypatch.setattr(runtime, "configure_logging", lambda: None)
     monkeypatch.setattr(runtime, "run_process", lambda kind: kind)
     assert runtime.main("worker", runner=lambda coro: 5 if coro == "worker" else 6) == 5

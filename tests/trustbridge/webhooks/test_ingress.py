@@ -10,7 +10,8 @@ import pytest
 from fastapi import FastAPI
 
 from tests.trustbridge.fakes import FakeHostChecker, FakeRedis, FakeSecretStore
-from tests.trustbridge.helpers import as_redis, host, make_settings, sign
+from tests.trustbridge.helpers import as_redis, host, make_monitor, make_settings, sign
+from trustbridge.github.webhook_secrets import WebhookSecretResolver
 from trustbridge.webhooks.ingress import WebhookRuntime, router
 from trustbridge.webhooks.limiter import (
     InMemoryWindowCounter,
@@ -19,10 +20,8 @@ from trustbridge.webhooks.limiter import (
     WindowCounter,
 )
 from trustbridge.worker.deliveries import InMemoryDeliveryStore, NewDelivery
-from trustbridge.worker.hosts import HostAvailability
 from trustbridge.worker.queue import StreamQueue
 from trustbridge.worker.relay import Relay
-from trustbridge.worker.secrets import WebhookSecrets
 
 BODY = json.dumps({"action": "created", "installation": {"id": 7}}).encode()
 SECRET = "s3cret"  # noqa: S105 -- test value
@@ -32,6 +31,7 @@ class Setup:
     """An app with the webhook router, an in-memory outbox and two hosts."""
 
     def __init__(self, **settings_kw: Any) -> None:  # noqa: ANN401
+        """Initialise."""
         self.ok = host("ok", webhook_secret_ref="env:OK")
         self.bad = host("bad", webhook_secret_ref="env:BAD")
         self.fresh = host("fresh", app_id=None, webhook_secret_ref=None)
@@ -39,10 +39,9 @@ class Setup:
         self.store = InMemoryDeliveryStore()
         self.secret_store = FakeSecretStore({"env:OK": SECRET, "env:BAD": "other"})
         self.checker = FakeHostChecker(failing={"bad"})
-        self.hosts = HostAvailability(
-            lambda: self.settings.github_hosts, self.checker, check_timeout=1
-        )
-        self.secrets = WebhookSecrets(
+        self.monitor = make_monitor(self.settings.github_hosts, self.checker)
+        self.secrets = WebhookSecretResolver(
+            self.monitor,
             self.secret_store,
             read_timeout=1,
             refresh_min_seconds=self.settings.webhook_secret_refresh_min_seconds,
@@ -53,11 +52,12 @@ class Setup:
         self.app = FastAPI()
         self.app.include_router(router)
 
-    async def start(self) -> "Setup":
-        await self.hosts.check_all()
+    async def start(self) -> Setup:
+        """Start."""
+        await self.monitor.check_all()
         self.app.state.trustbridge = WebhookRuntime(
             settings=self.settings,
-            hosts=self.hosts,
+            monitor=self.monitor,
             secrets=self.secrets,
             store=self.store,
             limiter=WebhookLimiter(
@@ -81,6 +81,7 @@ class Setup:
         secret: str = SECRET,
         extra: dict[str, str] | None = None,
     ) -> httpx.Response:
+        """Post."""
         headers = {"x-github-event": "installation", "content-type": "application/json"}
         if delivery is not None:
             headers["x-github-delivery"] = delivery
@@ -96,12 +97,14 @@ class Setup:
 
 @pytest.fixture
 async def tb() -> Setup:
+    """Tb."""
     return await Setup().start()
 
 
 async def test_2xx_only_after_the_row_is_committed_and_a_repeat_makes_no_second_row(
     tb: Setup,
 ) -> None:  # inv. 1
+    """2xx only after the row is committed and a repeat makes no second row."""
     seen_at_insert: list[int] = []
     real_insert = tb.store.insert
 
@@ -126,6 +129,7 @@ async def test_2xx_only_after_the_row_is_committed_and_a_repeat_makes_no_second_
 
 async def test_failed_commit_is_never_a_2xx(tb: Setup) -> None:  # inv. 1
 
+    """Failed commit is never a 2xx."""
     async def boom(delivery: NewDelivery) -> bool:
         raise ConnectionError("database down")
 
@@ -134,12 +138,14 @@ async def test_failed_commit_is_never_a_2xx(tb: Setup) -> None:  # inv. 1
 
 
 async def test_relay_adds_only_the_delivery_id_after_the_response(tb: Setup) -> None:
+    """Relay adds only the delivery id after the response."""
     await tb.post()
     assert tb.valkey.entries("tb:events")[0][1] == {"id": "d-1"}  # the id, never the body
     assert tb.store.rows["d-1"].last_relayed_at is not None
 
 
 async def test_valkey_outage_does_not_block_ingest(tb: Setup) -> None:  # 0028 "request path"
+    """Valkey outage does not block ingest."""
     tb.valkey.down = True
     tb.app.state.trustbridge.limiter.counter = ValkeyWindowCounter(as_redis(tb.valkey))
     response = await tb.post()
@@ -151,6 +157,7 @@ async def test_valkey_outage_does_not_block_ingest(tb: Setup) -> None:  # 0028 "
 async def test_signature_is_checked_with_compare_digest_before_anything_is_stored(
     tb: Setup, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # inv. 2
+    """Signature is checked with compare digest before anything is stored."""
     calls: list[int] = []
     real = hmac.compare_digest
     monkeypatch.setattr(
@@ -165,12 +172,14 @@ async def test_signature_is_checked_with_compare_digest_before_anything_is_store
 
 
 async def test_non_json_body_with_a_valid_signature_is_stored_unparsed(tb: Setup) -> None:
+    """Non json body with a valid signature is stored unparsed."""
     junk = b"\xff not json"
     assert (await tb.post(body=junk)).status_code == 202
     assert tb.store.rows["d-1"].body == junk
 
 
 async def test_malformed_delivery_headers_are_400(tb: Setup) -> None:
+    """Malformed delivery headers are 400."""
     assert (await tb.post(delivery=None)).status_code == 400
     assert (await tb.post(delivery="has space")).status_code == 400
 
@@ -215,6 +224,7 @@ async def _raw_asgi(
 
 
 async def test_content_length_over_the_cap_is_413_before_the_body_is_read() -> None:  # inv. 2
+    """Content length over the cap is 413 before the body is read."""
     tb = await Setup(webhook_max_body_bytes=100).start()
     status, pulled = await _raw_asgi(
         tb.app,
@@ -227,6 +237,7 @@ async def test_content_length_over_the_cap_is_413_before_the_body_is_read() -> N
 
 
 async def test_streamed_body_crossing_the_cap_is_aborted() -> None:  # inv. 2
+    """Streamed body crossing the cap is aborted."""
     tb = await Setup(webhook_max_body_bytes=100).start()
     chunks = [b"x" * 60, b"x" * 60, b"x" * 60, b"x" * 60]  # chunked: no Content-Length
     status, pulled = await _raw_asgi(tb.app, "/webhooks/github/ok", [], chunks)
@@ -236,12 +247,14 @@ async def test_streamed_body_crossing_the_cap_is_aborted() -> None:  # inv. 2
 
 
 async def test_invalid_content_length_is_400() -> None:
+    """Invalid content length is 400."""
     tb = await Setup().start()
     status, pulled = await _raw_asgi(tb.app, "/webhooks/github/ok", [(b"content-length", b"-5")], [])
     assert (status, pulled) == (400, [])
 
 
 async def test_over_limit_is_429_with_retry_after_without_reading_the_body() -> None:  # inv. 25
+    """Over limit is 429 with retry after without reading the body."""
     tb = await Setup(webhook_rate_limit_requests=2).start()
     for i in range(2):
         assert (await tb.post(delivery=f"d-{i}")).status_code == 202
@@ -256,6 +269,7 @@ async def test_over_limit_is_429_with_retry_after_without_reading_the_body() -> 
 
 
 async def test_invalid_signatures_count_toward_the_limit() -> None:  # inv. 25
+    """Invalid signatures count toward the limit."""
     tb = await Setup(webhook_rate_limit_requests=2).start()
     assert (await tb.post(secret="wrong")).status_code == 401
     assert (await tb.post(secret="wrong")).status_code == 401
@@ -264,6 +278,7 @@ async def test_invalid_signatures_count_toward_the_limit() -> None:  # inv. 25
 
 
 async def test_unregistered_host_is_503_with_its_body_unread(tb: Setup) -> None:  # inv. 29
+    """Unregistered host is 503 with its body unread."""
     status, pulled = await _raw_asgi(
         tb.app, "/webhooks/github/fresh", [(b"content-length", b"3")], [b"abc"]
     )
@@ -273,7 +288,8 @@ async def test_unregistered_host_is_503_with_its_body_unread(tb: Setup) -> None:
 
 
 async def test_unavailable_host_is_verified_stored_and_answered_2xx(tb: Setup) -> None:  # inv. 29
-    assert tb.hosts.status("bad").state.value == "unavailable"  # type: ignore[union-attr]
+    """Unavailable host is verified stored and answered 2xx."""
+    assert tb.monitor.status("bad").state.value == "unavailable"  # type: ignore[union-attr]
     response = await tb.post("bad", secret="other")
     assert response.status_code == 202
     assert tb.store.rows["d-1"].host == "bad"
@@ -281,18 +297,21 @@ async def test_unavailable_host_is_verified_stored_and_answered_2xx(tb: Setup) -
 
 
 async def test_unknown_host_is_404(tb: Setup) -> None:
+    """Unknown host is 404."""
     assert (await tb.post("nope")).status_code == 404
 
 
 async def test_one_unavailable_host_leaves_other_hosts_ingesting(tb: Setup) -> None:  # 0030 inv. 7
-    assert tb.hosts.is_ready("ok")
-    assert not tb.hosts.is_ready("bad")
+    """One unavailable host leaves other hosts ingesting."""
+    assert tb.monitor.is_ready("ok")
+    assert not tb.monitor.is_ready("bad")
     assert (await tb.post("ok")).status_code == 202
 
 
 async def test_secret_store_outage_after_a_successful_read_does_not_stop_ingest(
     tb: Setup,
 ) -> None:  # 0030 inv. 11
+    """Secret store outage after a successful read does not stop ingest."""
     assert (await tb.post(delivery="d-1")).status_code == 202  # first use reads and caches
     tb.secret_store.down = True
     assert (await tb.post(delivery="d-2")).status_code == 202
@@ -300,6 +319,7 @@ async def test_secret_store_outage_after_a_successful_read_does_not_stop_ingest(
 
 
 async def test_no_cached_secret_while_the_store_is_down_is_503() -> None:  # 0030 inv. 11
+    """No cached secret while the store is down is 503."""
     tb = await Setup().start()
     tb.secret_store.down = True
     assert (await tb.post()).status_code == 503
@@ -307,6 +327,7 @@ async def test_no_cached_secret_while_the_store_is_down_is_503() -> None:  # 003
 
 
 async def test_a_rotated_secret_is_picked_up_after_a_mismatch() -> None:
+    """A rotated secret is picked up after a mismatch."""
     tb = await Setup(webhook_secret_refresh_min_seconds=0).start()
     assert (await tb.post(delivery="d-1")).status_code == 202
     tb.secret_store.secrets["env:OK"] = "rotated"

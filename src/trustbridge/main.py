@@ -29,22 +29,22 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.health_checks import get_health_registry
 from app.main import app as template_app
+from trustbridge.github.availability import HostChecker
+from trustbridge.github.ports import SecretReader
+from trustbridge.github.runtime import HostRuntime
+from trustbridge.github.webhook_secrets import WebhookSecretResolver
 from trustbridge.settings import TrustbridgeSettings, get_trustbridge_settings
-from trustbridge.webhooks.ingress import WebhookRuntime, router as webhook_router
+from trustbridge.webhooks.argocd import router as argocd_router
+from trustbridge.webhooks.ingress import ArgocdRuntime, WebhookRuntime
+from trustbridge.webhooks.ingress import router as webhook_router
 from trustbridge.webhooks.limiter import (
     InMemoryWindowCounter,
     ValkeyWindowCounter,
     WebhookLimiter,
     WindowCounter,
 )
-from trustbridge.worker.runtime import (
-    HostRuntime,
-    build_core,
-    open_redis,
-    session_factory_or_none,
-)
+from trustbridge.worker.runtime import build_core, open_redis, session_factory_or_none
 from trustbridge.worker.schema import register_schema_check
-from trustbridge.worker.secrets import FileEnvSecretStore, SecretStore, WebhookSecrets
 
 logger = logging.getLogger(__name__)
 LOOPBACK_ONLY = "127.0.0.1"
@@ -62,9 +62,10 @@ class Overrides:
     """Collaborators a test (or NG4) can substitute; every field defaults to the real thing."""
 
     runtime: HostRuntime | None = None
+    checker: HostChecker | None = None
     redis: Redis | None = None
     session_factory: async_sessionmaker[AsyncSession] | None = None
-    secret_store: SecretStore | None = None
+    secret_reader: SecretReader | None = None
     health_registry: Callable[[], HealthRegistry] = get_health_registry
 
 
@@ -95,6 +96,7 @@ def install(
     app.middleware_stack = None
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_hosts(settings))
     app.include_router(webhook_router)
+    app.include_router(argocd_router)
     app.router.lifespan_context = lifespan
     app.state.trustbridge_installed = True
     return app
@@ -113,12 +115,20 @@ async def _trustbridge_resources(
     sessions = overrides.session_factory
     if sessions is None:
         sessions = session_factory_or_none(settings)
-    core = build_core(settings, redis=redis, session_factory=sessions, runtime=overrides.runtime)
+    core = build_core(
+        settings,
+        redis=redis,
+        session_factory=sessions,
+        runtime=overrides.runtime,
+        checker=overrides.checker,
+    )
+    monitor = core.runtime.monitor
     counter: WindowCounter = (
         InMemoryWindowCounter() if redis is None else ValkeyWindowCounter(redis)
     )
-    secrets = WebhookSecrets(
-        overrides.secret_store or FileEnvSecretStore(),
+    secrets = WebhookSecretResolver(
+        monitor,
+        overrides.secret_reader or core.secrets,
         read_timeout=settings.webhook_secret_read_timeout_seconds,
         refresh_min_seconds=settings.webhook_secret_refresh_min_seconds,
     )
@@ -134,14 +144,12 @@ async def _trustbridge_resources(
                     )
                 )
             )
-        await core.hosts.check_all()
-        await secrets.warm(
-            {h.name: h.webhook_secret_ref for h in settings.github_hosts if h.webhook_secret_ref}
-        )
-        tasks.append(asyncio.create_task(core.hosts.run_recheck(settings.host_recheck_seconds)))
+        await monitor.check_all()
+        await secrets.warm(monitor.names())
+        monitor.start(settings.host_recheck_seconds)
         app.state.trustbridge = WebhookRuntime(
             settings=settings,
-            hosts=core.hosts,
+            monitor=monitor,
             secrets=secrets,
             store=core.store,
             limiter=WebhookLimiter(
@@ -153,9 +161,13 @@ async def _trustbridge_resources(
                 exempt=list(settings.webhook_rate_limit_exempt_cidrs),
             ),
             relay=core.relay,
+            argocd=ArgocdRuntime(
+                handler=core.runtime.argocd, tenants=core.tenants, configs=core.connections
+            ),
         )
         yield
     finally:
+        await monitor.stop()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

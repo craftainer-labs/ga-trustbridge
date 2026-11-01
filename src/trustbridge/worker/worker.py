@@ -1,7 +1,8 @@
 """The stream consumer (ADR 0028 "Worker"; invariants 3 and 4; ADR 0030 invariant 8).
 
-Handler interface for NG4/NG5: register `async def handler(ctx: HandlerContext) -> None` per
-GitHub event name in `HandlerMap`. A handler must be idempotent. Raise `LeaseBusy` (from
+Handler interface: register `async def handler(ctx: EventContext) -> None` per GitHub event name
+in the `HandlerRegistry` (`trustbridge.github.handlers`; the core's lifecycle handlers are
+registered by `register_core_handlers`, adapters add theirs). A handler must be idempotent. Raise `LeaseBusy` (from
 `trustbridge.worker.lease`) when a scope lease is taken: the delivery is deferred and no
 failure is counted. Any other exception is a handler failure: the failure counter increases,
 the delivery is retried with exponential backoff, and after `MAX_DELIVERY_ATTEMPTS` failures
@@ -18,37 +19,22 @@ ending the process (the entry stays pending and is claimed again after the idle 
 import asyncio
 import json
 import logging
-import uuid
-from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
 
 from craftainer_observability.health.redact import log_failure
 
+from trustbridge.github.availability import HostMonitor
+from trustbridge.github.handlers import EventContext, HandlerRegistry
 from trustbridge.settings import TrustbridgeSettings
 from trustbridge.worker import metrics
 from trustbridge.worker.deliveries import PENDING, DeliveryRecord, DeliveryStore, retry_at
-from trustbridge.worker.hosts import HostAvailability
 from trustbridge.worker.lease import LeaseBusy
 from trustbridge.worker.queue import StreamEntry, StreamQueue
 from trustbridge.worker.relay import Clock, Relay, utcnow
-from trustbridge.worker.tenants import TenantResolver
 
 logger = logging.getLogger(__name__)
 MAX_ERROR_CHARS = 500
-
-
-@dataclass(frozen=True, slots=True)
-class HandlerContext:
-    """What a handler receives: the stored delivery, its parsed payload and the tenant."""
-
-    delivery: DeliveryRecord
-    payload: dict[str, Any]
-    tenant_id: uuid.UUID | None
-
-
-HandlerMap = Mapping[str, Callable[[HandlerContext], Awaitable[None]]]
 
 
 @dataclass(slots=True)
@@ -58,17 +44,9 @@ class WorkerDeps:
     store: DeliveryStore
     queue: StreamQueue
     relay: Relay
-    hosts: HostAvailability
-    tenants: TenantResolver
-    handlers: HandlerMap
+    hosts: HostMonitor
+    registry: HandlerRegistry
     clock: Clock = utcnow
-
-
-def installation_id_of(payload: Mapping[str, Any]) -> int | None:
-    """The installation id in a webhook payload, if it carries one."""
-    installation = payload.get("installation")
-    value = installation.get("id") if isinstance(installation, dict) else None
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 class Worker:
@@ -79,12 +57,6 @@ class Worker:
         self._s = settings
         self._d = deps
         self.consumer = consumer
-        deps.hosts.add_ready_listener(self._on_host_ready)
-
-    async def _on_host_ready(self, host: str) -> None:
-        """A host became ready: re-add its waiting rows now (ADR 0030 invariant 8)."""
-        count = await self._d.relay.relay_host(host)
-        logger.info("re-relayed rows of a host that became ready", extra={"host": host, "count": count})
 
     async def run(self, stop: asyncio.Event) -> None:
         """Consume until `stop` is set."""
@@ -177,16 +149,21 @@ class Worker:
         logger.error("delivery dead-lettered", extra={"delivery_id": row.delivery_id})
 
     async def _handle(self, row: DeliveryRecord) -> None:
-        """Parse the stored body, resolve the tenant and call the event's handler."""
-        handler = self._d.handlers.get(row.event)
-        if handler is None:
+        """Parse the stored body and dispatch it to the handlers registered for the event."""
+        if not self._d.registry.handlers_for(row.event):
             return
         if row.body is None:
             raise ValueError("delivery body was purged")
         payload = json.loads(row.body)
         if not isinstance(payload, dict):
             raise TypeError("webhook payload is not a JSON object")
-        installation = installation_id_of(payload)
-        tenant = None if installation is None else await self._d.tenants.resolve(row.host, installation)
-        await handler(HandlerContext(row, payload, tenant))
-
+        action = payload.get("action")
+        await self._d.registry.dispatch(
+            EventContext(
+                host=row.host,
+                delivery_id=row.delivery_id,
+                event=row.event,
+                action=action if isinstance(action, str) else None,
+                payload=payload,
+            )
+        )

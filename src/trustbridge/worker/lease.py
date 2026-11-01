@@ -16,6 +16,8 @@ Interface for NG4 and the adapter core:
   change the fence the holder keeps; a takeover after expiry increments it.
 - `bounded_call(awaitable, settings.adapter_call_timeout_seconds)` bounds a platform call;
   the settings validator guarantees that timeout is shorter than `lease_ttl_seconds`.
+- `Lease.guard()` is `valid_clause()` under the adapter core's `Lease`/`LeaseProvider`
+  Protocols (`LeaseManager.hold` is called with keyword arguments there).
 - `NIL_TENANT` (from `trustbridge.worker.models`) is the tenant id for core-wide keys.
 
 Time is the database clock (`clock_timestamp()`), so process clock skew cannot extend a lease.
@@ -78,6 +80,10 @@ class Lease:
             t.fence == self.fence,
             t.expires_at > func.clock_timestamp(),
         ).correlate(None)
+
+    def guard(self) -> ColumnElement[bool]:
+        """The adapter core's name for `valid_clause` (its `Lease` Protocol)."""
+        return self.valid_clause()
 
 
 class LeaseStore(Protocol):

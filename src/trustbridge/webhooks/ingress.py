@@ -3,11 +3,14 @@
 Order, with the invariant each step serves:
 
 1. the limiter dependency (25-28), before the body is touched;
-2. host lookup: unknown host 404; `unregistered` host 503 with the body unread (29);
+2. host lookup: unknown host 404; the host's webhook secret is resolved
+   (`WebhookSecretResolver.secret_for`): an `unregistered` host (`HostUnregisteredError`) or
+   no cached or readable secret (`WebhookSecretUnavailableError`, ADR 0030 invariant 11) is 503,
+   with the body unread (29);
 3. `Content-Length` over `WEBHOOK_MAX_BODY_BYTES` is 413 before any body read, and a
    streamed body that crosses the cap is aborted (2);
-4. the signature is verified in constant time against the host's cached webhook secret before
-   anything is parsed or stored (2; ADR 0030 invariant 11: no cached or readable secret is 503);
+4. the signature is verified in constant time against that secret before anything is parsed
+   or stored (2); a mismatch re-reads the secret once (rotation) before answering 401;
 5. the delivery is committed to `webhook_deliveries` (1); only then is 2xx (202) returned. A
    repeated delivery id returns 2xx without a second row. An `unavailable` host goes through
    the same path (29): its rows wait in the outbox.
@@ -26,12 +29,18 @@ from dataclasses import dataclass
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from trustbridge.settings import GitHubHostConfig, TrustbridgeSettings
+from trustbridge.adapters.store import ConfigResolver, TenantResolver
+from trustbridge.github.availability import HostMonitor
+from trustbridge.github.deployments import ArgoCdDeploymentHandler
+from trustbridge.github.webhook_secrets import (
+    HostUnregisteredError,
+    WebhookSecretResolver,
+    WebhookSecretUnavailableError,
+)
+from trustbridge.settings import TrustbridgeSettings
 from trustbridge.webhooks.limiter import WebhookLimiter
 from trustbridge.worker.deliveries import DeliveryStore, NewDelivery
-from trustbridge.worker.hosts import HostAvailability, HostState
 from trustbridge.worker.relay import Clock, Relay, utcnow
-from trustbridge.worker.secrets import WebhookSecrets
 
 logger = logging.getLogger(__name__)
 
@@ -53,16 +62,29 @@ router = APIRouter()
 
 
 @dataclass(slots=True)
+class ArgocdRuntime:
+    """What the Argo CD notification route needs (`trustbridge.webhooks.argocd`).
+
+    `handler` is None until a `DeploymentStateSource` exists (NG5d); the route then answers 503.
+    """
+
+    handler: ArgoCdDeploymentHandler | None
+    tenants: TenantResolver
+    configs: ConfigResolver
+
+
+@dataclass(slots=True)
 class WebhookRuntime:
-    """Everything the route needs; built by the lifespan and kept on `app.state.trustbridge`."""
+    """Everything the routes need; built by the lifespan and kept on `app.state.trustbridge`."""
 
     settings: TrustbridgeSettings
-    hosts: HostAvailability
-    secrets: WebhookSecrets
+    monitor: HostMonitor
+    secrets: WebhookSecretResolver
     store: DeliveryStore
     limiter: WebhookLimiter
     relay: Relay | None = None
     clock: Clock = utcnow
+    argocd: ArgocdRuntime | None = None
 
 
 def verify_signature(secret: bytes, body: bytes, header: str | None) -> bool:
@@ -73,7 +95,7 @@ def verify_signature(secret: bytes, body: bytes, header: str | None) -> bool:
     return hmac.compare_digest(expected.encode(), header.encode())
 
 
-def _runtime(request: Request) -> WebhookRuntime:
+def runtime_of(request: Request) -> WebhookRuntime:
     """The runtime installed by the lifespan; absent means the process is not set up."""
     runtime: WebhookRuntime | None = getattr(request.app.state, "trustbridge", None)
     if runtime is None:
@@ -83,7 +105,7 @@ def _runtime(request: Request) -> WebhookRuntime:
 
 async def enforce_rate_limit(request: Request) -> None:
     """First step of the route: count the source address, 429 with `Retry-After` when over."""
-    runtime = _runtime(request)
+    runtime = runtime_of(request)
     address = request.client.host if request.client is not None else None
     decision = await runtime.limiter.check(address)
     if not decision.allowed:
@@ -94,7 +116,7 @@ async def enforce_rate_limit(request: Request) -> None:
         )
 
 
-def _content_length(request: Request, limit: int) -> None:
+def check_content_length(request: Request, limit: int) -> None:
     """Reject an over-cap or malformed `Content-Length` before any body byte is read."""
     raw = request.headers.get("content-length")
     if raw is None:
@@ -105,7 +127,7 @@ def _content_length(request: Request, limit: int) -> None:
         raise HTTPException(status_code=413, detail="webhook body too large")
 
 
-async def _read_body(request: Request, limit: int) -> bytes:
+async def read_body(request: Request, limit: int) -> bytes:
     """Read the body, aborting as soon as it crosses the cap (chunked bodies included)."""
     chunks: list[bytes] = []
     total = 0
@@ -117,16 +139,24 @@ async def _read_body(request: Request, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-async def _authentic(runtime: WebhookRuntime, host: GitHubHostConfig, request: Request, body: bytes) -> None:
-    """401 unless the body matches the signature; 503 if the host has no readable secret."""
-    ref = host.webhook_secret_ref
-    secret = None if ref is None else await runtime.secrets.get(host.name, ref)
-    if ref is None or secret is None:
-        raise HTTPException(status_code=503, detail="webhook secret unavailable")
+async def _secret(runtime: WebhookRuntime, host: str) -> bytes:
+    """The host's webhook secret, or 503 (unregistered host, or no cached or readable secret)."""
+    try:
+        return await runtime.secrets.secret_for(host)
+    except HostUnregisteredError as exc:
+        raise HTTPException(status_code=503, detail="GitHub host has no App registered yet") from exc
+    except WebhookSecretUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="webhook secret unavailable") from exc
+
+
+async def _authentic(
+    runtime: WebhookRuntime, host: str, secret: bytes, request: Request, body: bytes
+) -> None:
+    """401 unless the body matches the signature (a rotated secret is tried once)."""
     signature = request.headers.get("x-hub-signature-256")
     if verify_signature(secret, body, signature):
         return
-    rotated = await runtime.secrets.refreshed(host.name, ref)  # a rotated secret
+    rotated = await runtime.secrets.refreshed(host)
     if rotated is not None and verify_signature(rotated, body, signature):
         return
     raise HTTPException(status_code=401, detail="invalid webhook signature")
@@ -147,17 +177,14 @@ async def receive_webhook(
     host: str, request: Request, background: BackgroundTasks
 ) -> JSONResponse:
     """Verify, store and acknowledge one GitHub webhook delivery."""
-    runtime = _runtime(request)
-    config = runtime.hosts.config(host)
-    status = runtime.hosts.status(host)
-    if config is None or status is None:
+    runtime = runtime_of(request)
+    if host not in runtime.monitor.names():
         raise HTTPException(status_code=404, detail="unknown GitHub host")
-    if status.state is HostState.UNREGISTERED:
-        raise HTTPException(status_code=503, detail="GitHub host has no App registered yet")
+    secret = await _secret(runtime, host)
     limit = runtime.settings.webhook_max_body_bytes
-    _content_length(request, limit)
-    body = await _read_body(request, limit)
-    await _authentic(runtime, config, request, body)
+    check_content_length(request, limit)
+    body = await read_body(request, limit)
+    await _authentic(runtime, host, secret, request, body)
     delivery_id, event, headers = _metadata(request)
     try:
         created = await runtime.store.insert(

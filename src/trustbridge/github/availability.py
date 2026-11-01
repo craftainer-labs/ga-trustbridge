@@ -30,6 +30,8 @@ from trustbridge.signer.base import AppKeySigner
 
 _log = logging.getLogger(__name__)
 _DISCOVERY_TIMEOUT = 10.0
+DEFAULT_CHECK_TIMEOUT_SECONDS = 10.0
+"""Upper bound on all checks of one host in one round (`HOST_CHECK_TIMEOUT_SECONDS`)."""
 
 
 class HostState(StrEnum):
@@ -142,6 +144,7 @@ class MonitorDeps:
     checker: HostChecker | None = None
     registrations: RegistrationStore | None = None
     on_ready: Callable[[GitHubHostConfig], Awaitable[None]] | None = None
+    check_timeout: float = DEFAULT_CHECK_TIMEOUT_SECONDS
 
 
 class HostMonitor:
@@ -160,6 +163,7 @@ class HostMonitor:
         self._checker = deps.checker or HttpHostChecker()
         self._registrations = deps.registrations
         self._on_ready = deps.on_ready
+        self._timeout = deps.check_timeout
         self._config = dict(self._base)
         self._status: dict[str, HostStatus] = {
             h.name: (
@@ -179,6 +183,15 @@ class HostMonitor:
     def status(self, name: str) -> HostStatus:
         """Return a host's status."""
         return self._status[name]
+
+    def names(self) -> list[str]:
+        """Return the names of every configured host."""
+        return list(self._status)
+
+    def is_ready(self, name: str) -> bool:
+        """Whether host `name` is `ready` in this process (False for an unknown name)."""
+        status = self._status.get(name)
+        return status is not None and status.state is HostState.READY
 
     def statuses(self) -> dict[str, HostStatus]:
         """Return every host's status (the admin API and the metric)."""
@@ -235,9 +248,12 @@ class HostMonitor:
         if cfg.app_id is None:
             return HostStatus(HostState.UNREGISTERED, "no App registered")
         try:
-            reason = await self._selftest(cfg, cfg.app_id)
-            if reason is None:
-                reason = await self._issuer_check(cfg)
+            async with asyncio.timeout(self._timeout):
+                reason = await self._selftest(cfg, cfg.app_id)
+                if reason is None:
+                    reason = await self._issuer_check(cfg)
+        except TimeoutError:
+            return HostStatus(HostState.UNAVAILABLE, "check timed out")
         except Exception as exc:
             return HostStatus(HostState.UNAVAILABLE, f"check failed: {type(exc).__name__}")
         if reason is not None:
@@ -268,7 +284,7 @@ class HostMonitor:
         return None
 
     # ---- recheck loop ---------------------------------------------------
-    def start(self, interval: float = DEFAULT_HOST_RECHECK_SECONDS) -> None:
+    def start(self, interval: float = float(DEFAULT_HOST_RECHECK_SECONDS)) -> None:
         """Start the recheck task (api lifespan, worker and reconciler `main()`)."""
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._loop(interval))

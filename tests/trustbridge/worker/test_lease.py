@@ -5,7 +5,7 @@ import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.dialects import postgresql
 
 from trustbridge.worker.lease import (
@@ -28,13 +28,16 @@ class Time:
     """A manually advanced clock for the in-memory store."""
 
     def __init__(self) -> None:
+        """Initialise."""
         self.t = 100.0
 
     def __call__(self) -> float:
+        """Implement __call__."""
         return self.t
 
 
 async def test_at_most_one_unit_of_work_holds_a_lease() -> None:  # inv. 9
+    """At most one unit of work holds a lease."""
     manager = LeaseManager(InMemoryLeaseStore(), ttl_seconds=120)
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -59,10 +62,12 @@ async def test_at_most_one_unit_of_work_holds_a_lease() -> None:  # inv. 9
 
 
 def test_holder_identity_is_per_unit_of_work() -> None:  # inv. 9
+    """Holder identity is per unit of work."""
     assert len({new_holder_id() for _ in range(200)}) == 200
 
 
 async def test_a_redelivery_to_the_same_consumer_cannot_also_hold_the_lease() -> None:  # inv. 9
+    """A redelivery to the same consumer cannot also hold the lease."""
     manager = LeaseManager(InMemoryLeaseStore(), ttl_seconds=120)
     async with manager.hold(TENANT, "a", "k"):
         with pytest.raises(LeaseBusy):
@@ -71,6 +76,7 @@ async def test_a_redelivery_to_the_same_consumer_cannot_also_hold_the_lease() ->
 
 
 async def test_takeover_after_expiry_bumps_the_fence_and_locks_out_the_old_holder() -> None:
+    """Takeover after expiry bumps the fence and locks out the old holder."""
     clock = Time()  # inv. 10
     store = InMemoryLeaseStore(clock)
     fence_a = await store.acquire(TENANT, "a", "k", "holder-a", ttl=10)
@@ -89,6 +95,7 @@ async def test_takeover_after_expiry_bumps_the_fence_and_locks_out_the_old_holde
 
 
 async def test_an_expired_lease_is_invalid_even_before_anyone_takes_it_over() -> None:  # inv. 10
+    """An expired lease is invalid even before anyone takes it over."""
     clock = Time()
     store = InMemoryLeaseStore(clock)
     await store.acquire(TENANT, "a", "k", "h", ttl=10)
@@ -100,6 +107,7 @@ async def test_an_expired_lease_is_invalid_even_before_anyone_takes_it_over() ->
 
 
 async def test_renew_and_release_never_change_the_fence() -> None:  # inv. 10
+    """Renew and release never change the fence."""
     clock = Time()
     store = InMemoryLeaseStore(clock)
     assert await store.acquire(TENANT, "a", "k", "h", ttl=10) == 1
@@ -113,6 +121,7 @@ async def test_renew_and_release_never_change_the_fence() -> None:  # inv. 10
 
 
 async def test_a_holder_that_lost_its_lease_gets_lease_lost() -> None:  # inv. 10
+    """A holder that lost its lease gets lease lost."""
     store = InMemoryLeaseStore()
     manager = LeaseManager(store, ttl_seconds=0.3)
     with pytest.raises(LeaseLost):
@@ -126,6 +135,7 @@ def _sql(stmt: Any) -> str:  # noqa: ANN401
 
 
 def test_the_guard_checks_holder_fence_and_expiry_in_the_same_statement() -> None:  # inv. 10
+    """The guard checks holder fence and expiry in the same statement."""
     lease = Lease(TENANT, "a", "k", "holder", 7)
     stmt = update(WebhookDelivery).where(WebhookDelivery.delivery_id == "x").values(status="dead")
     sql = _sql(stmt.where(lease.valid_clause()))
@@ -135,22 +145,33 @@ def test_the_guard_checks_holder_fence_and_expiry_in_the_same_statement() -> Non
     assert "scope_leases.expires_at >" in sql
 
 
+def test_guard_is_the_adapter_cores_name_for_the_same_predicate() -> None:
+    """Guard is the adapter cores name for the same predicate."""
+    lease = Lease(TENANT, "a", "k", "holder", 7)
+    assert lease.fence == 7
+    assert _sql(select(lease.guard())) == _sql(select(lease.valid_clause()))
+
+
 class _Result:
     def __init__(self, rowcount: int) -> None:
+        """Initialise."""
         self.rowcount = rowcount
 
 
 class _Session:
     def __init__(self, rowcount: int) -> None:
+        """Initialise."""
         self.rowcount = rowcount
         self.statements: list[str] = []
 
     async def execute(self, stmt: Any) -> _Result:  # noqa: ANN401
+        """Execute."""
         self.statements.append(_sql(stmt))
         return _Result(self.rowcount)
 
 
 async def test_a_guarded_write_that_matches_nothing_is_lease_lost() -> None:  # inv. 10
+    """A guarded write that matches nothing is lease lost."""
     lease = Lease(TENANT, "a", "k", "holder", 7)
     stmt = update(WebhookDelivery).where(WebhookDelivery.host == "h").values(status="dead")
     lost = _Session(0)
@@ -163,6 +184,7 @@ async def test_a_guarded_write_that_matches_nothing_is_lease_lost() -> None:  # 
 
 
 async def test_a_guarded_insert_selects_from_the_lease_check() -> None:  # inv. 10
+    """A guarded insert selects from the lease check."""
     lease = Lease(TENANT, "a", "k", "holder", 7)
     table = WebhookDelivery.__table__
     session = _Session(1)
@@ -176,6 +198,7 @@ async def test_a_guarded_insert_selects_from_the_lease_check() -> None:  # inv. 
 
 
 async def test_an_adapter_call_is_bounded_by_its_timeout() -> None:  # inv. 11
+    """An adapter call is bounded by its timeout."""
     async def slow() -> str:
         await asyncio.sleep(5)
         return "late"

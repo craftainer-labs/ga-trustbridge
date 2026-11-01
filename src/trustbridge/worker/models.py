@@ -85,7 +85,22 @@ class Tenant(Base):
     )
     host: Mapped[str] = mapped_column(String(63))
     installation_id: Mapped[int] = mapped_column(BigInteger)
+    # Filled from `installation` events (a tenant first seen from another event has none yet).
+    org: Mapped[str] = mapped_column(String(255), server_default="")
+    org_id: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    # `active`, `suspended` or `deleted`.
+    state: Mapped[str] = mapped_column(String(16), server_default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TenantRepository(Base):
+    """A repository the tenant's installation can see (identity is the numeric id)."""
+
+    __tablename__ = "tenant_repositories"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    repository_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(255))
 
 
 class SchemaCompat(Base):

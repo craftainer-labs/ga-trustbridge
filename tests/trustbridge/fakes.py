@@ -5,11 +5,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pydantic import SecretStr
 from redis.exceptions import ResponseError
 
-from trustbridge.settings import GitHubHostConfig
-from trustbridge.worker.hosts import HostCheckFailed
+from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.worker.reconciler import HookDelivery
+from trustbridge.worker.secrets import SecretUnavailable
 
 
 def id_key(entry_id: str) -> tuple[int, int]:
@@ -40,6 +41,7 @@ class FakeRedis:
         self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
         self.groups: dict[tuple[str, str], _Group] = {}
         self.kv: dict[str, int] = {}
+        self.sets: dict[str, set[str]] = {}
         self.expiries: dict[str, int] = {}
         self._last = (0, -1)
         self.down = False
@@ -64,6 +66,14 @@ class FakeRedis:
     def ids_of(self, name: str) -> list[str]:
         """The `id` field (delivery id) of each entry in order."""
         return [fields["id"] for _, fields in self.entries(name)]
+
+    async def sadd(self, name: str, *values: str) -> int:
+        """Add members to a set."""
+        self._check()
+        members = self.sets.setdefault(name, set())
+        before = len(members)
+        members.update(values)
+        return len(members) - before
 
     async def flushall(self) -> None:
         """Lose everything (restart without persistence)."""
@@ -139,7 +149,7 @@ class FakeRedis:
             claimed.append((entry_id, present[entry_id]))
         return ["0-0", claimed[:count], []]
 
-    async def xpending_range(  # noqa: PLR0913
+    async def xpending_range(
         self, name: str, groupname: str, min: str, max: str, count: int  # noqa: A002
     ) -> list[dict[str, Any]]:
         """Pending entries between two ids (inclusive)."""
@@ -207,7 +217,7 @@ class FakeRedis:
         self.streams[name] = keep
         return len(entries) - len(keep)
 
-    def pipeline(self, transaction: bool = True) -> "FakePipeline":
+    def pipeline(self, transaction: bool = True) -> FakePipeline:
         """A MULTI/EXEC-like pipeline for the limiter."""
         return FakePipeline(self)
 
@@ -220,7 +230,7 @@ class FakePipeline:
         self._r = redis
         self._ops: list[tuple[str, str, int]] = []
 
-    async def __aenter__(self) -> "FakePipeline":
+    async def __aenter__(self) -> FakePipeline:
         """Enter."""
         return self
 
@@ -251,7 +261,7 @@ class FakePipeline:
 
 
 class FakeSecretStore:
-    """A secret store whose reads can be switched off."""
+    """A `SecretReader` whose reads can be switched off."""
 
     def __init__(self, secrets: dict[str, str]) -> None:
         """Hold `{ref: value}`."""
@@ -259,29 +269,31 @@ class FakeSecretStore:
         self.down = False
         self.reads = 0
 
-    async def read(self, ref: str) -> str:
+    async def read(self, ref: str) -> SecretStr:
         """Return the value or fail like an outage."""
-        from trustbridge.worker.secrets import SecretUnavailable  # noqa: PLC0415
-
         self.reads += 1
         if self.down or ref not in self.secrets:
             raise SecretUnavailable("down")
-        return self.secrets[ref]
+        return SecretStr(self.secrets[ref])
 
 
 class FakeHostChecker:
-    """Fails for named hosts; records every check."""
+    """`HostChecker` (the network checks): hosts in `failing` report the wrong App id."""
 
     def __init__(self, failing: set[str] | None = None) -> None:
-        """`failing` host names raise `HostCheckFailed`."""
+        """`failing` host names fail the `GET /app` id match."""
         self.failing = failing or set()
         self.calls: list[str] = []
 
-    async def check(self, host: GitHubHostConfig) -> None:
-        """Record and maybe fail."""
+    async def get_app_id(self, host: GitHubHostConfig, jwt: str) -> int:
+        """Record the check; answer the configured id, or a wrong one for a failing host."""
+        del jwt
         self.calls.append(host.name)
-        if host.name in self.failing:
-            raise HostCheckFailed("signer self-test failed")
+        return -1 if host.name in self.failing else (host.app_id or 0)
+
+    async def discovery_issuer(self, host: GitHubHostConfig) -> str:
+        """Answer the configured issuer."""
+        return host.oidc_issuer
 
 
 class FakeHookClient:

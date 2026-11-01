@@ -19,10 +19,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
+from trustbridge.github.availability import HostMonitor
 from trustbridge.settings import GitHubHostConfig, TrustbridgeSettings
 from trustbridge.worker import metrics
 from trustbridge.worker.deliveries import DeliveryStore
-from trustbridge.worker.hosts import HostAvailability
 from trustbridge.worker.lease import LeaseBusy, LeaseManager
 from trustbridge.worker.models import NIL_TENANT
 from trustbridge.worker.queue import StreamQueue
@@ -123,7 +123,7 @@ class ReconcilerDeps:
     store: DeliveryStore
     queue: StreamQueue
     relay: Relay
-    hosts: HostAvailability
+    hosts: HostMonitor
     leases: LeaseManager
     deliveries: HookDeliveryClient | None
     clock: Clock = utcnow
@@ -159,9 +159,9 @@ class Reconciler:
         )
         total = 0
         for name in self._d.hosts.names():
-            host = self._d.hosts.config(name)
-            if host is None or not self._d.hosts.is_ready(name):
+            if not self._d.hosts.is_ready(name):
                 continue
+            host = self._d.hosts.config(name)
             try:
                 async with self._d.leases.hold(NIL_TENANT, CORE_ADAPTER, f"reconcile-deliveries:{name}"):
                     total += await reconciler.reconcile_host(host)

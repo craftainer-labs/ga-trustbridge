@@ -13,6 +13,7 @@ from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
 
 
 async def test_the_resweep_after_stream_loss_re_adds_every_live_row() -> None:  # inv. 5
+    """The resweep after stream loss re adds every live row."""
     h = await Harness({}).start()
     for delivery_id in ("d1", "d2", "d3", "d4", "d5"):
         await h.add(delivery_id, relay=False)
@@ -31,6 +32,7 @@ async def test_the_resweep_after_stream_loss_re_adds_every_live_row() -> None:  
 
 
 async def test_a_delayed_retry_waits_for_its_time_and_is_then_re_added_once_by_the_tick() -> None:
+    """A delayed retry waits for its time and is then re added once by the tick."""
     h = await Harness({}).start()
     await h.add("d1")
     soon = h.clock() + timedelta(seconds=30)
@@ -52,6 +54,7 @@ async def _filled(n: int) -> tuple[FakeRedis, StreamQueue]:
 
 
 async def test_trim_keeps_unread_and_pending_entries() -> None:  # inv. 6
+    """Trim keeps unread and pending entries."""
     valkey, queue = await _filled(5)
     first, second = await queue.read("c", count=2, block_ms=0)
     await queue.ack(first.entry_id)  # `second` stays pending; three entries are unread
@@ -61,6 +64,7 @@ async def test_trim_keeps_unread_and_pending_entries() -> None:  # inv. 6
 
 
 async def test_trim_with_nothing_pending_still_keeps_unread_entries() -> None:  # inv. 6
+    """Trim with nothing pending still keeps unread entries."""
     valkey, queue = await _filled(4)
     for entry in await queue.read("c", count=2, block_ms=0):
         await queue.ack(entry.entry_id)
@@ -69,12 +73,14 @@ async def test_trim_with_nothing_pending_still_keeps_unread_entries() -> None:  
 
 
 async def test_trim_keeps_everything_while_the_group_is_stalled() -> None:  # inv. 6
+    """Trim keeps everything while the group is stalled."""
     valkey, queue = await _filled(4)
     assert await queue.trim_events() == 0
     assert len(valkey.ids_of("tb:events")) == 4
 
 
 async def test_trim_keeps_an_old_pending_entry_behind_newer_acknowledged_ones() -> None:  # inv. 6
+    """Trim keeps an old pending entry behind newer acknowledged ones."""
     valkey, queue = await _filled(4)
     entries = await queue.read("c", count=3, block_ms=0)
     await queue.ack(entries[1].entry_id)
@@ -84,6 +90,7 @@ async def test_trim_keeps_an_old_pending_entry_behind_newer_acknowledged_ones() 
 
 
 async def test_trim_without_a_group_or_a_stream_removes_nothing() -> None:  # inv. 6
+    """Trim without a group or a stream removes nothing."""
     valkey = FakeRedis()
     queue = StreamQueue(as_redis(valkey))
     assert await queue.trim_events() == 0  # no stream at all
@@ -93,6 +100,7 @@ async def test_trim_without_a_group_or_a_stream_removes_nothing() -> None:  # in
 
 
 async def test_dead_letter_stream_is_trimmed_by_age() -> None:
+    """Dead letter stream is trimmed by age."""
     valkey = FakeRedis()
     queue = StreamQueue(as_redis(valkey))
     await queue.dead_letter("old", "e")
@@ -104,6 +112,7 @@ async def test_dead_letter_stream_is_trimmed_by_age() -> None:
 
 
 async def test_group_lag_is_exported_as_a_metric(monkeypatch: pytest.MonkeyPatch) -> None:  # inv. 6
+    """Group lag is exported as a metric."""
     h = await Harness({}).start()
     for delivery_id in ("d1", "d2", "d3"):
         await h.add(delivery_id)
@@ -122,5 +131,6 @@ async def test_group_lag_is_exported_as_a_metric(monkeypatch: pytest.MonkeyPatch
 
 
 async def test_lag_is_none_when_the_server_does_not_report_it() -> None:
+    """Lag is none when the server does not report it."""
     queue = StreamQueue(as_redis(FakeRedis()))
     assert await queue.lag() is None

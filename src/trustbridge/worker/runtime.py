@@ -1,22 +1,23 @@
 """Shared process bootstrap for the api lifespan, the worker and the reconciler.
 
-`HostRuntime` is the narrow hook NG4 fills: `trustbridge.github.runtime.build_host_runtime(
-settings) -> HostRuntime`, discovered by import name so NG3 never imports NG4's package. If
-that module does not exist, a fail-closed checker marks every registered host `unavailable`.
-`build_core` assembles the store, queue, relay, leases and host registry from the settings;
-`run_process` is the `main()` of the worker and reconciler commands. No process here ever
-runs a migration (invariant 17); only `trustbridge.worker.migrate` does.
+`build_core` assembles the store, queue, relay, leases and the GitHub side of the process:
+the ports over NG3's components (`trustbridge.worker.ports`) go into
+`trustbridge.github.runtime.build_host_runtime`, which returns the `HostMonitor`, gateway,
+hook-delivery client and `HandlerRegistry`. `run_process` is the `main()` of the worker and
+reconciler commands: it waits for the schema, runs the host startup checks (`monitor.check_all`),
+starts the recheck task (`monitor.start`), runs, and stops the monitor. The worker's monitor
+re-adds a host's waiting rows when the host turns `ready` (`MonitorDeps.on_ready`). No process
+here ever runs a migration (invariant 17); only `trustbridge.worker.migrate` does.
 """
 
 import asyncio
-import importlib
 import logging
 import signal
 import socket
 import uuid
 from collections.abc import Callable
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 from craftainer_observability.logs import configure_logging
@@ -24,48 +25,30 @@ from redis.asyncio import Redis
 from redis.asyncio import from_url as redis_from_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from trustbridge.adapters.interface import GitHubHost
+from trustbridge.github.availability import HostChecker
+from trustbridge.github.hosts import GitHubHostConfig
+from trustbridge.github.models import SqlRegistrationStore
+from trustbridge.github.runtime import HostRuntime, RuntimeDeps, build_host_runtime
 from trustbridge.settings import TrustbridgeSettings, load_trustbridge_settings
 from trustbridge.worker.deliveries import DeliveryStore, InMemoryDeliveryStore, PgDeliveryStore
-from trustbridge.worker.hosts import (
-    HostAvailability,
-    HostChecker,
-    HostsProvider,
-    UninstalledHostChecker,
-)
 from trustbridge.worker.lease import InMemoryLeaseStore, LeaseManager, LeaseStore, PgLeaseStore
+from trustbridge.worker.ports import (
+    ConnectionData,
+    MemoryTenants,
+    ParkedValues,
+    ReconcileRequests,
+    SqlTenants,
+)
 from trustbridge.worker.queue import StreamQueue
-from trustbridge.worker.reconciler import HookDeliveryClient, Reconciler, ReconcilerDeps
+from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
 from trustbridge.worker.relay import Relay
 from trustbridge.worker.schema import SchemaGate, SchemaWaitTimeout
-from trustbridge.worker.tenants import InMemoryTenantResolver, PgTenantResolver, TenantResolver
-from trustbridge.worker.worker import HandlerMap, Worker, WorkerDeps
+from trustbridge.worker.secrets import LocalSecrets, MemorySecrets
+from trustbridge.worker.worker import Worker, WorkerDeps
 
 logger = logging.getLogger(__name__)
-HOOK_MODULE = "trustbridge.github.runtime"
 ProcessKind = Literal["worker", "reconciler"]
-
-
-@dataclass(slots=True)
-class HostRuntime:
-    """What the GitHub side (NG4) plugs into the core processes."""
-
-    checker: HostChecker
-    deliveries: HookDeliveryClient | None = None
-    hosts_provider: HostsProvider | None = None
-    handlers: HandlerMap = field(default_factory=dict)
-
-
-def load_host_runtime(settings: TrustbridgeSettings) -> HostRuntime:
-    """Import `trustbridge.github.runtime` and call `build_host_runtime(settings)` if present."""
-    try:
-        module = importlib.import_module(HOOK_MODULE)
-    except ModuleNotFoundError as exc:
-        if exc.name not in {"trustbridge.github", HOOK_MODULE}:
-            raise
-        logger.warning("no %s; every registered host will be unavailable", HOOK_MODULE)
-        return HostRuntime(checker=UninstalledHostChecker())
-    runtime: HostRuntime = module.build_host_runtime(settings)
-    return runtime
 
 
 @dataclass(slots=True)
@@ -75,8 +58,10 @@ class Core:
     settings: TrustbridgeSettings
     store: DeliveryStore
     leases: LeaseManager
-    tenants: TenantResolver
-    hosts: HostAvailability
+    tenants: SqlTenants | MemoryTenants
+    secrets: LocalSecrets | MemorySecrets
+    parked: ParkedValues
+    connections: ConnectionData
     gate: SchemaGate
     runtime: HostRuntime
     queue: StreamQueue | None
@@ -103,32 +88,65 @@ def build_core(
     redis: Redis | None,
     session_factory: async_sessionmaker[AsyncSession] | None,
     runtime: HostRuntime | None = None,
+    readd_on_ready: bool = False,
+    checker: HostChecker | None = None,
 ) -> Core:
-    """Assemble the store, queue, relay, leases, host registry and schema gate."""
-    runtime = runtime or load_host_runtime(settings)
+    """Assemble the store, queue, relay, leases, GitHub runtime and schema gate.
+
+    `readd_on_ready` (the worker) makes a host that turns `ready` re-add its waiting rows to
+    the stream (ADR 0030 invariant 8). A given `runtime` replaces the real GitHub side (tests).
+    """
     store: DeliveryStore
     lease_store: LeaseStore
-    tenants: TenantResolver
+    tenants: SqlTenants | MemoryTenants
+    registrations: SqlRegistrationStore | None = None
     if session_factory is None:
-        store, lease_store, tenants = InMemoryDeliveryStore(), InMemoryLeaseStore(), InMemoryTenantResolver()
+        store, lease_store = InMemoryDeliveryStore(), InMemoryLeaseStore()
     else:
-        store = PgDeliveryStore(session_factory)
-        lease_store = PgLeaseStore(session_factory)
-        tenants = PgTenantResolver(session_factory)
-    provider: HostsProvider = runtime.hosts_provider or (
-        lambda: list(settings.github_hosts)
+        store, lease_store = PgDeliveryStore(session_factory), PgLeaseStore(session_factory)
+        registrations = SqlRegistrationStore(session_factory)
+    host_by_name = {h.name: h for h in settings.github_hosts}
+
+    def host_projection(name: str) -> GitHubHost:
+        return host_by_name[name].to_host()
+
+    tenants = (
+        MemoryTenants(host_projection)
+        if session_factory is None
+        else SqlTenants(session_factory, host_projection)
     )
-    hosts = HostAvailability(provider, runtime.checker, check_timeout=settings.host_check_timeout_seconds)
+    secrets: LocalSecrets | MemorySecrets = (
+        MemorySecrets() if settings.mode == "mock" else LocalSecrets(settings.secret_store_dir)
+    )
     queue = StreamQueue(redis) if redis is not None else None
     relay = (
         Relay(store, queue, batch_size=settings.relay_batch_size) if queue is not None else None
+    )
+
+    async def readd(host: GitHubHostConfig) -> None:
+        if relay is not None:
+            count = await relay.relay_host(host.name)
+            logger.info("re-relayed rows of a host that became ready", extra={"host": host.name, "count": count})
+
+    runtime = runtime or build_host_runtime(
+        settings,
+        RuntimeDeps(
+            installations=tenants,
+            installation_ids=tenants,
+            scheduler=ReconcileRequests(redis),
+            registrations=registrations,
+            on_ready=readd if readd_on_ready else None,
+            checker=checker,
+        ),
     )
     return Core(
         settings=settings,
         store=store,
         leases=LeaseManager(lease_store, ttl_seconds=settings.lease_ttl_seconds),
         tenants=tenants,
-        hosts=hosts,
+        secrets=secrets,
+        parked=ParkedValues(secrets),
+        connections=ConnectionData(secrets),
         gate=SchemaGate(session_factory, mock=settings.mode == "mock"),
         runtime=runtime,
         queue=queue,
@@ -148,6 +166,7 @@ class ProcessOverrides:
     redis: Redis | None = None
     session_factory: async_sessionmaker[AsyncSession] | None = None
     runtime: HostRuntime | None = None
+    checker: HostChecker | None = None
     stop: asyncio.Event | None = None
 
 
@@ -174,7 +193,14 @@ async def run_process(
             client = open_redis(settings)
             stack.push_async_callback(client.aclose)
         sessions = session_factory if session_factory is not None else session_factory_or_none(settings)
-        core = build_core(settings, redis=client, session_factory=sessions, runtime=chosen.runtime)
+        core = build_core(
+            settings,
+            redis=client,
+            session_factory=sessions,
+            runtime=chosen.runtime,
+            readd_on_ready=kind == "worker",
+            checker=chosen.checker,
+        )
         if core.queue is None or core.relay is None:  # pragma: no cover -- a client was given
             raise RuntimeError("the stream queue is not configured")
         try:
@@ -182,17 +208,17 @@ async def run_process(
         except SchemaWaitTimeout:
             logger.critical("schema not current after SCHEMA_WAIT_SECONDS; exiting")
             return 1
-        await core.hosts.check_all()
-        recheck = asyncio.create_task(core.hosts.run_recheck(settings.host_recheck_seconds))
+        monitor = core.runtime.monitor
+        await monitor.check_all()
+        monitor.start(settings.host_recheck_seconds)
         try:
             if kind == "worker":
                 deps = WorkerDeps(
                     store=core.store,
                     queue=core.queue,
                     relay=core.relay,
-                    hosts=core.hosts,
-                    tenants=core.tenants,
-                    handlers=core.runtime.handlers,
+                    hosts=monitor,
+                    registry=core.runtime.registry,
                 )
                 await Worker(settings, deps, consumer_name()).run(stop)
             else:
@@ -200,14 +226,13 @@ async def run_process(
                     store=core.store,
                     queue=core.queue,
                     relay=core.relay,
-                    hosts=core.hosts,
+                    hosts=monitor,
                     leases=core.leases,
                     deliveries=core.runtime.deliveries,
                 )
                 await Reconciler(settings, rdeps).run(stop)
         finally:
-            recheck.cancel()
-            await asyncio.gather(recheck, return_exceptions=True)
+            await monitor.stop()
     return 0
 
 
