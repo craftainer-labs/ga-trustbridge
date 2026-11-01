@@ -78,12 +78,12 @@ async def test_a_row_stored_between_listing_and_redelivery_is_not_redelivered() 
     real = h.store.existing_ids
     calls = {"n": 0}
 
-    async def existing(ids: Sequence[str]) -> set[str]:
+    async def existing(delivery_ids: Sequence[str]) -> set[str]:
         calls["n"] += 1
         if calls["n"] == 1:
             return set()  # the batch check ran before the ingress stored it
         await h.add("g-race", relay=False)  # ... which then happens
-        return await real(ids)
+        return await real(delivery_ids)
 
     h.store.existing_ids = existing  # type: ignore[method-assign]
     assert await _reconciler(h, client).reconcile_host(h.settings.github_hosts[0]) == 0

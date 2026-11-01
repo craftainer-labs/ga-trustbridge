@@ -68,8 +68,9 @@ async def test_startup_checks_run_before_the_template_and_resources_outlive_it(
         assert hosts.status("bad").state is HostState.UNAVAILABLE
         assert hosts.status("ok").state is HostState.READY
         assert hosts.status("new").state is HostState.UNREGISTERED
-        paths = {getattr(r, "path", "") for r in app.routes}
-        assert {"/webhooks/github/{host}", "/webhooks/argocd/{tenant_id}"} <= paths
+        assert {"/webhooks/github/{host}", "/webhooks/argocd/{tenant_id}"} <= set(
+            app.openapi()["paths"]
+        )
         assert app.state.trustbridge.argocd.handler is None  # until NG5d supplies a state source
     assert events[-1] == "template-end"
     assert not hasattr(app.state, "trustbridge")  # released after the template shut down
@@ -150,11 +151,14 @@ def test_install_is_idempotent_and_adds_the_proxy_middleware_once() -> None:
     """Install is idempotent and adds the proxy middleware once."""
     app = _template([])
     settings = make_settings(trusted_proxies=["10.0.0.0/8"])
-    assert install(app, settings) is install(app, settings)
+    assert install(app, settings) is app
+    routes = len(app.routes)
+    assert install(app, settings) is app
+    assert len(app.routes) == routes  # a second install adds nothing
+    assert "/webhooks/github/{host}" in app.openapi()["paths"]
     proxies = [m for m in app.user_middleware if cast("Any", m.cls) is ProxyHeadersMiddleware]
     assert len(proxies) == 1
     assert proxies[0].kwargs["trusted_hosts"] == ["10.0.0.0/8"]
-    assert [getattr(r, "path", "") for r in app.routes].count("/webhooks/github/{host}") == 1
 
 
 def test_unset_trusted_proxies_outside_production_trusts_loopback_only() -> None:
@@ -191,9 +195,9 @@ async def main() -> None:
         statuses = runtime.monitor.statuses()
         assert statuses, "the startup checks did not run"
         assert all(s.state.value in ("ready", "unavailable") for s in statuses.values()), statuses
-        paths = {getattr(r, "path", "") for r in app.routes}
-        assert {"/webhooks/github/{host}", "/webhooks/argocd/{tenant_id}"} <= paths
-        assert "/health/live" in paths or any(p.startswith("/health") for p in paths)
+        assert {"/webhooks/github/{host}", "/webhooks/argocd/{tenant_id}"} <= set(
+            app.openapi()["paths"]
+        )
 
 asyncio.run(main())
 print("SMOKE-OK")

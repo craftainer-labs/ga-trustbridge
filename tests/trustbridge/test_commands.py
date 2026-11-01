@@ -1,6 +1,8 @@
 """The command shims and dispatcher (ADR 0028 "Processes")."""
 
 import runpy
+from collections.abc import Coroutine
+from typing import Any, cast
 
 import pytest
 
@@ -51,4 +53,8 @@ def test_runtime_main_runs_the_process_and_returns_its_code(
     """Runtime main runs the process and returns its code."""
     monkeypatch.setattr(runtime, "configure_logging", lambda: None)
     monkeypatch.setattr(runtime, "run_process", lambda kind: kind)
-    assert runtime.main("worker", runner=lambda coro: 5 if coro == "worker" else 6) == 5
+
+    def run(coro: Coroutine[Any, Any, int]) -> int:
+        return 5 if cast("Any", coro) == "worker" else 6
+
+    assert runtime.main("worker", runner=run) == 5
