@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-11-01, with the G-api decisions recorded below). This ADR
+Proposed. The user approved the G-api decisions on 2026-11-01; the ADR becomes Accepted when the implementation (NG3-NG5) merges. This ADR
 defines a public API that third parties may implement. Part of the set [0028](0028-trustbridge-architecture-and-instance-layout.md)
 (architecture; it owns the tables, leases and process roles this ADR
 relies on), this one, and
@@ -504,10 +504,6 @@ as below.
     `admin` scope never uses OIDC; the core, not the adapter, decides and
     re-evaluates eligibility (invariant A12). Options (b) and (c) are not
     adopted.
-
-Status is Accepted as of this decision although `docs/adrs/README.md` says
-an ADR becomes Accepted when its implementation merges; the user asked
-for Accepted now.
 
 ## Open issues
 
