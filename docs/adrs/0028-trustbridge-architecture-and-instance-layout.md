@@ -127,7 +127,10 @@ per-host check (signer, GitHub, issuer) never raises; it marks that host
 webhooks (ingress needs no signer) and serves every other host. A host
 with no App yet is `unregistered`. The wrapper starts a recheck task that
 re-runs the failed checks every `HOST_RECHECK_SECONDS` and cancels it on
-shutdown. The signer is not part of the api's readiness (ADR 0030,
+shutdown. The worker and reconciler commands start the same recheck loop
+from their own `main()`; each process holds its own host state in memory
+(there is no shared source of truth), so a worker leaves `unavailable`
+host deliveries alone until its own recheck passes. The signer is not part of the api's readiness (ADR 0030,
 "Startup checks and readiness").
 
 Consequence: `lifespan_context` is an attribute of Starlette's router, not
@@ -275,8 +278,9 @@ Table names are the contract between this ADR, 0029 and the later ADRs
    returns 2xx without a second row. No GitHub or adapter call happens on
    the request path. A host with no App yet (`unregistered`, ADR 0030) has
    no webhook secret to verify with, so its route answers 503 without
-   reading the body; GitHub's failed delivery is then picked up by the
-   delivery reconciler (item 4) once the host is registered.
+   reading the body. (Such a host has no App, so GitHub sends it nothing;
+   the 503 only answers a misrouted request and there is nothing to
+   redeliver.)
 2. **Relay.** A relay task (in the reconciler, plus one best-effort call
    from the ingress after the response) adds the **delivery id only** to
    the Valkey stream `tb:events`. It may add an id twice; processing is
@@ -291,9 +295,12 @@ Table names are the contract between this ADR, 0029 and the later ADRs
    `tb:events:dead` as `{delivery_id, error}`. The dead-letter carries no
    body: the admin API reads it from the row, and "requeue" makes the row
    deliverable again. Handlers are idempotent (reconcile-style, ADR 0029).
-   A delivery whose host is not `ready` (ADR 0030) is not handled: it
-   waits in the outbox, without counting a failure, until the host is
-   `ready` again; other hosts' deliveries are unaffected.
+   A delivery whose host is not `ready` (ADR 0030) is not handled: the
+   worker acknowledges the stream entry without claiming it for handling,
+   so the stream's delivery count (invariant 4) is not consumed, and the
+   row stays unprocessed in the outbox, uncounted as a failure. The
+   re-relay sweep (item 2) re-adds it when the host is `ready` again.
+   Other hosts' deliveries are unaffected.
    Leader election is not needed for workers (the consumer group
    partitions work, the lease serialises scopes).
 4. **Delivery reconciler**: GitHub never redelivers on its own. A periodic
@@ -332,7 +339,8 @@ Valkey so that all api replicas share them, and **fails open**.
   signature counts against its source address. A request over the limit
   gets 429 with `Retry-After` and its body is never read. GitHub treats
   that as a failed delivery, and the delivery reconciler (item 4)
-  redelivers it later.
+  redelivers it once its host is `ready`, because listing and
+  redelivering need the host's App JWT.
 - **Algorithm.** A fixed-window counter: `INCR` on the key
   `tb:rl:webhooks:<address>:<window index>` and `EXPIRE` of twice the
   window on first increment, done atomically (one script or a
@@ -362,7 +370,13 @@ Valkey so that all api replicas share them, and **fails open**.
   the left-most entry, which the client can forge; trustbridge therefore
   refuses `TRUSTED_PROXIES=*` in production and the deployment must not set
   `--forwarded-allow-ips='*'`. `TRUSTED_PROXIES` has no default in
-  production (an empty list means "no proxy: use the socket peer"). When
+  production: leaving it unset is refused, and an explicitly empty list
+  means "no proxy: use the socket peer". The entrypoint command disables
+  uvicorn's own proxy handling (`--no-proxy-headers`), so
+  `TRUSTED_PROXIES` is the only trusted list and `FORWARDED_ALLOW_IPS` has
+  no effect. A deployment behind an ingress must list the ingress; an
+  empty list behind one would make every client share the ingress's
+  address and bucket. When
   `request.client` is `None` (a Unix socket), the key is the fixed value
   `unknown`.
 - **Settings (proposed defaults).** `WEBHOOK_RATE_LIMIT_ENABLED=true`,
@@ -504,6 +518,7 @@ are in ADR 0030.
 20. A smoke test enters `trustbridge.main:app`'s lifespan, asserts the
     startup checks ran and that the webhook route exists, and fails if the
     template stops exposing `app.router.lifespan_context`.
+
 **Operations, secrets and names** (the adapter side is in ADR 0029)
 
 21. CI outputs are recoverable after a crash at any point between a
@@ -610,6 +625,11 @@ wrong):
 - The limiter's defaults (300 requests per 60 s per address) are untested
   against real GitHub and GHES delivery rates; NG3 confirms them, and GitHub's
   published hook ranges (`GET /meta`) are available for the exempt list.
+- While Valkey is down the limiter does nothing and each request can still
+  buffer up to `WEBHOOK_MAX_BODY_BYTES` before the signature check. A
+  per-process fallback limiter (an in-memory token bucket) would bound
+  that; it was not part of the decision (fail open) and is NG3's to
+  propose.
 - Fixed windows allow up to twice the limit across a window boundary;
   accepted for an abuse limit, not a quota.
 - Behind a proxy that does not set `X-Forwarded-For`, all clients share the

@@ -262,10 +262,13 @@ NG3 must implement and test", cited as "0028 invariant n").
    webhook ingress for every host (except `unregistered`) accepting
    deliveries.
 8. A delivery for an `unavailable` host is neither handled nor counted as
-   a failure nor dead-lettered while the host is `unavailable`, and is
-   handled without a GitHub redelivery once the host is `ready` again.
-9. An `unavailable` host is rechecked every `HOST_RECHECK_SECONDS`, and
-   becomes `ready` without a restart when its checks pass; an
+   a failure nor dead-lettered (including by the stream's delivery count,
+   0028 invariant 4) while the host is `unavailable`, and is handled
+   without a GitHub redelivery once the host is `ready` again.
+9. Every process that runs the startup checks (api, worker, reconciler)
+   rechecks an `unavailable` host every `HOST_RECHECK_SECONDS`, and the
+   host becomes `ready` in that process without a restart when its checks
+   pass; an
    `unregistered` host becomes `ready` or `unavailable` after the
    registration flow completes, also without a restart.
 10. The signer health check, if registered, is registered once however many

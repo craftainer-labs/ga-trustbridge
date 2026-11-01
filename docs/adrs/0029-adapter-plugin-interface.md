@@ -450,10 +450,11 @@ cited as "0028 invariant n").
   adapter method is called, the operation ends in a non-retryable
   configuration error visible as a condition, no `NEEDS_MANUAL_ACTION` is
   produced, and other scopes and adapters of the tenant are unaffected.
-- **A14.** The Argo CD repository Secret contains only the private key
-  of the tenant's read-only App from the tenant's connection data, and no
-  code path reads a signer or hands any key of trustbridge's own App to an
-  adapter.
+- **A14.** The Argo CD repository Secret holds the credentials of the
+  tenant's read-only App from the tenant's connection data (its private
+  key with its App id and installation id) and no key of trustbridge's own
+  App, and no code path reads a signer or hands any key of trustbridge's
+  own App to an adapter.
 
 ## Decisions (G-api, 2026-11-01)
 
@@ -532,6 +533,18 @@ for Accepted now.
 - Platform name length limits (Harbor robot names, OAT labels) may force
   an adapter to shorten `name`; invariant A4 bounds how. NG5 contract
   tests check this.
+- Trusts for different permissions on one repository can both match a
+  workflow that runs in a protected environment (the `pull` trust has no
+  environment condition). Which credential such a workflow receives
+  depends on how the platform selects among identity mappings (for
+  example by name or audience); each adapter's contract fixtures (NG5)
+  must show that selection, or the adapter must give each permission a
+  distinct audience or mapping name.
+- A Docker Hub tenant is capped at 10 OATs in total. Every scope needs one
+  and a rotation needs a second briefly, so a tenant has at most 10 scopes
+  and a rotation that would pass the limit is refused with a visible
+  condition while the old credential stays valid (the core's
+  `credential_limit` rule); the Docker Hub documentation states this.
 - How the core reads an environment's protection rules (required
   reviewers, deployment branch policy) for A12, and which of them count as
   "protected", is settled by NG4.
