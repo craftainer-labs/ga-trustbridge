@@ -1124,6 +1124,11 @@ httpx = [
     { name = "anysqlite" },
     { name = "httpx" },
 ]
+httpx2 = [
+    { name = "anyio" },
+    { name = "anysqlite" },
+    { name = "httpx2" },
+]
 
 [[package]]
 name = "httpcore"
@@ -2675,7 +2680,9 @@ dependencies = [
     { name = "fastapi" },
     { name = "githubkit", extra = ["auth-app"] },
     { name = "granian" },
+    { name = "hishel", extra = ["async", "httpx2"] },
     { name = "httpx" },
+    { name = "httpx2" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-instrumentation-fastapi" },
     { name = "opentelemetry-instrumentation-logging" },
@@ -2696,7 +2703,6 @@ dependencies = [
 dev = [
     { name = "boto3-stubs", extra = ["s3"] },
     { name = "craftainer-crud-sdk" },
-    { name = "httpx2" },
     { name = "import-linter" },
     { name = "locust" },
     { name = "mypy" },
@@ -2732,8 +2738,9 @@ requires-dist = [
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "githubkit", extras = ["auth-app"], specifier = "==0.17.0" },
     { name = "granian", specifier = "==2.8.4" },
+    { name = "hishel", extras = ["async", "httpx2"], specifier = "==1.4.0" },
     { name = "httpx", specifier = "==0.28.1" },
-    { name = "httpx2", marker = "extra == 'dev'", specifier = "==2.13.0" },
+    { name = "httpx2", specifier = "==2.13.0" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = "==2.15" },
     { name = "locust", marker = "extra == 'dev'", specifier = "==2.46.6" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==2.3.1" },
