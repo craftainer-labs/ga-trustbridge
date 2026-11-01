@@ -66,6 +66,7 @@ dev = [
 # Adapter plugin group (ADR 0027): one package per registry/GitOps adapter
 # registers itself here. No adapters yet.
 [project.entry-points."trustbridge.adapters"]
+jfrog = "trustbridge.adapters.jfrog:JFrogAdapter"
 
 [build-system]
 requires = ["hatchling"]

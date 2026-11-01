@@ -1,0 +1,48 @@
+{
+  "source": "Shapes from the JFrog Event Service webhook subscription API (/event/api/v1/subscriptions) as used by terraform-provider-artifactory; the dummy secret below is not a real secret. use_secret_for_signing=true settles ADR 0029 item 10 as HMAC (see the README).",
+  "scenarios": {
+    "create": {"exchanges": [
+      {"request": {"method": "GET", "path": "/event/api/v1/subscriptions/${hook}"},
+       "response": {"status": 404, "json": {"errors": [{"message": "Subscription not found"}]}}},
+      {"request": {"method": "POST", "path": "/event/api/v1/subscriptions",
+                   "json": {"key": "${hook}", "description": "managed by trustbridge", "enabled": true,
+                            "event_filter": {"domain": "docker", "event_types": ["pushed"], "criteria": {"anyLocal": true, "anyRemote": false, "anyFederated": false, "repoKeys": []}},
+                            "handlers": [{"handler_type": "webhook", "url": "https://tb.example/hooks/jfrog", "secret": "whsec-dummy-value", "use_secret_for_signing": true}]}},
+       "response": {"status": 201}}
+    ]},
+    "exists": {"exchanges": [
+      {"request": {"method": "GET", "path": "/event/api/v1/subscriptions/${hook}"},
+       "response": {"status": 200, "json": {"key": "${hook}", "enabled": true,
+                    "event_filter": {"domain": "docker", "event_types": ["pushed"], "criteria": {"anyLocal": true, "anyRemote": false, "anyFederated": false, "repoKeys": []}},
+                    "handlers": [{"handler_type": "webhook", "url": "https://tb.example/hooks/jfrog", "use_secret_for_signing": true}]}}}
+    ]},
+    "drift": {"exchanges": [
+      {"request": {"method": "GET", "path": "/event/api/v1/subscriptions/${hook}"},
+       "response": {"status": 200, "json": {"key": "${hook}", "enabled": true,
+                    "event_filter": {"domain": "docker", "event_types": ["pushed", "deleted"]},
+                    "handlers": [{"handler_type": "webhook", "url": "https://tb.example/hooks/jfrog"}]}}},
+      {"request": {"method": "PUT", "path": "/event/api/v1/subscriptions/${hook}",
+                   "json": {"key": "${hook}", "description": "managed by trustbridge", "enabled": true,
+                            "event_filter": {"domain": "docker", "event_types": ["pushed"], "criteria": {"anyLocal": true, "anyRemote": false, "anyFederated": false, "repoKeys": []}},
+                            "handlers": [{"handler_type": "webhook", "url": "https://tb.example/hooks/jfrog", "secret": "whsec-dummy-value", "use_secret_for_signing": true}]}},
+       "response": {"status": 200}}
+    ]},
+    "race": {"exchanges": [
+      {"request": {"method": "GET", "path": "/event/api/v1/subscriptions/${hook}"},
+       "response": {"status": 404}},
+      {"request": {"method": "POST", "path": "/event/api/v1/subscriptions",
+                   "json": {"key": "${hook}", "description": "managed by trustbridge", "enabled": true,
+                            "event_filter": {"domain": "docker", "event_types": ["pushed"], "criteria": {"anyLocal": true, "anyRemote": false, "anyFederated": false, "repoKeys": []}},
+                            "handlers": [{"handler_type": "webhook", "url": "https://tb.example/hooks/jfrog", "secret": "whsec-dummy-value", "use_secret_for_signing": true}]}},
+       "response": {"status": 409, "json": {"errors": [{"message": "Subscription already exists"}]}}}
+    ]},
+    "delete": {"exchanges": [
+      {"request": {"method": "DELETE", "path": "/event/api/v1/subscriptions/${hook}"},
+       "response": {"status": 204}}
+    ]},
+    "delete_absent": {"exchanges": [
+      {"request": {"method": "DELETE", "path": "/event/api/v1/subscriptions/${hook}"},
+       "response": {"status": 404}}
+    ]}
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "source": "Shapes from JFrog Access Projects API (POST/GET/PUT/DELETE /access/api/v1/projects) as used by terraform-provider-project; see src/trustbridge/adapters/jfrog/README.md",
+  "scenarios": {
+    "create": {"exchanges": [
+      {"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"},
+       "response": {"status": 404, "json": {"errors": [{"code": "NOT_FOUND", "message": "Project not found"}]}}},
+      {"request": {"method": "POST", "path": "/access/api/v1/projects",
+                   "json": {"project_key": "${project}", "display_name": "${project}", "description": "images"}},
+       "response": {"status": 201, "json": {"project_key": "${project}", "display_name": "${project}", "description": "images", "admin_privileges": {"manage_members": true, "manage_resources": true, "index_resources": true}, "storage_quota_bytes": -1}}}
+    ]},
+    "exists": {"exchanges": [
+      {"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"},
+       "response": {"status": 200, "json": {"project_key": "${project}", "display_name": "${project}", "description": "images", "admin_privileges": {"manage_members": true, "manage_resources": true, "index_resources": true}, "storage_quota_bytes": -1}}}
+    ]},
+    "drift": {"exchanges": [
+      {"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"},
+       "response": {"status": 200, "json": {"project_key": "${project}", "display_name": "${project}", "description": "stale", "storage_quota_bytes": -1}}},
+      {"request": {"method": "PUT", "path": "/access/api/v1/projects/${project}",
+                   "json": {"project_key": "${project}", "display_name": "${project}", "description": "images", "storage_quota_bytes": -1}},
+       "response": {"status": 200, "json": {"project_key": "${project}", "description": "images"}}}
+    ]},
+    "race": {"exchanges": [
+      {"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"},
+       "response": {"status": 404, "json": {"errors": [{"message": "Project not found"}]}}},
+      {"request": {"method": "POST", "path": "/access/api/v1/projects",
+                   "json": {"project_key": "${project}", "display_name": "${project}", "description": "images"}},
+       "response": {"status": 409, "json": {"errors": [{"message": "Project already exists"}]}}}
+    ]},
+    "delete": {"exchanges": [
+      {"request": {"method": "DELETE", "path": "/access/api/v1/projects/${project}"},
+       "response": {"status": 204}}
+    ]},
+    "delete_absent": {"exchanges": [
+      {"request": {"method": "DELETE", "path": "/access/api/v1/projects/${project}"},
+       "response": {"status": 404, "json": {"errors": [{"message": "Project not found"}]}}}
+    ]},
+    "delete_not_empty": {"exchanges": [
+      {"request": {"method": "DELETE", "path": "/access/api/v1/projects/${project}"},
+       "response": {"status": 400, "json": {"errors": [{"message": "Project has resources"}]}}}
+    ]}
+  }
+}

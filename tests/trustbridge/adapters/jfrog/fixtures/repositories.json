@@ -1,0 +1,53 @@
+{
+  "source": "Shapes from the Artifactory Repository Configuration API (GET/PUT/DELETE /artifactory/api/repositories/{key}); the 400-for-unknown-repo response is unconfirmed, see the README",
+  "scenarios": {
+    "create": {"exchanges": [
+      {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
+       "response": {"status": 400, "json": {"errors": [{"status": 400, "message": "Bad Request"}]}}},
+      {"request": {"method": "PUT", "path": "/artifactory/api/repositories/${project}-images",
+                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
+       "response": {"status": 200, "text": "Successfully created repository '${project}-images'"}}
+    ]},
+    "create_after_404": {"exchanges": [
+      {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
+       "response": {"status": 404, "json": {"errors": [{"status": 404, "message": "Not Found"}]}}},
+      {"request": {"method": "PUT", "path": "/artifactory/api/repositories/${project}-images",
+                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
+       "response": {"status": 200, "text": "Successfully created repository '${project}-images'"}}
+    ]},
+    "exists": {"exchanges": [
+      {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
+       "response": {"status": 200, "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "dockerApiVersion": "V2"}}}
+    ]},
+    "wrong_package_type": {"exchanges": [
+      {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
+       "response": {"status": 200, "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "maven"}}}
+    ]},
+    "race": {"exchanges": [
+      {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
+       "response": {"status": 404, "json": {"errors": [{"status": 404, "message": "Not Found"}]}}},
+      {"request": {"method": "PUT", "path": "/artifactory/api/repositories/${project}-images",
+                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
+       "response": {"status": 400, "json": {"errors": [{"status": 400, "message": "Case insensitive repository key already exists"}]}}},
+      {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
+       "response": {"status": 200, "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker"}}}
+    ]},
+    "rejected": {"exchanges": [
+      {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
+       "response": {"status": 404, "json": {"errors": [{"status": 404, "message": "Not Found"}]}}},
+      {"request": {"method": "PUT", "path": "/artifactory/api/repositories/${project}-images",
+                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
+       "response": {"status": 400, "json": {"errors": [{"status": 400, "message": "Invalid repository configuration"}]}}},
+      {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
+       "response": {"status": 404, "json": {"errors": [{"status": 404, "message": "Not Found"}]}}}
+    ]},
+    "delete": {"exchanges": [
+      {"request": {"method": "DELETE", "path": "/artifactory/api/repositories/${project}-images"},
+       "response": {"status": 200, "text": "Repository ${project}-images and all its content have been removed successfully."}}
+    ]},
+    "delete_absent": {"exchanges": [
+      {"request": {"method": "DELETE", "path": "/artifactory/api/repositories/${project}-images"},
+       "response": {"status": 404, "json": {"errors": [{"status": 404, "message": "Not Found"}]}}}
+    ]}
+  }
+}
