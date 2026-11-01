@@ -83,9 +83,7 @@ class DeliveryReconciler:
         latest: dict[str, HookDelivery] = {}
         async for item in self._client.list_deliveries(host, since=since):
             latest.setdefault(item.guid, item)  # newest first: the first seen is the latest
-        failed = [
-            d for d in latest.values() if not HTTP_OK_LOW <= d.status_code < HTTP_OK_HIGH
-        ]
+        failed = [d for d in latest.values() if not HTTP_OK_LOW <= d.status_code < HTTP_OK_HIGH]
         if not failed:
             return 0
         stored = await self._store.existing_ids([d.guid for d in failed])
@@ -98,7 +96,9 @@ class DeliveryReconciler:
             await self._client.redeliver(host, item.id)
             redelivered += 1
         if redelivered:
-            logger.info("redelivered failed deliveries", extra={"host": host.name, "count": redelivered})
+            logger.info(
+                "redelivered failed deliveries", extra={"host": host.name, "count": redelivered}
+            )
         return redelivered
 
 
@@ -163,7 +163,9 @@ class Reconciler:
                 continue
             host = self._d.hosts.config(name)
             try:
-                async with self._d.leases.hold(NIL_TENANT, CORE_ADAPTER, f"reconcile-deliveries:{name}"):
+                async with self._d.leases.hold(
+                    NIL_TENANT, CORE_ADAPTER, f"reconcile-deliveries:{name}"
+                ):
                     total += await reconciler.reconcile_host(host)
             except LeaseBusy:
                 continue

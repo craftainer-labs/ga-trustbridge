@@ -51,6 +51,8 @@ def grant_runtime_access(role: str = RUNTIME_ROLE) -> None:
 
 def upgrade() -> None:
     """Upgrade schema."""
+    op.execute("SET lock_timeout = '5s'")
+    op.execute("SET statement_timeout = '120s'")
     op.create_table(
         "adapter_resources",
         sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -98,7 +100,7 @@ def upgrade() -> None:
         sa.Column("oidc_offered", sa.Boolean(), nullable=False),
         sa.Column("base_state", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("base_kind", sa.String(), nullable=True),
-        sa.Column("attempts", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("attempts", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("error", sa.Text(), nullable=True),
         sa.Column("manual_action", sa.Text(), nullable=True),
         sa.Column(
@@ -140,17 +142,18 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("host_name"),
     )
 
-
-    op.add_column("tenants", sa.Column("org", sa.String(length=255), server_default="", nullable=False))
-    op.add_column("tenants", sa.Column("org_id", sa.BigInteger(), server_default="0", nullable=False))
+    op.add_column("tenants", sa.Column("org", sa.String(), server_default="", nullable=False))
     op.add_column(
-        "tenants", sa.Column("state", sa.String(length=16), server_default="active", nullable=False)
+        "tenants", sa.Column("org_id", sa.BigInteger(), server_default="0", nullable=False)
+    )
+    op.add_column(
+        "tenants", sa.Column("state", sa.String(), server_default="active", nullable=False)
     )
     op.create_table(
         "tenant_repositories",
         sa.Column("tenant_id", sa.UUID(), nullable=False),
         sa.Column("repository_id", sa.BigInteger(), nullable=False),
-        sa.Column("full_name", sa.String(length=255), nullable=False),
+        sa.Column("full_name", sa.String(), nullable=False),
         sa.PrimaryKeyConstraint("tenant_id", "repository_id"),
     )
     op.execute(

@@ -79,7 +79,10 @@ def source_key(host: str | None) -> str:
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.ipv4_mapped is not None:
             return str(ip.ipv4_mapped)
-        return str(ipaddress.ip_network(f"{ip}/{IPV6_PREFIX}", strict=False).network_address) + f"/{IPV6_PREFIX}"
+        return (
+            str(ipaddress.ip_network(f"{ip}/{IPV6_PREFIX}", strict=False).network_address)
+            + f"/{IPV6_PREFIX}"
+        )
     return str(ip)
 
 
@@ -141,6 +144,4 @@ class WebhookLimiter:
         now = time.monotonic()
         if now - self._last_log >= _LOG_EVERY_SECONDS:
             self._last_log = now
-            logger.warning(
-                "webhook limiter failed open", extra={"error_type": type(exc).__name__}
-            )
+            logger.warning("webhook limiter failed open", extra={"error_type": type(exc).__name__})

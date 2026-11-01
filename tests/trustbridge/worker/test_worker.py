@@ -73,6 +73,7 @@ async def test_the_failure_counter_increases_only_on_handler_failures_with_backo
 
 async def test_exhausting_the_attempts_dead_letters_with_no_body() -> None:  # inv. 3, 4, 7
     """Exhausting the attempts dead letters with no body."""
+
     async def handler(ctx: EventContext) -> None:
         raise RuntimeError("always")
 
@@ -87,7 +88,9 @@ async def test_exhausting_the_attempts_dead_letters_with_no_body() -> None:  # i
     assert (row.status, row.attempts) == ("dead", 3)
     assert row.body is not None  # readable from Postgres until its dead retention elapses
     dead = h.valkey.entries("tb:events:dead")
-    assert [fields for _, fields in dead] == [{"delivery_id": "d1", "error": "RuntimeError: always"}]
+    assert [fields for _, fields in dead] == [
+        {"delivery_id": "d1", "error": "RuntimeError: always"}
+    ]
     assert await h.relay.tick() == 0  # a dead row is never relayed again
 
 
@@ -107,6 +110,7 @@ async def test_relay_duplicates_and_re_relays_never_increase_the_counter() -> No
 
 async def test_a_busy_lease_defers_without_counting() -> None:  # inv. 3
     """A busy lease defers without counting."""
+
     async def handler(ctx: EventContext) -> None:
         raise LeaseBusy("adapter/key")
 
@@ -271,10 +275,16 @@ async def test_the_payload_action_reaches_the_handler() -> None:
 
 @pytest.mark.parametrize(
     ("body", "error"),
-    [(b"[1]", "TypeError: webhook payload is not a JSON object"), (None, "ValueError: delivery body")],
+    [
+        (b"[1]", "TypeError: webhook payload is not a JSON object"),
+        (None, "ValueError: delivery body"),
+    ],
 )
-async def test_an_unusable_body_is_a_counted_handler_failure(body: bytes | None, error: str) -> None:
+async def test_an_unusable_body_is_a_counted_handler_failure(
+    body: bytes | None, error: str
+) -> None:
     """An unusable body is a counted handler failure."""
+
     async def handler(ctx: EventContext) -> None:
         raise AssertionError("not reached")
 

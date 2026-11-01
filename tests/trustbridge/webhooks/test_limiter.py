@@ -99,9 +99,7 @@ async def test_valkey_error_fails_open_and_counts_a_metric(
     valkey = FakeRedis()
     valkey.down = True
     added: list[int] = []
-    monkeypatch.setattr(
-        "trustbridge.webhooks.limiter.metrics.limiter_failopen.add", added.append
-    )
+    monkeypatch.setattr("trustbridge.webhooks.limiter.metrics.limiter_failopen.add", added.append)
     limiter = _limiter(ValkeyWindowCounter(as_redis(valkey)), requests=1)
     for _ in range(3):
         assert (await limiter.check("203.0.113.5")).allowed
@@ -109,8 +107,8 @@ async def test_valkey_error_fails_open_and_counts_a_metric(
 
 
 async def test_a_slow_valkey_costs_at_most_the_timeout() -> None:  # inv. 28
-
     """A slow valkey costs at most the timeout."""
+
     class Slow:
         async def incr(self, key: str, ttl_seconds: int) -> int:
             await asyncio.sleep(5)

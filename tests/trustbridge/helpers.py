@@ -38,7 +38,8 @@ def host(name: str = "github.com", **overrides: Any) -> GitHubHostConfig:  # noq
 
 
 def make_settings(
-    hosts: list[Any] | None = None, **overrides: Any  # noqa: ANN401
+    hosts: list[Any] | None = None,
+    **overrides: Any,  # noqa: ANN401
 ) -> TrustbridgeSettings:
     """Mock-mode settings for unit tests (no database, no Valkey required)."""
     values: dict[str, Any] = {

@@ -127,8 +127,8 @@ async def test_2xx_only_after_the_row_is_committed_and_a_repeat_makes_no_second_
 
 
 async def test_failed_commit_is_never_a_2xx(tb: Setup) -> None:  # inv. 1
-
     """Failed commit is never a 2xx."""
+
     async def boom(delivery: NewDelivery) -> bool:
         raise ConnectionError("database down")
 
@@ -250,7 +250,9 @@ async def test_streamed_body_crossing_the_cap_is_aborted() -> None:  # inv. 2
 async def test_invalid_content_length_is_400() -> None:
     """Invalid content length is 400."""
     tb = await Setup().start()
-    status, pulled = await _raw_asgi(tb.app, "/webhooks/github/ok", [(b"content-length", b"-5")], [])
+    status, pulled = await _raw_asgi(
+        tb.app, "/webhooks/github/ok", [(b"content-length", b"-5")], []
+    )
     assert (status, pulled) == (400, [])
 
 
@@ -333,4 +335,6 @@ async def test_a_rotated_secret_is_picked_up_after_a_mismatch() -> None:
     assert (await tb.post(delivery="d-1")).status_code == 202
     tb.secret_store.secrets["env:OK"] = "rotated"
     assert (await tb.post(delivery="d-2", signed_with="rotated")).status_code == 202
-    assert (await tb.post(delivery="d-3", signed_with=SECRET)).status_code == 401  # the old one is gone
+    assert (
+        await tb.post(delivery="d-3", signed_with=SECRET)
+    ).status_code == 401  # the old one is gone

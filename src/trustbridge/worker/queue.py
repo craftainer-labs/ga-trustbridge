@@ -105,7 +105,12 @@ class StreamQueue:
     ) -> list[StreamEntry]:
         """Claim pending entries idle for `min_idle_ms` (a dead consumer's); counts a delivery."""
         raw = await self._r.xautoclaim(
-            self.stream, self.group, consumer, min_idle_time=min_idle_ms, start_id="0-0", count=count
+            self.stream,
+            self.group,
+            consumer,
+            min_idle_time=min_idle_ms,
+            start_id="0-0",
+            count=count,
         )
         items = raw[1] if len(raw) > 1 else []
         return _entries([(self.stream, items)])
@@ -159,7 +164,9 @@ class StreamQueue:
         """Trim dead-letter entries whose id timestamp is older than `older_than_ms` (epoch)."""
         if older_than_ms <= 0:
             return 0
-        return int(await self._r.xtrim(self.dead_stream, minid=f"{older_than_ms}-0", approximate=False))
+        return int(
+            await self._r.xtrim(self.dead_stream, minid=f"{older_than_ms}-0", approximate=False)
+        )
 
     async def lag(self) -> int | None:
         """Group lag (entries not yet delivered); None when the server does not report it."""

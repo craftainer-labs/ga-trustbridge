@@ -51,6 +51,7 @@ async def test_the_process_exits_non_zero_when_the_schema_never_becomes_current(
     no_migrations: None, key_signers: None
 ) -> None:  # inv. 14
     """The process exits non zero when the schema never becomes current."""
+
     class Session:
         async def __aenter__(self) -> Session:
             return self
@@ -61,7 +62,9 @@ async def test_the_process_exits_non_zero_when_the_schema_never_becomes_current(
         async def execute(self, _stmt: object) -> Any:  # noqa: ANN401
             return types.SimpleNamespace(scalar_one_or_none=lambda: REQUIRED_SCHEMA_VERSION - 1)
 
-    settings = make_settings(mode="dev", allow_mock_mode=False, schema_wait_seconds=0.05, schema_poll_seconds=0.01)
+    settings = make_settings(
+        mode="dev", allow_mock_mode=False, schema_wait_seconds=0.05, schema_poll_seconds=0.01
+    )
     code = await runtime.run_process(
         "worker",
         settings,
@@ -170,7 +173,10 @@ async def test_migrate_runs_upgrade_under_the_lock_and_exits_zero(
     _patch_engine(monkeypatch, log)
     result = await migrate.run_upgrade(make_settings(), upgrade=lambda: log.append("upgrade"))
     assert result == 0
-    lock, upgrade, unlock = (log.index(x) for x in ("SELECT pg_advisory_lock(:k)", "upgrade", "SELECT pg_advisory_unlock(:k)"))
+    lock, upgrade, unlock = (
+        log.index(x)
+        for x in ("SELECT pg_advisory_lock(:k)", "upgrade", "SELECT pg_advisory_unlock(:k)")
+    )
     assert lock < upgrade < unlock  # DDL happens only while the lock is held
     assert log[-1] == "dispose"
 

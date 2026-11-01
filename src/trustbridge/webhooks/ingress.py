@@ -144,7 +144,9 @@ async def _secret(runtime: WebhookRuntime, host: str) -> bytes:
     try:
         return await runtime.secrets.secret_for(host)
     except HostUnregisteredError as exc:
-        raise HTTPException(status_code=503, detail="GitHub host has no App registered yet") from exc
+        raise HTTPException(
+            status_code=503, detail="GitHub host has no App registered yet"
+        ) from exc
     except WebhookSecretUnavailableError as exc:
         raise HTTPException(status_code=503, detail="webhook secret unavailable") from exc
 
@@ -168,14 +170,14 @@ def _metadata(request: Request) -> tuple[str, str, dict[str, str]]:
     event = request.headers.get("x-github-event", "")
     if not _DELIVERY_ID.match(delivery_id) or not _EVENT.match(event):
         raise HTTPException(status_code=400, detail="missing or malformed GitHub delivery headers")
-    headers = {name: request.headers[name][:512] for name in STORED_HEADERS if name in request.headers}
+    headers = {
+        name: request.headers[name][:512] for name in STORED_HEADERS if name in request.headers
+    }
     return delivery_id, event, headers
 
 
 @router.post("/webhooks/github/{host}", status_code=202, dependencies=[Depends(enforce_rate_limit)])
-async def receive_webhook(
-    host: str, request: Request, background: BackgroundTasks
-) -> JSONResponse:
+async def receive_webhook(host: str, request: Request, background: BackgroundTasks) -> JSONResponse:
     """Verify, store and acknowledge one GitHub webhook delivery."""
     runtime = runtime_of(request)
     if host not in runtime.monitor.names():

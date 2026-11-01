@@ -98,5 +98,5 @@ class WebhookSecretResolver:
         for name in names:
             try:
                 await self.secret_for(name)
-            except (HostUnregisteredError, WebhookSecretUnavailableError):
+            except HostUnregisteredError, WebhookSecretUnavailableError:
                 logger.info("webhook secret not warmed", extra={"host": name})

@@ -29,7 +29,7 @@ TOKEN = "argo-token"  # noqa: S105 -- test value
 class StubHandler(ArgoCdDeploymentHandler):
     """Records what the route hands over; optionally fails like a host that is not ready."""
 
-    def __init__(self) -> None:  # noqa: D107 -- the real collaborators are not needed
+    def __init__(self) -> None:
         """Initialise."""
         self.calls: list[tuple[Tenant, Mapping[str, Any]]] = []
         self.not_ready = False

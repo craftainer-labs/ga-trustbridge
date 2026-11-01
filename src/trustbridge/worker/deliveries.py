@@ -254,9 +254,9 @@ class InMemoryDeliveryStore:
         for row in list(self.rows.values()):
             if row.body is None:
                 continue
-            if (row.status == PROCESSED and (row.processed_at or row.received_at) < processed_before) or (
-                row.status == DEAD and (row.dead_at or row.received_at) < dead_before
-            ):
+            if (
+                row.status == PROCESSED and (row.processed_at or row.received_at) < processed_before
+            ) or (row.status == DEAD and (row.dead_at or row.received_at) < dead_before):
                 self._set(row.delivery_id, body=None)
                 purged += 1
         return purged

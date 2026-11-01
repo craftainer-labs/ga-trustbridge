@@ -203,6 +203,7 @@ async def test_a_guarded_insert_selects_from_the_lease_check() -> None:  # inv. 
 
 async def test_an_adapter_call_is_bounded_by_its_timeout() -> None:  # inv. 11
     """An adapter call is bounded by its timeout."""
+
     async def slow() -> str:
         await asyncio.sleep(5)
         return "late"

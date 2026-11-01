@@ -73,48 +73,56 @@ from typing import ClassVar, Literal, Protocol, runtime_checkable
 
 from pydantic import SecretStr
 
-API_VERSION = 1   # int; bumped on a breaking change to this module
+API_VERSION = 1  # int; bumped on a breaking change to this module
 
 HostKind = Literal["github.com", "ghes", "ghe.com"]
+
 
 # ---- hosts and scope ---------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class GitHubHost:
     # Built from GitHubHostConfig (ADR 0030) by GitHubHostConfig.to_host().
-    name: str             # the configured host key, e.g. "github.com", "ghes-prod"
-    kind: HostKind        # the core checks it against Capabilities before any call
-    api_url: str          # https://api.github.com | https://HOST/api/v3 | https://api.SUB.ghe.com
-    oidc_issuer: str      # per host, configured (ADR 0030)
+    name: str  # the configured host key, e.g. "github.com", "ghes-prod"
+    kind: HostKind  # the core checks it against Capabilities before any call
+    api_url: str  # https://api.github.com | https://HOST/api/v3 | https://api.SUB.ghe.com
+    oidc_issuer: str  # per host, configured (ADR 0030)
     oidc_id_claims: bool  # tokens from this host carry the id claims (repository_owner_id always, repository_id for repo scopes; ADR 0030)
-    registry_host: str    # ghcr.io | containers.HOST | containers.SUB.ghe.com container registry host
+    registry_host: str  # ghcr.io | containers.HOST | containers.SUB.ghe.com container registry host
+
 
 @dataclass(frozen=True, slots=True)
 class Tenant:
-    id: str               # surrogate tenant id (UUID) mapping to (host, installation_id); installation ids are unique only per host
+    id: str  # surrogate tenant id (UUID) mapping to (host, installation_id); installation ids are unique only per host
     github_host: GitHubHost
-    org: str              # owning org / user login, informational only
+    org: str  # owning org / user login, informational only
+
 
 @dataclass(frozen=True, slots=True)
 class CredentialScope:
     tenant: Tenant
-    github_host: GitHubHost            # same as tenant.github_host; explicit for adapters
-    repository_id: int | None          # durable numeric id; None = org-wide
+    github_host: GitHubHost  # same as tenant.github_host; explicit for adapters
+    repository_id: int | None  # durable numeric id; None = org-wide
     repository_owner_id: int
     environment: str | None
     permission: Literal["pull", "push", "admin"]
-    key: str                           # scope_key, computed by the core: hex sha256 prefix of (repository_id|"org", environment|"", permission)
-    oidc_eligible: bool = False        # additive: the core allows OIDC trust for this scope
-    platform_repository_key: str | None = None  # additive: RepoSpec.key the credential is limited to
+    key: str  # scope_key, computed by the core: hex sha256 prefix of (repository_id|"org", environment|"", permission)
+    oidc_eligible: bool = False  # additive: the core allows OIDC trust for this scope
+    platform_repository_key: str | None = (
+        None  # additive: RepoSpec.key the credential is limited to
+    )
+
 
 # platform_repository_key (user decision, 2026-11-01, NG34): with it set an adapter grants the
 # credential per platform repository (least privilege, ASVS V8); None keeps the project- or
 # tenant-wide grant narrowed by claims. It is not part of `key`.
 
+
 # ---- capabilities ------------------------------------------------------
 class WebhookAuth(StrEnum):
-    HMAC = "hmac"                  # platform signs the body with a shared secret
+    HMAC = "hmac"  # platform signs the body with a shared secret
     STATIC_HEADER = "static_header"  # fixed header value (e.g. Argo CD notifications bearer)
-    NONE = "none"                  # no authentication possible
+    NONE = "none"  # no authentication possible
+
 
 @dataclass(frozen=True, slots=True)
 class WebhookCapability:
@@ -124,42 +132,63 @@ class WebhookCapability:
     # them as a trigger to re-read state through the platform's API.
     trigger_only: bool = True
 
+
 @dataclass(frozen=True, slots=True)
 class Capabilities:
-    oidc: bool                         # can establish OIDC trust for CI on at least one host kind
-    oidc_hosts: frozenset[HostKind]    # host kinds where trust can be established; empty when oidc is False, subset of github_hosts
-    oidc_requires_manual_step: bool    # trust cannot be created via API (no MVP adapter sets this)
-    ci_credential: bool                # False: trustbridge provisions no CI credential (Argo CD pull-based; GHCR uses GITHUB_TOKEN)
+    oidc: bool  # can establish OIDC trust for CI on at least one host kind
+    oidc_hosts: frozenset[
+        HostKind
+    ]  # host kinds where trust can be established; empty when oidc is False, subset of github_hosts
+    oidc_requires_manual_step: bool  # trust cannot be created via API (no MVP adapter sets this)
+    ci_credential: bool  # False: trustbridge provisions no CI credential (Argo CD pull-based; GHCR uses GITHUB_TOKEN)
     rotation: Literal["none", "single", "two_phase"]
     webhook: WebhookCapability | None
-    github_hosts: frozenset[HostKind]  # host kinds the adapter works with; the core matches GitHubHost.kind against it
+    github_hosts: frozenset[
+        HostKind
+    ]  # host kinds the adapter works with; the core matches GitHubHost.kind against it
     needs_privileged_credential: bool  # adapter itself holds a long-lived admin credential
-    credential_limit: int | None = None   # platform cap on credentials per (tenant, adapter), e.g. 10 for Docker Hub OATs
+    credential_limit: int | None = (
+        None  # platform cap on credentials per (tenant, adapter), e.g. 10 for Docker Hub OATs
+    )
+
 
 # ---- persisted state (the core stores it; adapters read it and return the new one) ----
 @dataclass(frozen=True, slots=True)
 class ResourceState:
     """Non-secret resource (project, repository, webhook). No secrets, ever."""
-    name: str                         # deterministic platform-side name, chosen by the core
-    ref: Mapping[str, str]            # platform ids; empty until the platform confirmed creation
+
+    name: str  # deterministic platform-side name, chosen by the core
+    ref: Mapping[str, str]  # platform ids; empty until the platform confirmed creation
+
 
 @dataclass(frozen=True, slots=True)
 class CredentialSlot:
-    generation: int                   # 1-based; part of the deterministic name
-    name: str                         # tb-<tenant uuid hex, 32 chars>-<scope.key[:16]>-g<generation>; an adapter may shorten only the scope part, never the tenant id
-    ref: Mapping[str, str]            # platform ids; empty until the platform confirmed creation
-    delivered: bool                   # the core wrote the values to GitHub (True for OIDC trust: nothing secret to deliver)
-    retire_after: datetime | None = None   # set by the core on a slot being replaced; adapters ignore it
+    generation: int  # 1-based; part of the deterministic name
+    name: str  # tb-<tenant uuid hex, 32 chars>-<scope.key[:16]>-g<generation>; an adapter may shorten only the scope part, never the tenant id
+    ref: Mapping[str, str]  # platform ids; empty until the platform confirmed creation
+    delivered: (
+        bool  # the core wrote the values to GitHub (True for OIDC trust: nothing secret to deliver)
+    )
+    retire_after: datetime | None = (
+        None  # set by the core on a slot being replaced; adapters ignore it
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class CredentialState:
-    current: CredentialSlot | None    # what CI uses, or is about to use (delivered=False). None only for adapters with ci_credential=False
-    previous: CredentialSlot | None = None   # rotation: still valid until retire_after; rotate_finish deletes it
+    current: (
+        CredentialSlot | None
+    )  # what CI uses, or is about to use (delivered=False). None only for adapters with ci_credential=False
+    previous: CredentialSlot | None = (
+        None  # rotation: still valid until retire_after; rotate_finish deletes it
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class ListedCredential:
     name: str
     ref: Mapping[str, str]
+
 
 # ---- results -----------------------------------------------------------
 class ChangeState(StrEnum):
@@ -167,42 +196,53 @@ class ChangeState(StrEnum):
     CREATED = "created"
     UPDATED = "updated"
     DELETED = "deleted"
-    NEEDS_MANUAL_ACTION = "needs_manual_action"   # e.g. an OIDC connection only creatable in a platform UI (unused by the MVP adapters)
+    NEEDS_MANUAL_ACTION = "needs_manual_action"  # e.g. an OIDC connection only creatable in a platform UI (unused by the MVP adapters)
+
 
 @dataclass(frozen=True, slots=True)
 class Change:
     state: ChangeState
     manual_action: str | None = None  # human instructions when NEEDS_MANUAL_ACTION
-    detail: str | None = None         # audit-safe message; never contains secrets
+    detail: str | None = None  # audit-safe message; never contains secrets
+
 
 @dataclass(frozen=True, slots=True)
 class Applied:
     change: Change
-    state: ResourceState | None       # the complete new state; None after a delete
+    state: ResourceState | None  # the complete new state; None after a delete
+
 
 @dataclass(frozen=True, slots=True)
 class OidcTrust:
-    issuer: str                       # the host's oidc_issuer
+    issuer: str  # the host's oidc_issuer
     audience: str | None
-    claims: Mapping[str, str]         # claim -> value the platform must require: repository_owner_id always, repository_id when the scope has one, environment when the scope has one (A6); never `sub`, never the name claims
+    claims: Mapping[
+        str, str
+    ]  # claim -> value the platform must require: repository_owner_id always, repository_id when the scope has one, environment when the scope has one (A6); never `sub`, never the name claims
+
 
 @dataclass(frozen=True, slots=True)
 class IssuedSecret:
-    values: Mapping[str, SecretStr]   # secret material, never logged; held in memory and, until delivered, in the operation value store
+    values: Mapping[
+        str, SecretStr
+    ]  # secret material, never logged; held in memory and, until delivered, in the operation value store
     expires_at: datetime | None
+
 
 @dataclass(frozen=True, slots=True)
 class NoCiCredential:
-    reason: str                       # e.g. "pull-based GitOps", "CI uses GITHUB_TOKEN"
+    reason: str  # e.g. "pull-based GitOps", "CI uses GITHUB_TOKEN"
+
 
 @dataclass(frozen=True, slots=True)
 class CredentialOutcome:
     change: Change
-    state: CredentialState            # the complete new state; the core persists it as returned
+    state: CredentialState  # the complete new state; the core persists it as returned
     credential: OidcTrust | IssuedSecret | NoCiCredential | None
     # credential is None only when there is nothing to (re)deliver: a delivered secret that is
     # UNCHANGED, NEEDS_MANUAL_ACTION, rotate_finish, delete_credential. An OIDC scope always
     # returns its OidcTrust, also when UNCHANGED, so the core can re-derive the outputs (A1).
+
 
 @dataclass(frozen=True, slots=True)
 class GitHubOutput:
@@ -212,10 +252,12 @@ class GitHubOutput:
     repository_id: int | None
     environment: str | None
 
+
 @dataclass(frozen=True, slots=True)
 class Health:
     ok: bool
     detail: str | None = None
+
 
 # ---- the protocol ------------------------------------------------------
 @runtime_checkable
@@ -226,17 +268,33 @@ class PlatformAdapter(Protocol):
     def capabilities(self) -> Capabilities: ...
 
     # Non-secret resources. prior is None the first time; with an empty ref, look up by prior.name.
-    async def ensure_project(self, t: Tenant, s: ProjectSpec, prior: ResourceState | None) -> Applied: ...
-    async def ensure_repository(self, p: ProjectRef, s: RepoSpec, prior: ResourceState | None) -> Applied: ...
+    async def ensure_project(
+        self, t: Tenant, s: ProjectSpec, prior: ResourceState | None
+    ) -> Applied: ...
+    async def ensure_repository(
+        self, p: ProjectRef, s: RepoSpec, prior: ResourceState | None
+    ) -> Applied: ...
     async def ensure_webhook(self, t: WebhookTarget, prior: ResourceState | None) -> Applied: ...
     async def delete(self, prior: ResourceState) -> Applied: ...
 
     # Credentials. prior is the write-ahead state the core committed before this call.
-    async def ensure_credential(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome: ...
-    async def rotate_begin(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome: ...
-    async def rotate_finish(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome: ...
-    async def delete_credential(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome: ...
-    async def list_credentials(self, t: Tenant) -> Sequence[ListedCredential]: ...   # trustbridge-named ones only (prefix tb-<tenant uuid hex>-), for the orphan sweep
+    async def ensure_credential(
+        self, s: CredentialScope, prior: CredentialState
+    ) -> CredentialOutcome: ...
+    async def rotate_begin(
+        self, s: CredentialScope, prior: CredentialState
+    ) -> CredentialOutcome: ...
+    async def rotate_finish(
+        self, s: CredentialScope, prior: CredentialState
+    ) -> CredentialOutcome: ...
+    async def delete_credential(
+        self, s: CredentialScope, prior: CredentialState
+    ) -> CredentialOutcome: ...
+    async def list_credentials(
+        self, t: Tenant
+    ) -> Sequence[
+        ListedCredential
+    ]: ...  # trustbridge-named ones only (prefix tb-<tenant uuid hex>-), for the orphan sweep
 
     def github_outputs(
         self, s: CredentialScope, credential: OidcTrust | IssuedSecret | NoCiCredential

@@ -121,8 +121,13 @@ async def test_group_lag_is_exported_as_a_metric(monkeypatch: pytest.MonkeyPatch
     reconciler = Reconciler(
         h.settings,
         ReconcilerDeps(
-            store=h.store, queue=h.queue, relay=h.relay, hosts=h.hosts, leases=h.leases,
-            deliveries=None, clock=h.clock,
+            store=h.store,
+            queue=h.queue,
+            relay=h.relay,
+            hosts=h.hosts,
+            leases=h.leases,
+            deliveries=None,
+            clock=h.clock,
         ),
     )
     await reconciler.trim_streams()

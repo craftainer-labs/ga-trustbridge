@@ -21,7 +21,9 @@ async def test_env_and_file_references_are_read_with_the_trailing_newline_stripp
     assert (await secrets.read("env:TB_TEST_SECRET")).get_secret_value() == "from-env"
 
 
-@pytest.mark.parametrize("ref", ["env:TB_TEST_MISSING", "file:/nonexistent/x", "vault:x", "store:x"])
+@pytest.mark.parametrize(
+    "ref", ["env:TB_TEST_MISSING", "file:/nonexistent/x", "vault:x", "store:x"]
+)
 async def test_unreadable_or_unknown_references_are_unavailable(ref: str) -> None:
     """Unreadable or unknown references are unavailable."""
     with pytest.raises(SecretUnavailable):
@@ -54,7 +56,9 @@ async def test_store_references_round_trip_with_mode_0600_delete_and_list(tmp_pa
         await secrets.read("store:parked/a")
 
 
-@pytest.mark.parametrize("ref", ["store:../escape", "store:/abs", "store:a b", "file:/etc/x", "store:"])
+@pytest.mark.parametrize(
+    "ref", ["store:../escape", "store:/abs", "store:a b", "file:/etc/x", "store:"]
+)
 async def test_only_well_formed_store_names_are_writable(tmp_path: Path, ref: str) -> None:
     """Only well formed store names are writable."""
     with pytest.raises(SecretUnavailable, match="not a writable"):

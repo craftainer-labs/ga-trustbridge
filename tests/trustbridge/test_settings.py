@@ -35,8 +35,14 @@ def _prod(**overrides: Any) -> TrustbridgeSettings:  # noqa: ANN401
         "mqtt_password": "p",
         "run_migrations_on_startup": False,
         "trusted_proxies": ["10.0.0.0/8"],
-        "signers": {"prod": {"kind": "vault-transit", "addr": "https://vault.example", "key": "k",
-                             "auth": {"method": "kubernetes", "role": "trustbridge"}}},
+        "signers": {
+            "prod": {
+                "kind": "vault-transit",
+                "addr": "https://vault.example",
+                "key": "k",
+                "auth": {"method": "kubernetes", "role": "trustbridge"},
+            }
+        },
     }
     values.update(overrides)
     hosts = values.pop("hosts", [host(signer="prod")])
@@ -55,7 +61,9 @@ def test_production_refuses_startup_migrations() -> None:  # 0028 invariant 17
 
 
 @pytest.mark.parametrize("value", [None, ["*"]])
-def test_production_refuses_unset_or_wildcard_trusted_proxies(value: object) -> None:  # 0028 inv. 26
+def test_production_refuses_unset_or_wildcard_trusted_proxies(
+    value: object,
+) -> None:  # 0028 inv. 26
     """Production refuses unset or wildcard trusted proxies."""
     with pytest.raises(ValidationError, match="TRUSTED_PROXIES"):
         _prod(trusted_proxies=value)
@@ -124,7 +132,9 @@ def test_oidc_id_claims_default_by_kind_and_explicit_wins(kind: str, expected: b
 def test_unknown_host_kind_is_rejected() -> None:
     """Unknown host kind is rejected."""
     with pytest.raises(ValidationError, match="unknown kind"):
-        make_settings([{k: v for k, v in host_dict(kind="gitlab").items() if k != "oidc_id_claims"}])
+        make_settings(
+            [{k: v for k, v in host_dict(kind="gitlab").items() if k != "oidc_id_claims"}]
+        )
     with pytest.raises(ValidationError, match="invalid field"):
         make_settings([host_dict(kind="gitlab", oidc_id_claims=False)])
 
@@ -142,7 +152,9 @@ def test_unknown_host_kind_is_rejected() -> None:
         ([host_dict("-bad-name")], "must match"),
     ],
 )
-def test_settings_only_host_problems_are_fatal(hosts: list[Any], message: str) -> None:  # 0030 inv. 3
+def test_settings_only_host_problems_are_fatal(
+    hosts: list[Any], message: str
+) -> None:  # 0030 inv. 3
     """Settings only host problems are fatal."""
     with pytest.raises(ValidationError, match=message):
         make_settings(hosts)

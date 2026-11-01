@@ -47,18 +47,23 @@ def grant_runtime_access(role: str = RUNTIME_ROLE) -> None:
 
 def upgrade() -> None:
     """Upgrade schema."""
+    op.execute("SET lock_timeout = '5s'")
+    op.execute("SET statement_timeout = '120s'")
     op.create_table(
         "webhook_deliveries",
-        sa.Column("delivery_id", sa.String(length=128), nullable=False),
-        sa.Column("host", sa.String(length=63), nullable=False),
-        sa.Column("event", sa.String(length=64), nullable=False),
+        sa.Column("delivery_id", sa.String(), nullable=False),
+        sa.Column("host", sa.String(), nullable=False),
+        sa.Column("event", sa.String(), nullable=False),
         sa.Column("headers", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("body", sa.LargeBinary(), nullable=True),
         sa.Column(
-            "received_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "received_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
-        sa.Column("status", sa.String(length=16), server_default="pending", nullable=False),
-        sa.Column("attempts", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("status", sa.String(), server_default="pending", nullable=False),
+        sa.Column("attempts", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_relayed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("processed_at", sa.DateTime(timezone=True), nullable=True),
@@ -74,9 +79,9 @@ def upgrade() -> None:
     op.create_table(
         "scope_leases",
         sa.Column("tenant_id", sa.UUID(), nullable=False),
-        sa.Column("adapter", sa.String(length=64), nullable=False),
-        sa.Column("lease_key", sa.String(length=256), nullable=False),
-        sa.Column("holder", sa.String(length=128), nullable=False),
+        sa.Column("adapter", sa.String(), nullable=False),
+        sa.Column("lease_key", sa.String(), nullable=False),
+        sa.Column("holder", sa.String(), nullable=False),
         sa.Column("fence", sa.BigInteger(), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("tenant_id", "adapter", "lease_key"),
@@ -85,10 +90,13 @@ def upgrade() -> None:
     op.create_table(
         "tenants",
         sa.Column("id", sa.UUID(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("host", sa.String(length=63), nullable=False),
+        sa.Column("host", sa.String(), nullable=False),
         sa.Column("installation_id", sa.BigInteger(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("host", "installation_id", name="uq_tenants_host_inst"),
@@ -96,8 +104,8 @@ def upgrade() -> None:
 
     op.create_table(
         "schema_compat",
-        sa.Column("id", sa.Integer(), nullable=False),
-        sa.Column("version", sa.Integer(), nullable=False),
+        sa.Column("id", sa.BigInteger(), autoincrement=False, nullable=False),
+        sa.Column("version", sa.BigInteger(), nullable=False),
         sa.CheckConstraint("id = 1", name="ck_schema_compat_single_row"),
         sa.PrimaryKeyConstraint("id"),
     )

@@ -82,7 +82,11 @@ class FakeRedis:
         self.kv.clear()
 
     async def xgroup_create(
-        self, name: str, groupname: str, id: str = "$", mkstream: bool = False  # noqa: A002
+        self,
+        name: str,
+        groupname: str,
+        id: str = "$",  # noqa: A002
+        mkstream: bool = False,
     ) -> bool:
         """Create a group; BUSYGROUP if it exists."""
         self._check()
@@ -140,7 +144,10 @@ class FakeRedis:
         claimed = []
         for entry_id in sorted(group.pending, key=id_key):
             info = group.pending[entry_id]
-            if id_key(entry_id) < id_key(start_id) or self.now_ms - info.delivered_ms < min_idle_time:
+            if (
+                id_key(entry_id) < id_key(start_id)
+                or self.now_ms - info.delivered_ms < min_idle_time
+            ):
                 continue
             if entry_id not in present:
                 del group.pending[entry_id]
@@ -150,7 +157,12 @@ class FakeRedis:
         return ["0-0", claimed[:count], []]
 
     async def xpending_range(
-        self, name: str, groupname: str, min: str, max: str, count: int  # noqa: A002
+        self,
+        name: str,
+        groupname: str,
+        min: str,  # noqa: A002
+        max: str,  # noqa: A002
+        count: int,
     ) -> list[dict[str, Any]]:
         """Pending entries between two ids (inclusive)."""
         self._check()
@@ -208,7 +220,11 @@ class FakeRedis:
         return out
 
     async def xtrim(
-        self, name: str, maxlen: int | None = None, approximate: bool = True, minid: str | None = None
+        self,
+        name: str,
+        maxlen: int | None = None,
+        approximate: bool = True,
+        minid: str | None = None,
     ) -> int:
         """Remove entries with an id strictly below `minid`."""
         self._check()

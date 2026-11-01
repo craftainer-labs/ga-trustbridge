@@ -16,7 +16,6 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Index,
-    Integer,
     LargeBinary,
     String,
     Text,
@@ -46,14 +45,16 @@ class WebhookDelivery(Base):
         Index("ix_wd_received_at", "received_at"),
     )
 
-    delivery_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    host: Mapped[str] = mapped_column(String(63))
-    event: Mapped[str] = mapped_column(String(64))
+    delivery_id: Mapped[str] = mapped_column(String, primary_key=True)
+    host: Mapped[str] = mapped_column(String)
+    event: Mapped[str] = mapped_column(String)
     headers: Mapped[dict[str, str]] = mapped_column(JSONB)
     body: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    status: Mapped[str] = mapped_column(String(16), server_default="pending")
-    attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    status: Mapped[str] = mapped_column(String, server_default="pending")
+    attempts: Mapped[int] = mapped_column(BigInteger, server_default="0")
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_relayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -67,9 +68,9 @@ class ScopeLease(Base):
     __tablename__ = "scope_leases"
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    adapter: Mapped[str] = mapped_column(String(64), primary_key=True)
-    lease_key: Mapped[str] = mapped_column(String(256), primary_key=True)
-    holder: Mapped[str] = mapped_column(String(128))
+    adapter: Mapped[str] = mapped_column(String, primary_key=True)
+    lease_key: Mapped[str] = mapped_column(String, primary_key=True)
+    holder: Mapped[str] = mapped_column(String)
     fence: Mapped[int] = mapped_column(BigInteger)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -83,13 +84,13 @@ class Tenant(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    host: Mapped[str] = mapped_column(String(63))
+    host: Mapped[str] = mapped_column(String)
     installation_id: Mapped[int] = mapped_column(BigInteger)
     # Filled from `installation` events (a tenant first seen from another event has none yet).
-    org: Mapped[str] = mapped_column(String(255), server_default="")
+    org: Mapped[str] = mapped_column(String, server_default="")
     org_id: Mapped[int] = mapped_column(BigInteger, server_default="0")
     # `active`, `suspended` or `deleted`.
-    state: Mapped[str] = mapped_column(String(16), server_default="active")
+    state: Mapped[str] = mapped_column(String, server_default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -100,7 +101,7 @@ class TenantRepository(Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     repository_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    full_name: Mapped[str] = mapped_column(String(255))
+    full_name: Mapped[str] = mapped_column(String)
 
 
 class SchemaCompat(Base):
@@ -109,5 +110,5 @@ class SchemaCompat(Base):
     __tablename__ = "schema_compat"
     __table_args__ = (CheckConstraint("id = 1", name="ck_schema_compat_single_row"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    version: Mapped[int] = mapped_column(Integer)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    version: Mapped[int] = mapped_column(BigInteger)

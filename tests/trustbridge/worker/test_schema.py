@@ -53,7 +53,12 @@ def _gate(version: int | Exception | None, **kw: Any) -> tuple[SchemaGate, dict[
 
 @pytest.mark.parametrize(
     ("db_version", "current"),
-    [(0, False), (None, False), (REQUIRED_SCHEMA_VERSION, True), (REQUIRED_SCHEMA_VERSION + 5, True)],
+    [
+        (0, False),
+        (None, False),
+        (REQUIRED_SCHEMA_VERSION, True),
+        (REQUIRED_SCHEMA_VERSION + 5, True),
+    ],
 )
 async def test_gate_accepts_an_equal_or_greater_integer_and_rejects_a_lower_one(
     db_version: int | None, current: bool
@@ -78,6 +83,7 @@ async def test_an_unreadable_table_is_not_current_rather_than_an_error() -> None
 
 async def test_mock_mode_never_touches_a_database() -> None:  # inv. 15
     """Mock mode never touches a database."""
+
     def boom() -> Any:  # noqa: ANN401
         raise AssertionError("mock mode must not open a database session")
 
@@ -111,9 +117,7 @@ async def test_the_api_form_exits_non_zero_only_after_the_wait() -> None:  # inv
     """The api form exits non zero only after the wait."""
     exits: list[int] = []
     gate, box = _gate(0)
-    task = asyncio.create_task(
-        gate.wait_or_exit(timeout=0.2, poll=0.01, exit_process=exits.append)
-    )
+    task = asyncio.create_task(gate.wait_or_exit(timeout=0.2, poll=0.01, exit_process=exits.append))
     await asyncio.sleep(0.05)
     assert exits == []  # waiting never exits early
     await asyncio.wait_for(task, timeout=2)

@@ -68,7 +68,9 @@ class Core:
     relay: Relay | None
 
 
-def session_factory_or_none(settings: TrustbridgeSettings) -> async_sessionmaker[AsyncSession] | None:
+def session_factory_or_none(
+    settings: TrustbridgeSettings,
+) -> async_sessionmaker[AsyncSession] | None:
     """The template's session factory, or None in mock mode (no database is touched)."""
     if settings.mode == "mock":
         return None
@@ -118,14 +120,15 @@ def build_core(
         MemorySecrets() if settings.mode == "mock" else LocalSecrets(settings.secret_store_dir)
     )
     queue = StreamQueue(redis) if redis is not None else None
-    relay = (
-        Relay(store, queue, batch_size=settings.relay_batch_size) if queue is not None else None
-    )
+    relay = Relay(store, queue, batch_size=settings.relay_batch_size) if queue is not None else None
 
     async def readd(host: GitHubHostConfig) -> None:
         if relay is not None:
             count = await relay.relay_host(host.name)
-            logger.info("re-relayed rows of a host that became ready", extra={"host": host.name, "count": count})
+            logger.info(
+                "re-relayed rows of a host that became ready",
+                extra={"host": host.name, "count": count},
+            )
 
     runtime = build_host_runtime(
         settings,
@@ -190,7 +193,9 @@ async def run_process(
         if client is None:
             client = open_redis(settings)
             stack.push_async_callback(client.aclose)
-        sessions = session_factory if session_factory is not None else session_factory_or_none(settings)
+        sessions = (
+            session_factory if session_factory is not None else session_factory_or_none(settings)
+        )
         core = build_core(
             settings,
             redis=client,
@@ -201,7 +206,9 @@ async def run_process(
         if core.queue is None or core.relay is None:  # pragma: no cover -- a client was given
             raise RuntimeError("the stream queue is not configured")
         try:
-            await core.gate.wait(timeout=settings.schema_wait_seconds, poll=settings.schema_poll_seconds)
+            await core.gate.wait(
+                timeout=settings.schema_wait_seconds, poll=settings.schema_poll_seconds
+            )
         except SchemaWaitTimeout:
             logger.critical("schema not current after SCHEMA_WAIT_SECONDS; exiting")
             return 1
@@ -239,13 +246,11 @@ def _install_signal_handlers(stop: asyncio.Event) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             loop.add_signal_handler(sig, stop.set)
-        except (NotImplementedError, RuntimeError):  # pragma: no cover -- non-main thread
+        except NotImplementedError, RuntimeError:  # pragma: no cover -- non-main thread
             logger.debug("cannot install a handler for %s", sig)
 
 
-def main(
-    kind: ProcessKind, runner: Callable[[Coroutine[Any, Any, int]], int] = asyncio.run
-) -> int:
+def main(kind: ProcessKind, runner: Callable[[Coroutine[Any, Any, int]], int] = asyncio.run) -> int:
     """Synchronous entry for `python -m trustbridge.worker [worker|reconciler]`."""
     configure_logging()
     return runner(run_process(kind))

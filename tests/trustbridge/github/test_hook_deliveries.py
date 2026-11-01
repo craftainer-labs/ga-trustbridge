@@ -20,7 +20,9 @@ from trustbridge.github.hosts import GitHubHostConfig
 PATH = "/app/hook/deliveries"
 
 
-def _item(hook_id: int, guid: str, status: int, delivered_at: str, *, redelivery: bool = False) -> dict[str, object]:
+def _item(
+    hook_id: int, guid: str, status: int, delivered_at: str, *, redelivery: bool = False
+) -> dict[str, object]:
     return {
         "id": hook_id,
         "guid": guid,
@@ -51,11 +53,16 @@ def test_next_cursor_reads_the_next_relation_only(link: str | None, expected: st
     assert next_cursor(link) == expected
 
 
-async def test_deliveries_are_listed_across_pages_until_the_cutoff(env: Env, gh: ScriptedGitHub) -> None:
+async def test_deliveries_are_listed_across_pages_until_the_cutoff(
+    env: Env, gh: ScriptedGitHub
+) -> None:
     """Deliveries are listed across pages until the cutoff."""
     pages = [
         (
-            [_item(3, "g3", 502, "2026-11-01T12:00:00Z", redelivery=True), _item(2, "g2", 200, "2026-11-01T11:00:00Z")],
+            [
+                _item(3, "g3", 502, "2026-11-01T12:00:00Z", redelivery=True),
+                _item(2, "g2", 200, "2026-11-01T11:00:00Z"),
+            ],
             '<https://api.github.com/app/hook/deliveries?per_page=100&cursor=v1_2>; rel="next"',
         ),
         ([_item(1, "g1", 500, "2026-10-01T00:00:00Z")], None),
@@ -78,7 +85,9 @@ async def test_deliveries_are_listed_across_pages_until_the_cutoff(env: Env, gh:
     assert seen_cursors == [None, "v1_2"]  # the second page was fetched, then the cutoff ended it
 
 
-async def test_listing_ends_when_a_page_has_no_next_relation_or_no_body(env: Env, gh: ScriptedGitHub) -> None:
+async def test_listing_ends_when_a_page_has_no_next_relation_or_no_body(
+    env: Env, gh: ScriptedGitHub
+) -> None:
     """Listing ends when a page has no next relation or no body."""
     gh.route("GET", PATH, body=None)
     since = datetime(2026, 10, 31, tzinfo=UTC)

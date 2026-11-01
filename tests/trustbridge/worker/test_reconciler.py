@@ -49,7 +49,9 @@ async def test_a_stored_row_in_any_state_blocks_redelivery() -> None:  # inv. 8
         await h.add(guid)
     await h.store.mark_processed("g-processed", h.clock())
     await h.store.mark_dead("g-dead", "x", h.clock())
-    client = FakeHookClient([_hd(i, g, 500, h) for i, g in enumerate(("g-pending", "g-processed", "g-dead"))])
+    client = FakeHookClient(
+        [_hd(i, g, 500, h) for i, g in enumerate(("g-pending", "g-processed", "g-dead"))]
+    )
     assert await _reconciler(h, client).reconcile_host(h.settings.github_hosts[0]) == 0
     assert client.redelivered == []
 
@@ -92,15 +94,22 @@ async def test_redeliveries_per_run_are_capped() -> None:
     """Redeliveries per run are capped."""
     h = await Harness({}).start()
     client = FakeHookClient([_hd(i, f"g{i}", 500, h) for i in range(5)])
-    assert await _reconciler(h, client, max_per_run=2).reconcile_host(h.settings.github_hosts[0]) == 2
+    assert (
+        await _reconciler(h, client, max_per_run=2).reconcile_host(h.settings.github_hosts[0]) == 2
+    )
 
 
 def _recon(h: Harness, client: FakeHookClient | None) -> Reconciler:
     return Reconciler(
         h.settings,
         ReconcilerDeps(
-            store=h.store, queue=h.queue, relay=h.relay, hosts=h.hosts, leases=h.leases,
-            deliveries=client, clock=h.clock,
+            store=h.store,
+            queue=h.queue,
+            relay=h.relay,
+            hosts=h.hosts,
+            leases=h.leases,
+            deliveries=client,
+            clock=h.clock,
         ),
     )
 

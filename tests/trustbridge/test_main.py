@@ -56,7 +56,9 @@ async def test_startup_checks_run_before_the_template_and_resources_outlive_it(
             return await checker.get_app_id(host, jwt)
 
     app = _template(events)
-    settings = make_settings([host("ok"), host("bad"), host("new", app_id=None, webhook_secret_ref=None)])
+    settings = make_settings(
+        [host("ok"), host("bad"), host("new", app_id=None, webhook_secret_ref=None)]
+    )
     install(app, settings, Overrides(checker=Spy(), redis=as_redis(FakeRedis())))
     async with app.router.lifespan_context(app):
         assert events[-1] == "template-start"
@@ -159,9 +161,7 @@ def test_unset_trusted_proxies_outside_production_trusts_loopback_only() -> None
     """Unset trusted proxies outside production trusts loopback only."""
     app = _template([])
     install(app, make_settings())
-    (proxy,) = (
-        m for m in app.user_middleware if cast("Any", m.cls) is ProxyHeadersMiddleware
-    )
+    (proxy,) = (m for m in app.user_middleware if cast("Any", m.cls) is ProxyHeadersMiddleware)
     assert proxy.kwargs["trusted_hosts"] == "127.0.0.1"
 
 

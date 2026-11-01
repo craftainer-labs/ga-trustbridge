@@ -71,14 +71,18 @@ class Lease:
     def valid_clause(self) -> ColumnElement[bool]:
         """`EXISTS` of this exact (holder, fence) row that has not expired, at statement time."""
         t = ScopeLease
-        return exists().where(
-            t.tenant_id == self.tenant_id,
-            t.adapter == self.adapter,
-            t.lease_key == self.key,
-            t.holder == self.holder,
-            t.fence == self.fence,
-            t.expires_at > func.clock_timestamp(),
-        ).correlate(None)
+        return (
+            exists()
+            .where(
+                t.tenant_id == self.tenant_id,
+                t.adapter == self.adapter,
+                t.lease_key == self.key,
+                t.holder == self.holder,
+                t.fence == self.fence,
+                t.expires_at > func.clock_timestamp(),
+            )
+            .correlate(None)
+        )
 
     def guard(self) -> ColumnElement[bool]:
         """The adapter core's name for `valid_clause` (its `Lease` Protocol)."""
@@ -161,9 +165,7 @@ class PgLeaseStore:
     async def release(self, lease: Lease) -> None:
         """Expire the row now (it stays, so the next takeover increments the fence)."""
         stmt = (
-            update(ScopeLease)
-            .where(*self._same(lease))
-            .values(expires_at=func.clock_timestamp())
+            update(ScopeLease).where(*self._same(lease)).values(expires_at=func.clock_timestamp())
         )
         async with self._sf() as session, session.begin():
             await session.execute(stmt)

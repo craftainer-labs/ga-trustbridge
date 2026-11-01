@@ -14,11 +14,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from craftainer_crud.models.base import Base
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from craftainer_crud.models.base import Base
 from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError
 
@@ -74,7 +74,9 @@ async def ids() -> AsyncIterator[list[str]]:
     created: list[str] = []
     yield created
     async with session_factory() as session, session.begin():
-        await session.execute(delete(WebhookDelivery).where(WebhookDelivery.delivery_id.in_(created)))
+        await session.execute(
+            delete(WebhookDelivery).where(WebhookDelivery.delivery_id.in_(created))
+        )
 
 
 def _new(ids: list[str], **kw: object) -> NewDelivery:
@@ -129,8 +131,14 @@ async def test_sql_relay_rules_match_the_in_memory_rules(ids: list[str]) -> None
         "fresh": {},
         "relayed": {"last_relayed_at": past},
         "delayed": {"next_attempt_at": future, "last_relayed_at": past},
-        "due": {"next_attempt_at": past - timedelta(minutes=1), "last_relayed_at": past - timedelta(minutes=2)},
-        "due-relayed-after": {"next_attempt_at": past - timedelta(minutes=2), "last_relayed_at": past},
+        "due": {
+            "next_attempt_at": past - timedelta(minutes=1),
+            "last_relayed_at": past - timedelta(minutes=2),
+        },
+        "due-relayed-after": {
+            "next_attempt_at": past - timedelta(minutes=2),
+            "last_relayed_at": past,
+        },
         "processed": {"status": "processed"},
         "dead": {"status": "dead"},
     }
@@ -200,8 +208,10 @@ async def test_fencing_is_checked_in_the_same_statement_as_the_write(
     store = PgLeaseStore(session_factory)
     target = _new(ids)
     await PgDeliveryStore(session_factory).insert(target)
-    bump = update(WebhookDelivery).where(WebhookDelivery.delivery_id == target.delivery_id).values(
-        attempts=WebhookDelivery.attempts + 1
+    bump = (
+        update(WebhookDelivery)
+        .where(WebhookDelivery.delivery_id == target.delivery_id)
+        .values(attempts=WebhookDelivery.attempts + 1)
     )
 
     fence_a = await store.acquire(tenant, "jfrog", key, "holder-a", ttl=0.4)
@@ -287,6 +297,7 @@ async def test_the_runtime_role_can_read_the_schema_table_and_pass_the_gate() ->
 
 async def test_the_models_and_the_migration_do_not_drift() -> None:
     """The models and the migration do not drift."""
+
     def diff(sync_conn: object) -> list[object]:
         context = MigrationContext.configure(
             sync_conn,  # type: ignore[arg-type]
@@ -316,7 +327,9 @@ def _github_host(name: str) -> GitHubHost:
     )
 
 
-async def test_concurrent_upserts_of_an_installation_agree_on_one_tenant_and_it_round_trips() -> None:
+async def test_concurrent_upserts_of_an_installation_agree_on_one_tenant_and_it_round_trips() -> (
+    None
+):
     """Concurrent upserts of an installation agree on one tenant and it round trips."""
     tenants = SqlTenants(session_factory, _github_host)
     host, installation = f"it-{uuid.uuid4().hex[:8]}", 424242
@@ -400,7 +413,10 @@ async def test_two_concurrent_migrate_runs_do_not_interleave_and_report_the_role
     )
     assert list(codes) == [0, 0]
     labels = [label for label, _ in sorted(spans, key=lambda s: s[1])]
-    assert labels in (["a-start", "a-end", "b-start", "b-end"], ["b-start", "b-end", "a-start", "a-end"])
+    assert labels in (
+        ["a-start", "a-end", "b-start", "b-end"],
+        ["b-start", "b-end", "a-start", "a-end"],
+    )
 
 
 async def test_the_migrate_job_refuses_the_wrong_role() -> None:  # inv. 18

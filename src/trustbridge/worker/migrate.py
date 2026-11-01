@@ -55,7 +55,9 @@ async def run_upgrade(
                 logger.exception("migration failed")
                 return 1
             finally:
-                await lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": MIGRATE_LOCK_KEY})
+                await lock_conn.execute(
+                    text("SELECT pg_advisory_unlock(:k)"), {"k": MIGRATE_LOCK_KEY}
+                )
     finally:
         await engine.dispose()
     return 0

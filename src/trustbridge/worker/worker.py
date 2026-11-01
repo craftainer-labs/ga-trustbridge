@@ -3,8 +3,8 @@
 Handler interface: register `async def handler(ctx: EventContext) -> None` per GitHub event name
 in the `HandlerRegistry` (`trustbridge.github.handlers`; the core's lifecycle handlers are
 registered by `register_core_handlers`, adapters add theirs). A handler must be
-idempotent. Raise `LeaseBusy` (from `trustbridge.worker.lease`) when a scope lease is taken: the delivery is deferred and no
-failure is counted. Any other exception is a handler failure: the failure counter increases,
+idempotent. Raise `LeaseBusy` (from `trustbridge.worker.lease`) when a scope lease is taken:
+the delivery is deferred and no failure is counted. Any other exception is a handler failure: the failure counter increases,
 the delivery is retried with exponential backoff, and after `MAX_DELIVERY_ATTEMPTS` failures
 it is dead-lettered. An event with no registered handler is processed as a no-op.
 
@@ -88,7 +88,9 @@ class Worker:
         try:
             await self._process(entry, from_pending=from_pending)
         except Exception:
-            logger.exception("processing infrastructure error", extra={"delivery_id": entry.delivery_id})
+            logger.exception(
+                "processing infrastructure error", extra={"delivery_id": entry.delivery_id}
+            )
             try:
                 await self._d.queue.add(entry.delivery_id)
                 await self._d.queue.ack(entry.entry_id)
@@ -108,7 +110,10 @@ class Worker:
         ):
             await queue.ack(entry.entry_id)  # not claimed for handling; nothing is counted
             return
-        if from_pending and await queue.delivery_count(entry.entry_id) > self._s.max_delivery_attempts:
+        if (
+            from_pending
+            and await queue.delivery_count(entry.entry_id) > self._s.max_delivery_attempts
+        ):
             await self._dead(row, entry, "worker ended while handling this delivery repeatedly")
             return
         try:

@@ -89,7 +89,9 @@ async def test_connection_data_merges_and_splits_out_the_privileged_credential()
     empty = await connections.config_for(tenant, "jfrog")
     assert (dict(empty.connection), empty.privileged_credential) == ({}, None)
     await connections.put(tenant_id, "jfrog", {"url": SecretStr("https://j.example")})
-    await connections.put(tenant_id, "jfrog", {PRIVILEGED_KEY: SecretStr("admin"), "x": SecretStr("1")})
+    await connections.put(
+        tenant_id, "jfrog", {PRIVILEGED_KEY: SecretStr("admin"), "x": SecretStr("1")}
+    )
     config = await connections.config_for(tenant, "jfrog")
     assert sorted(config.connection) == ["url", "x"]
     assert config.privileged_credential is not None
