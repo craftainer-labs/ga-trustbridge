@@ -1,4 +1,7 @@
-"""Leases with fencing (0028 invariants 9, 10 and 11); the SQL itself runs in the integration tests."""
+"""Leases with fencing (0028 invariants 9, 10 and 11).
+
+The SQL itself runs in the integration tests.
+"""
 
 import asyncio
 import uuid

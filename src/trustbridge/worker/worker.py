@@ -2,8 +2,8 @@
 
 Handler interface: register `async def handler(ctx: EventContext) -> None` per GitHub event name
 in the `HandlerRegistry` (`trustbridge.github.handlers`; the core's lifecycle handlers are
-registered by `register_core_handlers`, adapters add theirs). A handler must be idempotent. Raise `LeaseBusy` (from
-`trustbridge.worker.lease`) when a scope lease is taken: the delivery is deferred and no
+registered by `register_core_handlers`, adapters add theirs). A handler must be
+idempotent. Raise `LeaseBusy` (from `trustbridge.worker.lease`) when a scope lease is taken: the delivery is deferred and no
 failure is counted. Any other exception is a handler failure: the failure counter increases,
 the delivery is retried with exponential backoff, and after `MAX_DELIVERY_ATTEMPTS` failures
 it is dead-lettered. An event with no registered handler is processed as a no-op.
