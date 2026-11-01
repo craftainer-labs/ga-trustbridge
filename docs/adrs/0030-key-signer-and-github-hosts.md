@@ -2,11 +2,10 @@
 
 ## Status
 
-Proposed. Part of the set
-[0028](0028-trustbridge-architecture-and-instance-layout.md) and
-[0029](0029-adapter-plugin-interface.md). For the user's API gate (G-api):
-the signer interface and the host configuration schema are operator-facing
-APIs.
+Accepted (2026-11-01, with the G-api decisions recorded below). Part of
+the set [0028](0028-trustbridge-architecture-and-instance-layout.md) and
+[0029](0029-adapter-plugin-interface.md). The signer interface and the host
+configuration schema are operator-facing APIs.
 
 ## Context
 
@@ -130,15 +129,18 @@ class GitHubHostConfig:
     oidc_issuer: str           # configured, never derived (see Context)
     registry_host: str         # ghcr.io | containers.HOST (GHES) | containers.SUB.ghe.com (GHE.com), as in ADR 0029
     oidc_id_claims: bool       # tokens carry the id claims (repository_owner_id always, repository_id for repo scopes; ADR 0029 A6); no field default: the host loader sets it explicitly (kind-dependent default True for github.com, False for ghes and ghe.com until NG4 confirms)
-    app_id: int
+    app_id: int | None         # None while the host is unregistered (no App yet)
     signer: str                # key into SIGNERS (see "Named signers")
-    webhook_secret_ref: str
+    webhook_secret_ref: str | None   # None while the host is unregistered
     ca_bundle: Path | None = None   # custom CA for this host (EB-5)
 
     def to_host(self) -> GitHubHost: ...   # ADR 0029's adapter-facing projection: name, kind, api_url, oidc_issuer, oidc_id_claims, registry_host
 ```
 
-Hosts come from a settings list (`GITHUB_HOSTS`, a file or env JSON). The
+Hosts come from a settings list (`GITHUB_HOSTS`, a file or env JSON). An
+entry may omit `app_id` and `webhook_secret_ref`: the host is then
+`unregistered` until a registration flow supplies them (see "Registration").
+The
 loader applies the `oidc_id_claims` default by `kind` (True for
 `github.com`, False for `ghes` and `ghe.com`) when an entry omits the key,
 and an explicit value always wins.
@@ -163,32 +165,57 @@ manual step; it never falls back to the mutable name claims.
 
 The template's lifespan is `replace` tier and has no hook. trustbridge
 wraps it (ADR 0028, "Lifespan: a trustbridge lifespan wrapping the
-template's"), and the same startup checks run in the api lifespan and in
-the worker, reconciler and migrate commands. **Decision:** per configured
-host, in this order, they
+template's"), and the same startup code runs in the api lifespan and in
+the worker, reconciler and migrate commands. **Decision (G-api item 5,
+option a): per-host availability.** Each configured host is in exactly one
+state:
 
-1. validate the settings (https only except a flagged dev mode, `api_url`
-   shape per host kind, every host's `signer` names an entry in
-   `SIGNERS`, no `file` signer in production);
-2. self-test the signer: a probe signature verifies against
-   `public_key_pem()`, and an App JWT accepted by `GET /app` returns an
-   `id` equal to the configured `app_id`, which proves the signer's key is
-   the one registered on that host;
-3. validate the issuer: the host's OIDC discovery document reports the
-   configured `oidc_issuer` (fetched through the configured CA and proxy).
+| State | Meaning | Behaviour |
+| --- | --- | --- |
+| `unregistered` | no App id, key or webhook secret yet | serves only the registration flow; its webhook route answers 503; nothing is processed for it |
+| `unavailable` | a check failed (signer, GitHub, issuer) | webhooks are still verified, stored and answered 2xx; its events wait in the outbox, uncounted as failures; no GitHub or adapter call is made for it; the failed checks repeat every `HOST_RECHECK_SECONDS` |
+| `ready` | all checks passed | normal operation |
 
-What a failed check does (refuse the process, or only mark that host
-unavailable) is G-api item 5. The schema gate (ADR 0028, "Processes and
-database roles") is separate from these checks. Readiness: the api
-registers a signer health check on the template's health registry (the
-cached registry the health router reads), so `/health` readiness includes
-the signer; it does not call GitHub per probe. A failing signer takes the
-pod out of rotation and, in the worker, pauses consumption.
+**Only invalid settings stop a process.** Checks that need nothing but the
+settings are fatal: the process raises and exits non-zero. Checks that
+need the signer, the network or GitHub never are; they set the host to
+`unavailable` with a reason, whatever the cause (an outage, a wrong key, a
+wrong issuer). Per configured host, in this order, the checks
+
+1. validate the settings (fatal): https only except a flagged dev mode,
+   `api_url` shape per host kind, every host's `signer` names an entry in
+   `SIGNERS`, no `file` signer in production, and `app_id` and
+   `webhook_secret_ref` either both set or both absent. A host with both
+   absent skips checks 2 and 3 and is `unregistered`;
+2. self-test the signer (`unavailable` on failure): a probe signature
+   verifies against `public_key_pem()`, and an App JWT accepted by
+   `GET /app` returns an `id` equal to the configured `app_id`, which
+   proves the signer's key is the one registered on that host;
+3. validate the issuer (`unavailable` on failure): the host's OIDC
+   discovery document reports the configured `oidc_issuer` (fetched
+   through the configured CA and proxy).
+
+The schema gate (ADR 0028, "Processes and database roles") is separate
+from these checks and unchanged: it still delays readiness until the
+schema is current.
+
+**Readiness.** The signer is **excluded** from the api's readiness: a
+signer, Vault or GHES outage must not take the api, and with it the
+webhook ingress for every other host, out of rotation. The api's readiness
+covers its own dependencies (schema gate, database). Host availability is
+reported per host (state and reason) in the admin API and as a metric, and
+the signer's health check on the template's health registry, if registered,
+does not gate readiness. The checks make no GitHub call per probe; only the
+startup run and the recheck do. In the worker an unavailable host's
+deliveries are skipped, not the whole consumer: other hosts are processed
+normally.
 
 ### Registration
 
 - **Manifest flow (default, github.com, GHE.com, org-owned or
-  user-owned Apps on GHES).** The admin UI starts the flow per host, with
+  user-owned Apps on GHES).** It also registers the read-only Argo CD App
+  (ADR 0029, per tenant) with a different manifest and purpose. The admin
+  UI starts the flow per host, with
   the manifest's `hook_attributes.url`, `redirect_url`, `default_events`
   and `default_permissions` generated from the deployment's base URL and
   adapter needs; `state` is a signed one-time value tied to the session
@@ -203,8 +230,11 @@ pod out of rotation and, in the worker, pauses consumption.
   validations apply.
 
 Both paths produce an App id, key and webhook secret for a host that had
-none. How a host that is configured but has no App yet coexists with the
-startup checks above is open: G-api item 5.
+none. A host configured with no App is `unregistered` and serves only
+this flow; completing the flow makes the next recheck run the checks and
+move it to `ready` or `unavailable`, with no restart. Where the result
+(App id, signer key reference, webhook secret reference) is persisted is
+open (below).
 
 ## Invariants NG3 must implement and test
 
@@ -215,63 +245,84 @@ NG3 must implement and test", cited as "0028 invariant n").
    registered for the host's `app_id`, and passes for the right key.
 2. The JWT never has `exp` more than 9 minutes ahead of now nor `iat`
    later than now, and the clock-skew allowance is covered by a test.
-3. Startup (a process refusal or a host marked unavailable, per G-api
-   item 5) rejects a host whose discovery document `issuer` differs from
-   the configured `oidc_issuer`, a `SIGNERS` reference that names no
-   entry, a `file` signer when `mode=production`, and a non-https URL
-   outside the flagged dev mode.
-4. The signer health check never makes a GitHub call per probe, and is
-   registered once however many times the lifespan is entered (0028
-   invariant 16).
-5. The PEM returned by the manifest flow is never logged or returned to
-   the browser, and a signer configuration never contains an inline secret
-   value.
+3. Startup refuses the process (non-zero exit) for a `SIGNERS` reference
+   that names no entry, a `file` signer when `mode=production`, a non-https
+   URL outside the flagged dev mode, a wrong `api_url` shape for the host
+   kind, and an `app_id` without a `webhook_secret_ref` or the reverse.
+4. A host whose discovery document `issuer` differs from the configured
+   `oidc_issuer`, or whose signer self-test fails, becomes `unavailable`
+   with a reason; the process starts, and its readiness is unaffected.
+5. The PEM returned by any manifest flow (trustbridge's own App or an
+   Argo CD read-only App) is never logged or returned to the browser, and a
+   signer configuration never contains an inline secret value.
 6. A host whose `oidc_id_claims` is false is never offered OIDC trust
    (0029 invariants A6 and A7).
+7. A signer, Vault, GitHub or issuer failure for one host leaves the api
+   process alive and ready, every other host's state unchanged, and
+   webhook ingress for every host (except `unregistered`, and subject to
+   invariant 11) accepting deliveries.
+8. A delivery for an `unavailable` host is neither handled nor counted as
+   a failure nor dead-lettered (including by the stream's delivery count,
+   0028 invariant 4) while the host is `unavailable`, and is handled
+   without a GitHub redelivery once the host is `ready` again: the
+   transition to `ready` in a worker re-adds that host's waiting rows
+   itself, so they are handled within `HOST_RECHECK_SECONDS` plus normal
+   processing and do not wait for the periodic re-relay sweep.
+9. Every process that runs the startup checks (api, worker, reconciler)
+   rechecks an `unavailable` host every `HOST_RECHECK_SECONDS`, and the
+   host becomes `ready` in that process without a restart when its checks
+   pass; an
+   `unregistered` host becomes `ready` or `unavailable` after the
+   registration flow completes, also without a restart.
+10. The signer health check, if registered, is registered once however many
+    times the lifespan is entered (0028 invariant 16), makes no GitHub call
+    per probe, and does not affect the api's readiness.
+11. Webhook secrets are resolved on first use and cached in process
+    memory, so a secret-store or Vault outage after a successful read does
+    not stop signature verification or ingress; a process with no cached
+    secret for a host answers 503 for it (its failed delivery is
+    redelivered by the reconciler once the host is `ready`).
 
-## Decisions for the user (G-api)
+## Decisions (G-api, 2026-11-01)
 
-1. **Signer interface, `SIGNERS` map and `GITHUB_HOSTS` schema** as an
-   operator-facing API. Trade-off: two JSON settings with a name
-   reference, in exchange for different backends or keys per host (which
-   a single global `SIGNER` cannot express). Lean: approve as written.
-2. **Which signer backends ship in the first release.** Lean: `file`
-   and `vault-transit` first; cloud KMS backends as extras after, since
-   customers vary and each needs a live test.
-3. **Signing outside githubkit's `AppAuthStrategy`.** Options: (a) own JWT
-   assembly with a remote signer (lean; the only way to honour EB-9);
-   (b) pass the PEM to githubkit and forgo remote signing in some
-   deployments.
-4. **Startup checks and readiness via the wrapping lifespan** (signer
-   self-test against `GET /app`, issuer validation, signer health in
-   readiness). Trade-off: mis-configuration is caught at startup instead of
-   at the first webhook, in exchange for a check that can fail for reasons
-   outside the process (a signer or GHES outage). Lean: as written, with
-   the failure policy of item 5.
-5. **Open design question: failure policy and bootstrap.** A host
-   registered through the manifest flow has no App id or key until an
-   admin completes the flow, yet the checks above need both, and a signer
-   or Vault outage, or one unreachable GHES host, would stop the whole api
-   and its webhook ingress for healthy hosts (although ingress needs no
-   signer: the outbox of ADR 0028 keeps events). Options: (a) **per-host
-   availability**: a host is `unregistered` (no App yet, serves only the
-   registration flow), `unavailable` (a check failed, its events wait in
-   the outbox) or `ready`; only invalid settings stop a process; the signer
-   is excluded from the api's readiness and reported per host; (b) a
-   separate bootstrap mode or command that registers a host before the
-   normal processes start, with fail-closed startup unchanged (simple,
-   but no first-run UI flow and an outage still stops everything); (c)
-   manual registration only, completed before the first start (fail-closed,
-   least code, loses the manifest flow's convenience). Lean: (a); it
-   resolves the bootstrap and the outage coupling in one model, at the
-   cost of per-host state and UI.
-6. **`GitHubHostConfig.oidc_id_claims`**, false by default on GHES and
-   GHE.com until NG4 confirms the claims, so those hosts fall back to a
-   secret credential or a manual step rather than to mutable name claims.
-   Lean: as written.
-7. **Argo CD option A (reuse trustbridge's App key) only with the dev
-   `file` signer**; production uses a separate read-only App (option B,
-   ADR 0029 G-api item 6). Lean: B.
+Items 1-4 and 6 are approved as proposed; items 5 and 7 are decided as
+below.
+
+1. **Signer interface, `SIGNERS` map and `GITHUB_HOSTS` schema**:
+   approved.
+2. **Backends in the first release**: `file` and `vault-transit`; cloud KMS
+   backends are extras after the first release.
+3. **Own JWT assembly with a remote signer**, not githubkit's
+   `AppAuthStrategy`: approved.
+4. **Startup checks via the wrapping lifespan**: approved, with the
+   failure policy of item 5 (above, "Startup checks and readiness").
+5. **Failure policy and bootstrap: option (a), per-host availability.**
+   `unregistered` (serves only the registration flow), `unavailable` (a
+   check failed, events wait in the outbox) or `ready`. Only invalid
+   settings stop a process. The signer is excluded from the api's
+   readiness and reported per host. 0028 item 7 and "Lifespan" are aligned.
+6. **`oidc_id_claims`**, false by default on GHES and GHE.com until NG4
+   confirms the claims: approved.
+7. **Argo CD: option B.** Production uses a separate read-only GitHub App
+   (contents: read, metadata), registered through the manifest flow, whose
+   key is the only one given to Argo CD (ADR 0029 item 6). Option A
+   (reusing trustbridge's key with the `file` signer) is **removed**, not
+   kept as a dev path: a path that only works for the dev signer and
+   conflicts with EB-9 elsewhere is noise.
+
+Judgement calls made while recording these (not user decisions; revisit if
+wrong):
+
+- Failures are classified by what they need: checks on the settings alone
+  are fatal; anything needing the signer, network or GitHub (including a
+  wrong key or wrong issuer) makes the host `unavailable`.
+- `app_id` and `webhook_secret_ref` become optional on `GitHubHostConfig`
+  to express `unregistered`; an unregistered host's webhook route answers
+  503.
+- The recheck interval `HOST_RECHECK_SECONDS` (default 60) is new.
+- Status is Accepted as of this decision although `docs/adrs/README.md`
+  says an ADR becomes Accepted when its implementation merges; the user
+  asked for Accepted now.
 
 ## Consequences
 
@@ -284,7 +335,8 @@ NG3 must implement and test", cited as "0028 invariant n").
   access lasts; the protection is against key exfiltration, not against
   use of the signer. Revoke the pod's signer access to cut it off. Cost: a network round trip per JWT,
   mitigated by caching installation tokens, and a hard dependency on the
-  signer's availability (health check and readiness probe include it).
+  signer's availability, handled per host (the host is `unavailable`
+  while the signer is; the api stays ready).
 - We own about 40 lines of JWT assembly and must test clock skew and
   claim limits ourselves.
 - Per-host issuer configuration costs the operator one setting but
@@ -304,12 +356,22 @@ NG3 must implement and test", cited as "0028 invariant n").
 - How the manifest-flow callback reaches a signer's import operation (it
   is outside the sign-only `AppKeySigner` Protocol) and what happens for a
   signer without import are settled by NG4.
-- Until G-api item 5 is decided, the failure policy of the startup checks
-  (process-wide refusal or per-host availability) and the first-run
-  bootstrap of a host with no App are unsettled.
-- Argo CD option A applies only to the `file` signer (a non-exportable
-  signer has no key to hand over); the claim is narrowed to that and
-  production needs the separate read-only App (option B).
+- Where the registration result of a host (App id, signer key reference,
+  webhook secret reference) is persisted when the operator's `GITHUB_HOSTS`
+  entry is read-only, and how it overlays that entry, are settled by NG4
+  (0028 lists no table for it).
+- A process that has never read a host's webhook secret while the secret
+  store is down cannot verify, so ingress then answers 503 for that host
+  only (invariant 11); a short, cache-warming read at startup narrows the
+  window and is NG3's to design.
+- Host state is per process and the admin API reports the answering
+  replica's view; the registration record NG4 designs must be readable by
+  every process so each picks a registration up at its next recheck
+  (invariant 9).
+- The Argo CD read-only App's PEM is not imported into a signer: it is
+  handed to Argo CD's cluster Secret (ADR 0029). How the manifest-flow
+  callback passes it to the adapter's tenant connection data is settled by
+  NG4 and NG5.
 - The signer self-test calls `GET /app` per host at startup, an outbound
   call to a configured host only (EB-5); an air-gapped deployment must
   allow it.

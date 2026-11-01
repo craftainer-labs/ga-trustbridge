@@ -2,9 +2,8 @@
 
 ## Status
 
-Proposed. For the user's API gate (G-api): this ADR defines a public API
-that third parties may implement. See "Decisions for the user (G-api)".
-Part of the set [0028](0028-trustbridge-architecture-and-instance-layout.md)
+Accepted (2026-11-01, with the G-api decisions recorded below). This ADR
+defines a public API that third parties may implement. Part of the set [0028](0028-trustbridge-architecture-and-instance-layout.md)
 (architecture; it owns the tables, leases and process roles this ADR
 relies on), this one, and
 [0030](0030-key-signer-and-github-hosts.md) (signer and hosts; it owns
@@ -28,7 +27,8 @@ the inputs:
   the durable `repository_id` / `repository_owner_id` claims instead (see
   "OIDC trust claims").
 - **Docker Hub**: an org access token (OAT) cannot mint OATs; Team allows
-  10 OATs per org; OIDC connections are UI-only and github.com-only.
+  10 OATs per org; OIDC connections are UI-only and github.com-only, so
+  the adapter does not use them (see the capability matrix and item 7).
 - **Argo CD** is pull-based: there is no CI credential. It is driven
   through the Kubernetes API of its cluster; its notifications reach the
   App as inbound webhooks with a per-tenant bearer header.
@@ -122,7 +122,7 @@ class WebhookCapability:
 class Capabilities:
     oidc: bool                         # can establish OIDC trust for CI on at least one host kind
     oidc_hosts: frozenset[HostKind]    # host kinds where trust can be established; empty when oidc is False, subset of github_hosts
-    oidc_requires_manual_step: bool    # trust cannot be created via API (Docker Hub)
+    oidc_requires_manual_step: bool    # trust cannot be created via API (no MVP adapter sets this)
     ci_credential: bool                # False: trustbridge provisions no CI credential (Argo CD pull-based; GHCR uses GITHUB_TOKEN)
     rotation: Literal["none", "single", "two_phase"]
     webhook: WebhookCapability | None
@@ -161,7 +161,7 @@ class ChangeState(StrEnum):
     CREATED = "created"
     UPDATED = "updated"
     DELETED = "deleted"
-    NEEDS_MANUAL_ACTION = "needs_manual_action"   # e.g. Docker Hub OIDC connection
+    NEEDS_MANUAL_ACTION = "needs_manual_action"   # e.g. an OIDC connection only creatable in a platform UI (unused by the MVP adapters)
 
 @dataclass(frozen=True, slots=True)
 class Change:
@@ -290,18 +290,37 @@ Decisions that shape the adapter contract:
   and `delivered=False`, plus the `IssuedSecret`; the core parks,
   persists and delivers (invariants A8, and 0028 invariants 21 and 23).
 - **OIDC first.** `ensure_credential` returns `OidcTrust` when
-  `capabilities().oidc` is true, the host's `kind` is in `oidc_hosts` and
-  `GitHubHost.oidc_id_claims` is true. Otherwise (including
+  `capabilities().oidc` is true, the host's `kind` is in `oidc_hosts`,
+  `GitHubHost.oidc_id_claims` is true and the scope is **eligible for
+  trust** (next bullet). Otherwise (including
   `oidc_id_claims=False`, where no `OidcTrust` and so no `claims` exist) it
   falls back to `IssuedSecret`. The core never calls `rotate_begin` for a
   scope whose current credential is an `OidcTrust`; `rotation` describes
   the `IssuedSecret` only. `NoCiCredential` means trustbridge provisions nothing for
   CI (Argo CD, GHCR). A `Change` with `NEEDS_MANUAL_ACTION` (and
-  `credential=None`) means the adapter cannot finish via API (Docker Hub's
-  OIDC connection): the core surfaces `manual_action` in the UI and as a
+  `credential=None`) means the adapter cannot finish via API (for example an
+  OIDC connection that only a platform's UI can create; no MVP adapter
+  uses this since Docker Hub always issues OATs, item 7): the core surfaces `manual_action` in the UI and as a
   check-run note, and re-runs the operation until the platform reports the
   trust. For trust, `current.delivered` is `True` (nothing secret to
   deliver); the core writes the outputs idempotently every time.
+- **OIDC trust only where the claims tell permissions apart (G-api item
+  12, option a).** The trust conditions are `repository_id` (or
+  `repository_owner_id` alone for an org-wide scope) plus an optional
+  environment, so scopes that differ only in `permission` would produce
+  identical claims and a trust could not tell them apart. A `pull` scope is
+  always eligible. A `push` or `admin` scope is eligible only when it is a
+  repository scope with an `environment` that is protected (the GitHub
+  environment has protection rules, as read by the core, which owns
+  environments) and that no scope of another permission in the same
+  repository uses; each such permission therefore has its own distinct
+  protected environment. An org-wide `push` or `admin` scope is never
+  eligible (it has no single repository whose environments could be
+  checked). An ineligible scope is served with an `IssuedSecret`. The core
+  decides eligibility, not the adapter, and re-evaluates it on every
+  reconcile: when a scope stops being eligible (an environment lost its
+  protection or became shared) the core switches it to an `IssuedSecret`
+  and revokes the trust, by the switching rule NG4 settles (open issue).
 - **OIDC trust claims.** `OidcTrust.claims` always carries
   `repository_owner_id` and, when `CredentialScope.repository_id` is not
   `None`, `repository_id`, both as strings (an org-wide scope has only
@@ -310,7 +329,7 @@ Decisions that shape the adapter contract:
   `repository` / `repository_owner` names are never used for trust. The
   adapter maps the claims to the platform's identity-mapping syntax (for
   JFrog, claims JSON on the mapping). What the claims can and cannot tell
-  apart (permissions) is G-api item 12.
+  apart (permissions) is the eligibility rule above.
 - **Two-phase rotation, resumable.** The core starts a rotation by
   committing an intent in which `current` is the next generation (new
   name, empty `ref`) and `previous` is the live slot. `rotate_begin`
@@ -344,6 +363,13 @@ Decisions that shape the adapter contract:
   authenticated. For `NONE` and `STATIC_HEADER` the payload is never acted
   on; it only triggers a re-read via the platform API. Static headers are
   compared in constant time.
+- **Missing privileged credential.** An adapter with
+  `needs_privileged_credential` whose tenant connection data holds no such
+  credential is not called for state-changing methods: the core ends the
+  operation with a non-retryable configuration error, shows it as a
+  condition in the UI and in the audit log, and a retry happens only after
+  the tenant supplies the credential. `health_check` reports `ok=False`
+  with the reason. Other adapters and other scopes are unaffected (A11).
 - **Errors.** Adapters raise `AdapterError(retryable: bool, message)`;
   retryable errors go back to the retry path of ADR 0028. Every adapter
   call is bounded by the core with a timeout shorter than the lease TTL
@@ -358,8 +384,8 @@ Decisions that shape the adapter contract:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | JFrog Artifactory | project, repos, OIDC identity mapping (`/access/api/v1/oidc`) | yes, all three kinds (Enterprise X/Enterprise+; GHES/GHE.com via `generic` provider with the host's issuer; mappings on `repository_owner_id` and, for repo scopes, `repository_id`, so GHES and GHE.com also need `oidc_id_claims`) | yes | `single` (applies to the fallback secret only; an `OidcTrust` has no secret to rotate) | `HMAC` or `STATIC_HEADER` depending on whether a webhook secret is set (JFrog is reported to sign with HMAC-SHA256 in `X-JFrog-Event-Auth`; not confirmed against current JFrog docs, NG5 fixtures settle it); trigger-only | all | admin access token |
 | Harbor / MSR 4 (2.11-2.13) | project, robot account, webhook policy | no (no upstream OIDC federation); `oidc_hosts` empty | yes, robot token | `two_phase` (two robots) | `STATIC_HEADER` (Harbor webhook auth header); trigger-only | all | system or project admin robot |
-| Docker Hub | repository, org access token | partial: OIDC connection is UI-only and github.com-only, so `NEEDS_MANUAL_ACTION`; `oidc_hosts = {github.com}` | yes, OAT (fallback); `credential_limit=10` | `two_phase` (watch the 10-OAT Team limit) | `NONE` (Docker Hub webhooks are unauthenticated); trigger-only | all (OAT path) | **org-owner PAT** (see G-api) |
-| Argo CD | repository Secret using GitHub App credentials, AppProject, Application/ApplicationSet | n/a; `oidc_hosts` empty | **no** (`NoCiCredential`, pull-based) | none | `STATIC_HEADER` bearer, per tenant, constant-time compare; trigger-only | all | Kubernetes ServiceAccount with narrow RBAC; **raw App private key** held in the repo Secret (see G-api) |
+| Docker Hub | repository, org access token | no: OIDC connections are UI-only and github.com-only, so the adapter never uses them; `oidc=False`, `oidc_hosts` empty, `oidc_requires_manual_step=False` | yes, OAT always (`IssuedSecret`); `credential_limit=10` | `two_phase` (watch the 10-OAT Team limit) | `NONE` (Docker Hub webhooks are unauthenticated); trigger-only | all | **tenant-supplied org-owner PAT** of a dedicated service user (item 7); `needs_privileged_credential=True` |
+| Argo CD | repository Secret using the read-only App's credentials, AppProject, Application/ApplicationSet | n/a; `oidc_hosts` empty | **no** (`NoCiCredential`, pull-based) | none | `STATIC_HEADER` bearer, per tenant, constant-time compare; trigger-only | all | Kubernetes ServiceAccount with narrow RBAC; the **separate read-only GitHub App's private key** (contents: read, metadata) in the repo Secret, never trustbridge's own key (item 6) |
 | GHCR | nothing | no (credential is `GITHUB_TOKEN`, no trust to establish); `oidc_hosts` empty | **no** (`NoCiCredential("CI uses GITHUB_TOKEN")`) | none | n/a (GitHub events) | all; registry host derived from `GitHubHost.registry_host` | none |
 
 `ci_credential` means trustbridge provisions a credential for CI; GHCR's
@@ -368,8 +394,9 @@ definition. Nexus stays out of the MVP.
 
 ## Invariants NG3 must implement and test
 
-Each is one testable sentence. Invariants A1-A11 concern the adapter
-contract (contract tests, NG5, run them against every adapter); the core
+Each is one testable sentence. Invariants A1-A11 and A14 concern the adapter
+contract (contract tests, NG5, run them against every adapter), A12 and
+A13 the core (NG3 and NG4); the core
 side is in ADR 0028 ("Invariants NG3 must implement and test", numbers
 cited as "0028 invariant n").
 
@@ -394,8 +421,8 @@ cited as "0028 invariant n").
   `repository_id` exactly when the scope's `repository_id` is not `None`,
   and `environment` exactly when the scope has one, and nothing else (never
   `sub` or the name claims),
-  and the core offers trust only when the capability, the host kind and
-  `oidc_id_claims` all allow it.
+  and the core offers trust only when the capability, the host kind,
+  `oidc_id_claims` and the scope's eligibility (A12) all allow it.
 - **A7.** `Capabilities.oidc_hosts` is empty when `oidc` is false and is a
   subset of `github_hosts`, and the core checks the host kind before any
   call to the adapter.
@@ -412,94 +439,75 @@ cited as "0028 invariant n").
   deleted.
 - **A11.** One scope parked at `NEEDS_MANUAL_ACTION` does not block
   operations on other scopes of the tenant.
+- **A12.** (Core.) A `pull` scope is eligible for trust, a `push` or
+  `admin` scope only if it is a repository scope whose `environment` is
+  protected and used by no scope of another permission in that repository,
+  and an org-wide `push` or `admin` scope never is; an ineligible scope
+  gets an `IssuedSecret` and no `OidcTrust`, and a scope that loses
+  eligibility is switched to an `IssuedSecret` at the next reconcile.
+- **A13.** (Core.) For an adapter with `needs_privileged_credential`
+  and no such credential in the tenant's connection data, no state-changing
+  adapter method is called, the operation ends in a non-retryable
+  configuration error visible as a condition, no `NEEDS_MANUAL_ACTION` is
+  produced, and other scopes and adapters of the tenant are unaffected.
+- **A14.** The Argo CD repository Secret holds the credentials of the
+  tenant's read-only App from the tenant's connection data (its private
+  key with its App id and installation id) and no key of trustbridge's own
+  App, and no code path reads a signer or hands any key of trustbridge's
+  own App to an adapter.
 
-## Decisions for the user (G-api)
+## Decisions (G-api, 2026-11-01)
+
+Items 1-5 and 8-11 are approved as proposed; items 6, 7 and 12 are decided
+as below.
 
 1. **The interface itself** (entry-point group, protocol, dataclasses,
-   `ChangeState`, two-phase rotation, `API_VERSION`) as a public API.
-   Lean: approve as written; additive changes later do not need a gate,
-   breaking ones bump `API_VERSION`.
-2. **Stateless adapters with prior state in, new state out**
-   (`ResourceState`, `CredentialState`, `CredentialOutcome`). Trade-off:
-   every method has an extra argument and a richer return type, in
-   exchange for adapters that need no storage of their own and a core
-   that can resume anywhere. Alternative: adapters keep their own state
-   (rejected: unserialisable across workers). Lean: as written.
-3. **Write-ahead operations, lease and parked values for every
-   secret-bearing call** (replaces the earlier "delete and reissue when
-   delivery is unrecorded" rule, which raced between workers and could
-   burn Docker Hub's 10-OAT cap). Trade-off: a `credential_operations`
-   table, a lease and an operation value store in the secret-store
-   backend, against orphans and double issuance. Alternative: leave
-   orphans to the customer. Lean: as written.
-4. **Resumable two-phase rotation** (`rotate_begin`/`rotate_finish` by
-   state; the core sets `retire_after` after delivery). Lean: as written.
-5. **OIDC trust on `repository_owner_id` (and `repository_id` for repo scopes)**, not the
-   name claims NR5 named. Trade-off: durable across rename and transfer,
-   but GHES and GHE.com availability of the two claims is unconfirmed, so
-   `oidc_id_claims` defaults to false there and NG4 settles it; JFrog
-   accepting them in a mapping is confirmed by NG5 fixtures. Lean: as
-   written.
-6. **Argo CD repository credential needs a raw GitHub App private key.**
-   Argo CD's repo-creds with GitHub App auth stores the App's private
-   key in a cluster Secret that Argo CD itself reads.
-   - A: reuse trustbridge's own App key. Feasible only with the dev
-     `file` signer: with a non-exportable signer (Vault Transit, KMS,
-     import-and-delete, ADR 0030) there is no key to place in Argo CD's
-     Secret, and it would violate EB-9. Even then the Secret holds the
-     key that can mint tokens for every tenant's installation, so
-     compromise of Argo CD's namespace is compromise of trustbridge.
-     Not a real option for production; B or C remain.
-   - B: a **separate, read-only GitHub App** (contents: read, metadata)
-     registered per tenant or per host, whose key is the only one given
-     to Argo CD. Cost: another App to register (the manifest flow
-     automates it) and to rotate.
-   - C: skip repo-creds with an App key; use a deploy key or a
-     per-repo fine-grained token. Cost: long-lived credential per
-     repository, against EB-9.
-   - Lean: B (NR5's suggestion). Least privilege, blast radius is
-     read-only on that tenant.
-7. **Docker Hub needs a long-lived org-owner PAT.** An OAT cannot mint
-   OATs, so the adapter holds a PAT of an org owner to create and rotate
-   OATs.
-   - A: accept the PAT, stored via the signer/secret store, scoped to a
-     dedicated service user that is an org owner, rotated by the
-     customer; the adapter declares `needs_privileged_credential` and
-     the UI shows it. Cost: a long-lived credential with owner rights
-     (an exception to EB-9, because no federation exists).
-   - B: do not mint OATs: the customer creates the OAT and the OIDC
-     connection by hand (`NEEDS_MANUAL_ACTION`), trustbridge only
-     stores/rotates nothing. Cost: manual work, no rotation.
-   - C: drop Docker Hub from the MVP.
-   - Lean: A, opt-in per tenant and off by default, with B as the
-     default path; A is enabled only when the tenant supplies the PAT.
-8. **Capability additions**: `oidc_hosts` (per-kind OIDC support, needed
-   for Docker Hub) and `credential_limit`; `GitHubHost.kind` and
-   `oidc_id_claims`. Lean: as written.
-9. **Tenant identity** (proposal, shared with ADR 0028): surrogate
-   tenant id mapping to `(host, installation_id)`.
-10. **JFrog webhook authentication** is unconfirmed against current JFrog
-    docs (HMAC vs static header); settled by NG5 fixtures, no decision
-    needed unless it changes the capability model.
-11. The **MVP set** is JFrog, Harbor/MSR, Docker Hub, Argo CD, GHCR
-    (Nexus out). Lean: approve.
-12. **Open design question: what OIDC trust can enforce for different
-    permissions.** The trust conditions are `repository_id` (or
-    `repository_owner_id` alone for an org-wide scope) plus an optional
-    environment. Two scopes that differ only in `permission` (`pull`
-    versus `push` or `admin`) therefore produce identical claims, so a
-    trust cannot tell them apart, and any workflow in the repository (or
-    org) that can obtain a token gets the broadest permission granted to
-    that claim set. Options: (a) offer OIDC only where the claims
-    distinguish the scopes: `push` and `admin` require a distinct
-    protected `environment` per permission, otherwise the scope falls back
-    to an `IssuedSecret`; (b) add `ref` or `job_workflow_ref` conditions
-    per permission (needs `OidcTrust.claims` to carry them and the
-    platform to accept them; a rename of a workflow file breaks trust);
-    (c) one trust per repository at the highest permission requested,
-    documented as such. Lean: (a). It keeps the durable-id rule, makes
-    privilege explicit, and costs a secret credential only where no
-    environment is configured.
+   `ChangeState`, two-phase rotation, `API_VERSION`) as a public API:
+   approved. Additive changes need no gate; breaking ones bump
+   `API_VERSION`.
+2. **Stateless adapters, prior state in, new state out**: approved.
+3. **Write-ahead operations, lease and parked values**: approved.
+4. **Resumable two-phase rotation**: approved.
+5. **OIDC trust on `repository_owner_id` and `repository_id`**, not the
+   name claims: approved.
+6. **Argo CD: option B.** A separate read-only GitHub App (contents: read,
+   metadata), registered through the manifest flow (ADR 0030), whose key is
+   the only one given to Argo CD. Option A (reuse trustbridge's key) is
+   **removed**, including as a dev path, as noise (see ADR 0030 item 7);
+   option C (deploy key or fine-grained token) stays rejected under EB-9.
+   Judgement call: the App is registered **per tenant**, owned by the
+   tenant's org, so that a key that leaks from the cluster Secret can read
+   only that tenant's repositories. Invariant A14.
+7. **Docker Hub: option A, always.** The adapter requires a tenant-supplied
+   org-owner PAT of a dedicated service user, stored through the
+   signer/secret store and rotated by the customer. It declares
+   `needs_privileged_credential` and the UI shows it. There is **no**
+   `NEEDS_MANUAL_ACTION` default path: a tenant without the PAT gets a
+   clear configuration error and condition (A13). **Accepted exception to
+   EB-9**, with its reason: Docker Hub offers no federation for minting
+   OATs (an OAT cannot mint OATs, and OIDC connections are UI-only and
+   github.com-only), so a long-lived owner credential is the only way to
+   automate issuing. Judgement call: because the OIDC connection is
+   manual-only, the adapter does not declare OIDC at all (`oidc=False`) and
+   always issues OATs; the earlier `oidc_hosts = {github.com}` partial
+   support is dropped. `NEEDS_MANUAL_ACTION` stays in the interface, but no
+   MVP adapter uses it.
+8. **Capability additions** (`oidc_hosts`, `credential_limit`,
+   `GitHubHost.kind`, `oidc_id_claims`): approved.
+9. **Tenant identity**: approved (shared with ADR 0028).
+10. **JFrog webhook authentication**: settled by NG5 fixtures.
+11. **MVP set**: JFrog, Harbor/MSR, Docker Hub, Argo CD, GHCR; Nexus out.
+12. **OIDC permissions: option (a).** `push` and `admin` use OIDC only when
+    each permission has a distinct protected `environment`; otherwise that
+    scope falls back to an `IssuedSecret`. Judgement calls: "protected" means
+    the GitHub environment has protection rules; an org-wide `push` or
+    `admin` scope never uses OIDC; the core, not the adapter, decides and
+    re-evaluates eligibility (invariant A12). Options (b) and (c) are not
+    adopted.
+
+Status is Accepted as of this decision although `docs/adrs/README.md` says
+an ADR becomes Accepted when its implementation merges; the user asked
+for Accepted now.
 
 ## Open issues
 
@@ -510,7 +518,9 @@ cited as "0028 invariant n").
   `ADAPTERS_ENABLED` are defined there.
 - Whether the core, a contract invariant or the adapter enforces "no
   `rotate_begin` for an `OidcTrust` scope", and the rotation behaviour when
-  a scope switches between `OidcTrust` and `IssuedSecret`, is settled by NG4.- The `api_version` compatibility rule (equality or a range, and how a
+  a scope switches between `OidcTrust` and `IssuedSecret`, is settled by NG4
+  (it also covers a scope that loses eligibility, A12).
+- The `api_version` compatibility rule (equality or a range, and how a
   single integer expresses it) is settled by NG4.
 - The value store backend (Kubernetes Secret, Vault KV) and its interface
   are named here but specified in NG3; any backend must support create,
@@ -523,6 +533,32 @@ cited as "0028 invariant n").
 - Platform name length limits (Harbor robot names, OAT labels) may force
   an adapter to shorten `name`; invariant A4 bounds how. NG5 contract
   tests check this.
+- Trusts for different permissions on one repository can both match a
+  workflow that runs in a protected environment (the `pull` trust has no
+  environment condition). Which credential such a workflow receives
+  depends on how the platform selects among identity mappings (for
+  example by name or audience); each adapter's contract fixtures (NG5)
+  must show that selection, or the adapter must give each permission a
+  distinct audience or mapping name.
+- A Docker Hub tenant is capped at 10 OATs in total. Every scope needs one
+  and a rotation needs a second briefly (the core serialises rotations
+  adapter-wide), so a tenant can rotate with up to 9 scopes; with 10
+  scopes rotation is refused, and a rotation that would pass the limit is
+  refused with a visible
+  condition while the old credential stays valid (the core's
+  `credential_limit` rule); the Docker Hub documentation states this.
+- Eligibility (A12) is re-evaluated at each reconcile, so a trust stays
+  in force until the next reconcile after an environment loses its
+  protection or becomes shared; the exposure window is the reconcile
+  interval, and NG4 narrows it by re-evaluating on any GitHub event about
+  environment changes that its fixtures show exists.
+- How the core reads an environment's protection rules (required
+  reviewers, deployment branch policy) for A12, and which of them count as
+  "protected", is settled by NG4.
+- How the read-only Argo CD App's key and the Docker Hub PAT reach the
+  adapter (the tenant's connection data in the secret store, and the
+  manifest-flow callback that writes the key there) is settled by NG4 and
+  NG5 with `AdapterConfig`.
 - JFrog accepting `repository_id` / `repository_owner_id` as mapping
   claims, and GHES/GHE.com tokens carrying them, are unconfirmed (NG5 and
   NG4).
@@ -541,7 +577,14 @@ cited as "0028 invariant n").
   Harbor fixtures cover 2.13. They include the replay tests of invariants
   A2 and A3.
 - Adapters that hold privileged credentials are visibly flagged
-  (`needs_privileged_credential`), feeding the audit log.
+  (`needs_privileged_credential`), feeding the audit log. Docker Hub is the
+  one MVP adapter that needs a customer-supplied owner PAT: an accepted EB-9
+  exception, and a Docker Hub tenant cannot be used without it.
+- Argo CD costs the tenant a second, read-only App, which the manifest flow
+  automates and which has its own key to rotate.
+- Push and admin credentials fall back to secrets wherever a repository has
+  no distinct protected environment per permission; OIDC for them is an
+  opt-in through that configuration.
 
 ## Sources
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. Builds on [0013](0013-valkey-over-redis-licensing.md) (Valkey
+Accepted (2026-11-01, with the G-api decisions recorded below). Builds on [0013](0013-valkey-over-redis-licensing.md) (Valkey
 server, redis-py client), [0026](0026-resource-server-metadata-and-bff.md)
 (resource-server validation, which the admin UI's BFF relies on) and
 [0027](0027-product-analytics-with-track.md); all three are inherited from
@@ -113,12 +113,25 @@ cannot be passed later. FastAPI hands that lifespan to its router
 (`fastapi/applications.py:990`) and Starlette's `Router.lifespan` enters
 `self.lifespan_context` at server start (`starlette/routing.py:639-648`,
 installed version). **Decision:** `trustbridge.main` replaces
-`app.router.lifespan_context` with a wrapper that runs trustbridge's
-startup checks (ADR 0030) and registers its readiness check, enters the
-template's own lifespan inside it, and releases trustbridge's resources
-after the template has shut down. No template file is edited. The worker,
-reconciler and migrate commands do not use FastAPI; they call the same
-startup checks from their own `main()`.
+`app.router.lifespan_context` with a wrapper that validates trustbridge's
+settings, runs the per-host startup checks (ADR 0030) and registers the
+per-host availability registry, enters the template's own lifespan inside
+it, and releases trustbridge's resources after the template has shut down.
+No template file is edited. The worker, reconciler and migrate commands do
+not use FastAPI; they call the same startup code from their own `main()`.
+
+**Failure policy (G-api, ADR 0030 item 5).** Only invalid settings stop a
+process: the wrapper raises, so the lifespan never yields. A failed
+per-host check (signer, GitHub, issuer) never raises; it marks that host
+`unavailable` and the wrapper still yields, so the api keeps accepting
+webhooks (ingress needs no signer) and serves every other host. A host
+with no App yet is `unregistered`. The wrapper starts a recheck task that
+re-runs the failed checks every `HOST_RECHECK_SECONDS` and cancels it on
+shutdown. The worker and reconciler commands start the same recheck loop
+from their own `main()`; each process holds its own host state in memory
+(there is no shared source of truth), so a worker leaves `unavailable`
+host deliveries alone until its own recheck passes. The signer is not part of the api's readiness (ADR 0030,
+"Startup checks and readiness").
 
 Consequence: `lifespan_context` is an attribute of Starlette's router, not
 a documented extension point, so a sync that changes the template's
@@ -255,13 +268,19 @@ Table names are the contract between this ADR, 0029 and the later ADRs
    the payload is parsed (GitHub documents: HTTPS, secret, signature
    validation, a 2xx within 10 s, process asynchronously,
    `X-GitHub-Delivery` for replay detection, redelivery after downtime).
-   **Decision: a transactional outbox.** The handler bounds the body size,
+   **Decision: a transactional outbox.** The handler first applies the
+   abuse limiter (next subsection), then bounds the body size,
    verifies `X-Hub-Signature-256` in constant time, then stores the
    delivery id, host, event, allow-listed headers and the body in
    `webhook_deliveries` in one transaction and only then answers 2xx.
-   Valkey is never on the request path. A repeated delivery id returns 2xx
-   without a second row. No GitHub or adapter call happens on the request
-   path.
+   Valkey is never required on the request path: the limiter is the only
+   code that touches it there, and it fails open. A repeated delivery id
+   returns 2xx without a second row. No GitHub or adapter call happens on
+   the request path. A host with no App yet (`unregistered`, ADR 0030) has
+   no webhook secret to verify with, so its route answers 503 without
+   reading the body. (Such a host has no App, so GitHub sends it nothing;
+   the 503 only answers a misrouted request and there is nothing to
+   redeliver.)
 2. **Relay.** A relay task (in the reconciler, plus one best-effort call
    from the ingress after the response) adds the **delivery id only** to
    the Valkey stream `tb:events`. It may add an id twice; processing is
@@ -276,6 +295,12 @@ Table names are the contract between this ADR, 0029 and the later ADRs
    `tb:events:dead` as `{delivery_id, error}`. The dead-letter carries no
    body: the admin API reads it from the row, and "requeue" makes the row
    deliverable again. Handlers are idempotent (reconcile-style, ADR 0029).
+   A delivery whose host is not `ready` (ADR 0030) is not handled: the
+   worker acknowledges the stream entry without claiming it for handling,
+   so the stream's delivery count (invariant 4) is not consumed, and the
+   row stays unprocessed in the outbox, uncounted as a failure. The
+   re-relay sweep (item 2) re-adds it when the host is `ready` again.
+   Other hosts' deliveries are unaffected.
    Leader election is not needed for workers (the consumer group
    partitions work, the lease serialises scopes).
 4. **Delivery reconciler**: GitHub never redelivers on its own. A periodic
@@ -289,8 +314,8 @@ Table names are the contract between this ADR, 0029 and the later ADRs
    remains long enough to deduplicate a late redelivery. The stream holds
    ids only and is trimmed only below what the group has acknowledged;
    the dead-letter stream is trimmed by age. Postgres, not the stream, is
-   the source of truth. The settings and their proposed defaults are in
-   G-api item 9.
+   the source of truth. The settings and their defaults are in the
+   decision record, item 9.
 6. **Installation tokens**: minted with the signer-backed App JWT
    (ADR 0030), cached in process until about 5 minutes before the
    1-hour expiry, and **down-scoped** per repository and permission set
@@ -298,6 +323,78 @@ Table names are the contract between this ADR, 0029 and the later ADRs
    need the PEM and are not used: trustbridge assembles the JWT through
    the signer, calls `POST /app/installations/{id}/access_tokens` itself
    and hands githubkit only a token auth strategy.
+
+### Abuse limits on the webhook route
+
+The route is unauthenticated until the signature check, and the ingress
+buffers up to `WEBHOOK_MAX_BODY_BYTES` before it can verify. **Decision
+(G-api item 10, option b): an application limiter in the api, not the
+ingress controller.** It limits per source address, keeps its counters in
+Valkey so that all api replicas share them, and **fails open**.
+
+- **Placement.** The limiter is the first step of the webhook route
+  (a dependency or a route-scoped middleware, not an app-wide one). It runs
+  before the `Content-Length` check, before any body byte is read or
+  buffered and before the signature check, so a request with a bad
+  signature counts against its source address. A request over the limit
+  gets 429 with `Retry-After` (the whole seconds left in the current
+  window, at least 1) and its body is never read. GitHub treats
+  that as a failed delivery, and the delivery reconciler (item 4)
+  redelivers it once its host is `ready`, because listing and
+  redelivering need the host's App JWT.
+- **Algorithm.** A fixed-window counter: `INCR` on the key
+  `tb:rl:webhooks:<address>:<window index>` and `EXPIRE` of twice the
+  window on first increment, done atomically (one script or a
+  transactional pipeline, NG3's choice). Over `WEBHOOK_RATE_LIMIT_REQUESTS`
+  within `WEBHOOK_RATE_LIMIT_WINDOW_SECONDS` is a rejection. The key is the
+  address alone, shared by all `/webhooks/github/{host}` routes. An IPv6
+  address is reduced to its /64 prefix before keying.
+- **Fail open.** The whole limiter check (connect, if needed, plus the one
+  atomic command) is bounded by a single budget,
+  `WEBHOOK_RATE_LIMIT_TIMEOUT_MS`, not per call. A connection error, a timeout or any
+  other Valkey error lets the request through to normal handling and
+  increments a metric and a rate-limited log line. Ingest therefore
+  survives a Valkey outage through the outbox. Accepted consequence: while
+  Valkey is down there is no abuse limit, and the body cap and signature
+  check are the only bound.
+- **Source address behind a proxy.** The limiter reads only
+  `request.client.host`, the ASGI client address, and never parses
+  `X-Forwarded-For` itself. `trustbridge.main` installs uvicorn's
+  `ProxyHeadersMiddleware` (`uvicorn.middleware.proxy_headers`) with
+  `trusted_hosts=TRUSTED_PROXIES`, so that field holds the client address.
+  As uvicorn documents, the middleware only honours the headers when the
+  directly connected peer is in the trusted list (IP addresses, networks or
+  literals; its default without configuration is loopback only, and
+  `--forwarded-allow-ips` / `FORWARDED_ALLOW_IPS` is the same list when the
+  server flag is used). With a list, it combines repeated
+  `X-Forwarded-For` fields in order and takes the right-most entry that is
+  not itself trusted. With the literal `*` it trusts everything and takes
+  the left-most entry, which the client can forge; trustbridge therefore
+  refuses `TRUSTED_PROXIES=*` in production and the deployment must not set
+  `--forwarded-allow-ips='*'`. `TRUSTED_PROXIES` has no default in
+  production: leaving it unset is refused, and an explicitly empty list
+  means "no proxy: use the socket peer". The entrypoint command disables
+  uvicorn's own proxy handling (`--no-proxy-headers`), so
+  `TRUSTED_PROXIES` is the only trusted list and `FORWARDED_ALLOW_IPS` has
+  no effect. A deployment behind an ingress must list the ingress; an
+  empty list behind one would make every client share the ingress's
+  address and bucket. When
+  `request.client` is `None` (a Unix socket), the key is the fixed value
+  `unknown`.
+- **Settings (proposed defaults).** `WEBHOOK_RATE_LIMIT_ENABLED=true`,
+  `WEBHOOK_RATE_LIMIT_REQUESTS=300`, `WEBHOOK_RATE_LIMIT_WINDOW_SECONDS=60`,
+  `WEBHOOK_RATE_LIMIT_TIMEOUT_MS=50`,
+  `WEBHOOK_RATE_LIMIT_EXEMPT_CIDRS=[]` (addresses that bypass the limiter,
+  for example GitHub's hook ranges from `GET /meta`, or a single GHES
+  server address that delivers every tenant's events), `TRUSTED_PROXIES`
+  (no default in production). The 300-per-minute default is deliberately
+  far above one GitHub host's normal rate, so a GHES server that sends all
+  its tenants' events from one address is not throttled in normal
+  operation; operators with a busier host raise it or exempt it.
+- **Owner.** NG3 builds and tests the limiter with the webhook route, in
+  `src/trustbridge/webhooks/`. The rate limits NG6 lists are those of the
+  versioned admin API (EB-11, `Retry-After`); NG6 may reuse the limiter
+  component but owns only the API-side policy.
 
 ### Tenancy
 
@@ -352,10 +449,12 @@ are in ADR 0030.
 2. A request whose `Content-Length` exceeds `WEBHOOK_MAX_BODY_BYTES` is
    rejected with 413 before its body is read, a streamed body that passes
    the cap is aborted, and the signature is verified in constant time
-   before the JSON is parsed or anything is stored.
+   before the JSON is parsed or anything is stored. The limiter
+   (invariants 25-28) runs before all of these.
 3. A delivery's failure counter increases only when a handler fails;
-   claiming an entry, a duplicate from the relay, a re-relay and a busy
-   lease never increase it.
+   claiming an entry, a duplicate from the relay, a re-relay, a busy
+   lease and a delivery waiting for a host that is not `ready` never
+   increase it.
 4. A delivery whose handling ends the worker process without recording a
    failure reaches the dead letter after `MAX_DELIVERY_ATTEMPTS`
    deliveries of the same stream entry (counted from the stream's delivery
@@ -439,56 +538,79 @@ are in ADR 0030.
 24. A platform-side credential name contains the full tenant id, and an
     adapter that shortens a name shortens only the scope part.
 
-## Decisions for the user (G-api)
+**Abuse limits**
 
-Proposals made in this ADR that the user should weigh. Each lean is
-labeled as a lean; the defaults named below are proposals too.
+25. A webhook request whose source address is over
+    `WEBHOOK_RATE_LIMIT_REQUESTS` in the current
+    `WEBHOOK_RATE_LIMIT_WINDOW_SECONDS` gets 429 with `Retry-After` set to
+    the seconds left in that window (at least 1) without any of its body being read, requests with an invalid signature
+    count toward the limit, and an address in
+    `WEBHOOK_RATE_LIMIT_EXEMPT_CIDRS` is never limited.
+26. The limiter keys on `request.client.host` only and never parses
+    `X-Forwarded-For` itself: behind `ProxyHeadersMiddleware` with
+    `TRUSTED_PROXIES`, a header sent by a peer outside the list does not
+    change the key, with a trusted chain the right-most untrusted entry is
+    the key, an IPv6 address is keyed by its /64, a missing client keys as
+    `unknown`, and production startup refuses `TRUSTED_PROXIES=*` or an
+    unset `TRUSTED_PROXIES`.
+27. Two api instances using one Valkey share each address's count.
+28. When Valkey errors or exceeds `WEBHOOK_RATE_LIMIT_TIMEOUT_MS`, the
+    limiter lets the request through to normal handling (a valid delivery
+    still gets its 2xx after the commit), emits its metric, and adds at
+    most that timeout in total to the request.
 
-1. **Ingest as a transactional outbox** (body and headers stored in
-   `webhook_deliveries` in the 2xx transaction; a relay adds only the
-   delivery id to the stream; worker and dead-letter read from Postgres).
-   Replaces the earlier `enqueued_at` column. Trade-off: payload bodies
-   live in Postgres for a retention window (EB-15) and there is a relay
-   task, in exchange for no lost events when Valkey is down or loses data.
-   Alternative: `enqueued_at` with the body in the stream (rejected: the
-   stream is then the only copy). Lean: outbox.
-2. **Tenant identity**: a surrogate tenant UUID mapping to
-   `(host, installation_id)`, because installation IDs are unique only
-   per GitHub host. Lean: as written.
-3. **Per-host webhook route** `/webhooks/github/{host}` so the right
-   webhook secret is chosen before parsing. Alternative: try every
-   configured secret on a single route. Lean: per-host route.
-4. **Serialisation by a lease row with fencing** rather than Postgres
-   advisory locks. Trade-off: one more table and fenced writes, in exchange
-   for working behind PgBouncer transaction mode and across long platform
-   calls. Lean: lease row.
+**Host availability** (the model is in ADR 0030)
+
+29. A webhook for a host that is `unregistered` gets 503 with its body
+    unread, and a webhook for a host that is `unavailable` (not
+    `unregistered`) is verified, stored and answered 2xx like any other
+    (0030 invariants 7-11).
+
+## Decisions (G-api, 2026-11-01)
+
+Outcomes of the user's API gate. Items 1-9 are approved as proposed; item
+10 was decided differently from the lean.
+
+1. **Ingest as a transactional outbox**: approved as written.
+2. **Tenant identity**, a surrogate tenant UUID for `(host,
+   installation_id)`: approved.
+3. **Per-host webhook route** `/webhooks/github/{host}`: approved.
+4. **Serialisation by a lease row with fencing**: approved.
 5. **Write-ahead credential operations with resumable rotation**
-   (contract in ADR 0029). Lean: as written.
-6. **A dedicated migrate job and no startup migration in production**,
-   with an owner role for the Job and a non-owner application role for
-   runtime, and a schema gate. Trade-off: one more deployable step, in
-   exchange for no migration races between replicas, workers and
-   reconcilers and a runtime role without DDL. Lean: as written.
-7. **Wrapping the template's lifespan by assigning
-   `app.router.lifespan_context`** from `trustbridge.main`, guarded by a
-   smoke test. Alternatives: a template hook (NX-style change, declined
-   for now); running the checks only in the worker/reconciler (rejected:
-   the api mints tokens). Lean: as written. How the wrapper treats a host
-   with no App yet or an unavailable host is a separate question, ADR 0030
-   item 5.
-8. **Settings hygiene**: no unfiltered dotenv source; dangerous settings
-   have no default; near-miss variable names fail startup. Lean: as
-   written.
-9. **Retention and tuning defaults**, all settings: body retention 7 days
-   after processing and 30 days after dead-lettering, delivery id 30 days,
-   lease TTL 120 s, adapter call timeout 30 s, relay recheck 15 min,
-   schema wait 300 s, `MAX_DELIVERY_ATTEMPTS` and the retry backoff bounds
-   set by NG3. Lean: approve as starting points.
-10. **Abuse limits on the unauthenticated webhook route.** The ingress
-    buffers up to the body cap before the signature can be checked.
-    Options: (a) rate limiting per source address at the ingress
-    controller, set in the Helm chart (NG7); (b) an application limiter;
-    (c) neither, documented. Lean: (a).
+   (contract in ADR 0029): approved.
+6. **Dedicated migrate job, no startup migration in production, owner and
+   application roles, schema gate**: approved.
+7. **Wrapping the template's lifespan** through
+   `app.router.lifespan_context`, guarded by the smoke test: approved. The
+   wrapper's failure policy is the per-host availability model decided in
+   ADR 0030 item 5: only invalid settings stop a process (see "Lifespan").
+8. **Settings hygiene**: approved.
+9. **Retention and tuning defaults**: approved as starting points, all
+   settings: body retention 7 days after processing and 30 days after
+   dead-lettering, delivery id retention 30 days, lease TTL 120 s, adapter
+   call timeout 30 s, relay recheck 15 min, schema wait 300 s
+   (`SCHEMA_WAIT_SECONDS`), host recheck 60 s (`HOST_RECHECK_SECONDS`, new
+   with the availability model), `MAX_DELIVERY_ATTEMPTS` and the retry
+   backoff bounds set by NG3.
+10. **Abuse limits: option (b), an application limiter**, not the ingress
+    controller (the lean was (a)). Per source address, Valkey-backed and
+    shared across replicas, fail open. Specified in "Abuse limits on the
+    webhook route", with invariants 25-28 and the settings there as
+    proposed defaults. NG3 owns it; NG6 owns only the admin API's own
+    limits.
+
+Judgement calls made while recording these (not user decisions; revisit if
+wrong):
+
+- The limiter uses a fixed window, a 300-per-60-s default, a /64 key for
+  IPv6, a 50 ms Valkey timeout and an exempt-CIDR list, all proposals.
+- Trusted proxies are configured once, as `TRUSTED_PROXIES`, applied
+  through uvicorn's `ProxyHeadersMiddleware`; `*` and an unset value are
+  refused in production.
+- A request that fails the signature check still counts toward the limit.
+- Status is Accepted as of this decision although `docs/adrs/README.md`
+  says an ADR becomes Accepted when its implementation merges; the user
+  asked for Accepted now.
 
 ## Open issues
 
@@ -505,6 +627,25 @@ labeled as a lean; the defaults named below are proposals too.
   this ADR and was not re-fetched in this pass; NG3 confirms it.
 - `lifespan_context` is not a documented Starlette extension point; the
   smoke test (invariant 20) is the guard.
+- The limiter's defaults (300 requests per 60 s per address) are untested
+  against real GitHub and GHES delivery rates; NG3 confirms them, and GitHub's
+  published hook ranges (`GET /meta`) are available for the exempt list.
+- While Valkey is down the limiter does nothing and each request can still
+  buffer up to `WEBHOOK_MAX_BODY_BYTES` before the signature check. A
+  per-process fallback limiter (an in-memory token bucket) would bound
+  that; it was not part of the decision (fail open) and is NG3's to
+  propose.
+- Fixed windows allow up to twice the limit across a window boundary;
+  accepted for an abuse limit, not a quota.
+- Behind a proxy that does not set `X-Forwarded-For`, all clients share the
+  proxy's address and the limiter throttles them together; the deployment
+  must configure the proxy, which the Helm chart (NG7) documents.
+- Where a webhook secret is read from (the secret store) is outside the
+  limiter; see 0030 invariant 11 for a secret-store outage.
+- Host state is held per process (api replica, worker, reconciler); the
+  admin API shows the answering replica's view. A shared source of truth
+  (for example a table) would remove the disagreement and is NG3's to
+  propose if the views diverge in practice.
 
 ## Consequences
 
