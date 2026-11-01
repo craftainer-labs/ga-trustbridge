@@ -8,7 +8,7 @@ is a separate package under `adapters/<name>/` (NG5) that registers itself in th
 - `interface.py` — the public API: dataclasses, `ChangeState`, `CredentialState`/`CredentialSlot`,
   `CredentialOutcome`, `PlatformAdapter`, `AdapterError`, `AdapterConfig`, `API_VERSION`, and the
   naming helpers (`scope_key`, `credential_name`, `resource_name`). Additive changes only;
-  a breaking change bumps `API_VERSION`. `CredentialScope.oidc_eligible` is an additive field: the
+  a breaking change bumps `API_VERSION`. `CredentialScope.platform_repository_key` (the `RepoSpec.key` a credential is limited to; `None` keeps the project-wide grant narrowed by claims) and `CredentialScope.oidc_eligible` are additive fields: the
   core sets it, and an adapter returns an `OidcTrust` exactly when it is true.
 - `loader.py` — entry-point discovery (`ADAPTERS_ENABLED` only), the `api_version` range
   (`MIN_SUPPORTED_API_VERSION..API_VERSION`) and capability validation (A7).

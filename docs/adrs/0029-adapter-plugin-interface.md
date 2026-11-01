@@ -103,6 +103,12 @@ class CredentialScope:
     environment: str | None
     permission: Literal["pull", "push", "admin"]
     key: str                           # scope_key, computed by the core: hex sha256 prefix of (repository_id|"org", environment|"", permission)
+    oidc_eligible: bool = False        # additive: the core allows OIDC trust for this scope
+    platform_repository_key: str | None = None  # additive: RepoSpec.key the credential is limited to
+
+# platform_repository_key (user decision, 2026-11-01, NG34): with it set an adapter grants the
+# credential per platform repository (least privilege, ASVS V8); None keeps the project- or
+# tenant-wide grant narrowed by claims. It is not part of `key`.
 
 # ---- capabilities ------------------------------------------------------
 class WebhookAuth(StrEnum):

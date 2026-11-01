@@ -144,6 +144,15 @@ def _scope(*, eligible: bool) -> tuple[CredentialScope, CredentialState]:
     return replace(scope, oidc_eligible=eligible), CredentialState(current=slot)
 
 
+def test_platform_repository_key_is_additive_and_not_part_of_the_scope_key() -> None:
+    """The I2 credential-scope field defaults to None and does not change `key`."""
+    scope, _state = _scope(eligible=False)
+    assert scope.platform_repository_key is None
+    narrowed = replace(scope, platform_repository_key="web")
+    assert narrowed.platform_repository_key == "web"
+    assert narrowed.key == scope.key
+
+
 async def test_fake_secret_issuance_is_idempotent_by_name() -> None:
     """A2 and A3: a repeat with the same prior replaces the value under the same name."""
     platform = FakePlatform()
