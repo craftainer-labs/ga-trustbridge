@@ -1,5 +1,6 @@
 """Settings hygiene and startup refusals (0028 invariants 17, 19, 26; 0030 invariants 3 and 11)."""
 
+import json
 import logging
 from typing import Any
 
@@ -12,6 +13,8 @@ from trustbridge.settings import (
     SettingsError,
     TrustbridgeSettings,
     check_environment,
+    get_trustbridge_settings,
+    load_trustbridge_settings,
     log_effective_settings,
 )
 
@@ -260,3 +263,20 @@ def test_hosts_given_as_parsed_instances_are_kept() -> None:
 def test_host_recheck_default_is_the_host_module_constant() -> None:
     """Host recheck default is the host module constant."""
     assert make_settings().host_recheck_seconds == DEFAULT_HOST_RECHECK_SECONDS
+
+
+def test_settings_load_from_the_environment_and_are_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`load_trustbridge_settings` validates the environment; the getter caches the result."""
+    monkeypatch.setenv("GITHUB_HOSTS", json.dumps([host_dict()]))
+    monkeypatch.setenv("SIGNERS", json.dumps(SIGNERS))
+    monkeypatch.setenv("MODE", "mock")
+    monkeypatch.setenv("ALLOW_MOCK_MODE", "1")
+    loaded = load_trustbridge_settings()
+    assert loaded.github_hosts[0].name == "github.com"
+    get_trustbridge_settings.cache_clear()
+    try:
+        assert get_trustbridge_settings() is get_trustbridge_settings()
+    finally:
+        get_trustbridge_settings.cache_clear()

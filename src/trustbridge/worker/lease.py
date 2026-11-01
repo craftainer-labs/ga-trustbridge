@@ -236,6 +236,8 @@ class LeaseManager:
             raise LeaseBusy(f"{adapter}/{key}")
         lease = Lease(tenant_id, adapter, key, holder, fence)
         owner = asyncio.current_task()
+        if owner is None:  # pragma: no cover -- a coroutine always runs inside a task
+            raise RuntimeError("LeaseManager.hold must run inside a task")
         lost = asyncio.Event()
 
         async def _keepalive() -> None:
@@ -248,8 +250,7 @@ class LeaseManager:
                     continue
                 if not alive:
                     lost.set()
-                    if owner is not None:
-                        owner.cancel()
+                    owner.cancel()
                     return
 
         keepalive = asyncio.create_task(_keepalive())
@@ -257,8 +258,7 @@ class LeaseManager:
             yield lease
         except asyncio.CancelledError:
             if lost.is_set():
-                if owner is not None:
-                    owner.uncancel()  # the cancellation was ours; it becomes LeaseLost
+                owner.uncancel()  # the cancellation was ours; it becomes LeaseLost
                 raise LeaseLost(f"{adapter}/{key}") from None
             raise
         finally:

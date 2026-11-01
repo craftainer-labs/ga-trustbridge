@@ -241,3 +241,40 @@ def test_the_app_attribute_is_built_on_first_access_and_nothing_else_is_exported
     assert main_module.app is template  # installed once
     with pytest.raises(AttributeError):
         _ = main_module.nothing_else
+
+
+async def test_an_api_without_an_injected_valkey_opens_and_closes_its_own(
+    monkeypatch: pytest.MonkeyPatch, key_signers: None
+) -> None:
+    """The lifespan owns the client it opened and closes it after the template shut down."""
+    closed: list[bool] = []
+
+    class Owned(FakeRedis):
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(main_module, "open_redis", lambda _settings: as_redis(Owned()))
+    app = _template([])
+
+    class Session:
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def execute(self, _stmt: object) -> types.SimpleNamespace:
+            return types.SimpleNamespace(scalar_one_or_none=lambda: REQUIRED_SCHEMA_VERSION)
+
+    install(
+        app,
+        make_settings(mode="dev", allow_mock_mode=False),
+        Overrides(
+            checker=FakeHostChecker(),
+            session_factory=Session,  # type: ignore[arg-type]
+            health_registry=HealthRegistry,
+        ),
+    )
+    async with app.router.lifespan_context(app):
+        assert closed == []
+    assert closed == [True]

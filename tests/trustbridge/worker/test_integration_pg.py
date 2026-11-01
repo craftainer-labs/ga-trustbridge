@@ -168,6 +168,52 @@ async def test_sql_relay_rules_match_the_in_memory_rules(ids: list[str]) -> None
         assert {i for i in got if i in records} == wanted, mode
 
 
+async def test_the_sql_store_runs_the_whole_delivery_lifecycle(ids: list[str]) -> None:
+    store = PgDeliveryStore(session_factory)
+    now = datetime.now(UTC)
+    later = now + timedelta(hours=1)
+    ok, failing, dead = _new(ids), _new(ids), _new(ids)
+    for delivery in (ok, failing, dead):
+        assert await store.insert(delivery)
+    assert await store.existing_ids([]) == set()
+    assert await store.existing_ids([ok.delivery_id, "it-missing"]) == {ok.delivery_id}
+
+    await store.mark_relayed([], now)  # nothing to stamp
+    await store.mark_relayed([ok.delivery_id, failing.delivery_id], now)
+    await store.mark_processed(ok.delivery_id, now)
+    assert await store.record_failure(failing.delivery_id, "boom", now, later) == 1
+    assert await store.record_failure(failing.delivery_id, "boom", now, later) == 2
+    assert await store.record_failure(ok.delivery_id, "late", now, later) == 0  # not pending
+    await store.defer(failing.delivery_id, later)
+    await store.mark_dead(dead.delivery_id, "poison", now)
+
+    row_ok, row_failing, row_dead = (
+        await store.get(d.delivery_id) for d in (ok, failing, dead)
+    )
+    assert row_ok is not None
+    assert row_failing is not None
+    assert row_dead is not None
+    assert (row_ok.status, row_ok.last_relayed_at is not None) == ("processed", True)
+    assert (row_failing.status, row_failing.attempts, row_failing.next_attempt_at) == (
+        "pending",
+        2,
+        later,
+    )
+    assert (row_dead.status, row_dead.last_error) == ("dead", "poison")
+
+    assert await store.requeue(dead.delivery_id) is True
+    assert await store.requeue(dead.delivery_id) is False  # no longer dead
+    assert await store.requeue("it-missing") is False
+    await store.mark_dead(dead.delivery_id, "again", now)
+    far = now + timedelta(days=400)
+    purged = await store.purge_bodies(far, far)
+    assert purged >= 2  # the processed and the dead row lost their bodies
+    assert await store.requeue(dead.delivery_id) is False  # the body is gone
+    assert await store.delete_expired(far) >= 2
+    assert await store.get(ok.delivery_id) is None
+    assert isinstance(await store.list_relayable(now, mode="resweep"), list)  # no age bound
+
+
 # --- leases ---------------------------------------------------------------------------------
 
 

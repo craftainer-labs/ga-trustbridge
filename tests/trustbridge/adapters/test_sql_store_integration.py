@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from craftainer_crud.models.base import Base
-from sqlalchemy import ColumnElement, Table, false, true
+from sqlalchemy import ColumnElement, Table, false, func, select, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -185,3 +185,44 @@ async def test_host_registration_store_upserts(engine: AsyncEngine) -> None:
     await regs.save("ghes", Registration(5, "ref/a", "slug"))
     await regs.save("ghes", Registration(6, "ref/b", None))
     assert await regs.load_all() == {"ghes": Registration(6, "ref/b", None)}
+
+
+class CountGuardLease:
+    """A guard that is true only while the tenant has no credential row yet."""
+
+    def __init__(self, tenant_id: UUID) -> None:
+        """Remember the tenant whose credential rows are counted."""
+        self.fence = 1
+        self._tenant = tenant_id
+
+    def guard(self) -> ColumnElement[bool]:
+        """True for the credential upsert, false for the operation upsert that follows."""
+        table = AdapterCredentialRow.__table__
+        count = select(func.count()).select_from(table).where(table.c.tenant_id == self._tenant)
+        return count.scalar_subquery() == 0
+
+
+async def test_operations_are_read_by_id_and_a_credential_can_be_saved_alone(
+    engine: AsyncEngine,
+) -> None:
+    """`get_operation` finds or misses; an operation is optional in a save."""
+    store, tenant, lease = make_store(engine), uuid4(), GuardLease(live=True)
+    state = CredentialState(CredentialSlot(1, "n1"), None)
+    op = operation(tenant, OperationStatus.INTENT)
+    await store.save(lease, stored(tenant, state), None)
+    assert await store.get_operation(op.id) is None
+    await store.save(lease, stored(tenant, state), op)
+    assert await store.get_operation(op.id) == op
+
+
+async def test_a_guard_that_fails_between_the_two_upserts_rolls_everything_back(
+    engine: AsyncEngine,
+) -> None:
+    """If the lease is lost after the credential row, the operation write fails and nothing stays."""
+    store, tenant = make_store(engine), uuid4()
+    state = CredentialState(CredentialSlot(1, "n1"), None)
+    with pytest.raises(LeaseLostError):
+        await store.save(
+            CountGuardLease(tenant), stored(tenant, state), operation(tenant, OperationStatus.INTENT)
+        )
+    assert await store.get_credential(tenant, "fake", "k1") is None

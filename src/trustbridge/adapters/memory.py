@@ -195,6 +195,7 @@ class RecordingWriter:
         self.applied: list[GitHubOutput] = []
         self.removed: list[DeliveredOutput] = []
         self.fail_next: list[Exception] = []
+        self.fail_remove: list[Exception] = []
 
     async def apply(self, tenant: Tenant, outputs: Sequence[GitHubOutput]) -> None:
         """Record the outputs, or raise a queued failure."""
@@ -206,4 +207,6 @@ class RecordingWriter:
     async def remove(self, tenant: Tenant, outputs: Sequence[DeliveredOutput]) -> None:
         """Record the removals."""
         del tenant
+        if self.fail_remove:
+            raise self.fail_remove.pop(0)
         self.removed.extend(outputs)
