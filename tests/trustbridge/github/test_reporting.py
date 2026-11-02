@@ -1,5 +1,6 @@
 """Check runs, deployments and statuses, Argo CD triggers, and the webhook secret cache."""
 
+import asyncio
 import json
 from typing import Any
 
@@ -189,3 +190,83 @@ async def test_uncached_secret_during_an_outage_and_unregistered_hosts_are_disti
         await resolver.secret_for("a")
     with pytest.raises(HostUnregisteredError):
         await resolver.secret_for("b")
+
+
+class RotatingReader:
+    """A `SecretReader` whose value can be changed, and that can hang."""
+
+    def __init__(self) -> None:
+        """Start with one value."""
+        self.value = "v1"
+        self.down = False
+        self.hang = False
+
+    async def read(self, ref: str) -> SecretStr:
+        """Return the current value."""
+        del ref
+        if self.hang:
+            await asyncio.sleep(10)
+        if self.down:
+            raise RuntimeError("vault down")
+        return SecretStr(self.value)
+
+
+async def _ready_monitor() -> HostMonitor:
+    mon = HostMonitor(
+        [make_host_config()], {"main": KeySigner()}, MonitorDeps(checker=FakeChecker())
+    )
+    await mon.check_all()
+    return mon
+
+
+async def test_a_rotated_secret_is_returned_once_and_refreshes_are_rate_limited() -> None:
+    """A signature mismatch re-reads at most every `refresh_min_seconds`; unchanged is None."""
+    now = [0.0]
+    reader = RotatingReader()
+    resolver = WebhookSecretResolver(
+        await _ready_monitor(), reader, refresh_min_seconds=60, monotonic=lambda: now[0]
+    )
+    assert await resolver.secret_for("github.com") == b"v1"
+    reader.value = "v2"
+    assert await resolver.refreshed("github.com") is None  # too soon after the first read
+    now[0] = 61
+    assert await resolver.refreshed("github.com") == b"v2"
+    assert await resolver.secret_for("github.com") == b"v2"
+    now[0] = 130
+    assert await resolver.refreshed("github.com") is None  # unchanged: nothing new to try
+    reader.down = True
+    now[0] = 200
+    assert await resolver.refreshed("github.com") is None  # a failing store keeps the cache
+    assert await resolver.secret_for("github.com") == b"v2"
+
+
+async def test_refreshing_before_any_read_returns_the_first_value() -> None:
+    """With nothing cached the refresh reads straight away."""
+    resolver = WebhookSecretResolver(await _ready_monitor(), RotatingReader())
+    assert await resolver.refreshed("github.com") == b"v1"
+
+
+async def test_a_hanging_store_is_bounded_by_the_read_timeout() -> None:
+    """A read that never returns becomes `WebhookSecretUnavailableError`."""
+    reader = RotatingReader()
+    reader.hang = True
+    resolver = WebhookSecretResolver(await _ready_monitor(), reader, read_timeout=0.01)
+    with pytest.raises(WebhookSecretUnavailableError):
+        await resolver.secret_for("github.com")
+
+
+async def test_warming_ignores_hosts_that_cannot_be_resolved() -> None:
+    """Startup warming never raises: unregistered hosts and a down store are skipped."""
+    mon = HostMonitor(
+        [make_host_config("a"), make_host_config("b", app_id=None)],
+        {"main": KeySigner()},
+        MonitorDeps(checker=FakeChecker()),
+    )
+    await mon.check_all()
+    reader = RotatingReader()
+    resolver = WebhookSecretResolver(mon, reader)
+    await resolver.warm(["a", "b"])
+    reader.value = "changed"
+    assert await resolver.secret_for("a") == b"v1"  # "a" was warmed; "b" was skipped
+    reader.down = True
+    await WebhookSecretResolver(mon, reader).warm(["a"])

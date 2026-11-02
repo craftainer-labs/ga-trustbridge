@@ -45,6 +45,8 @@ class ApiResponse:
 
     status: int
     data: Any
+    link: str | None = None
+    """The `Link` response header (pagination), when present."""
 
 
 class GitHubRequester(Protocol):
@@ -141,7 +143,9 @@ class GitHubApi:
             raise GitHubApiError(exc.response.status_code, f"{method} {path}") from exc
         except (RequestError, httpx2.HTTPError) as exc:
             raise GitHubApiError(0, f"{method} {path}: {type(exc).__name__}") from exc
-        return ApiResponse(resp.status_code, resp.json() if resp.text else None)
+        return ApiResponse(
+            resp.status_code, resp.json() if resp.text else None, resp.headers.get("link")
+        )
 
     async def request(
         self,

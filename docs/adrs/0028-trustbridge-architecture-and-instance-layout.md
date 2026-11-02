@@ -86,13 +86,19 @@ NG3 implements and tests; the mechanics are NG3's to design within them.
 ### Layout: an instance package beside `app`
 
 - Instance code lives in **`src/trustbridge/`**, a sibling package of the
-  template's `src/app/`. Sub-packages: `webhooks/`, `worker/`,
-  `reconciler/`, `github/`, `adapters/<name>/`, `tenancy/`, `audit/`,
-  `rbac/`, `models/`, `queue/`, `startup.py`, `settings.py`, `main.py`.
-  This is the standing design. A template hook (for example an
-  entry-point for routers or lifespan, or an `APP_MODULE` variable in
-  `runner.sh`) would be a possible future simplification, not a
-  prerequisite.
+  template's `src/app/`. As implemented by NG3: `main.py` (the
+  entrypoint), `settings.py`, `webhooks/` (the ingress route and the
+  limiter), `worker/` (the shared runtime core: outbox and stores, stream
+  client, relay, worker, reconciler, leases, host availability, secret
+  cache, schema gate, tenants, migrate Job) and the one-line command shims
+  `reconciler/` and `migrations/`. Later items add `github/`,
+  `adapters/<name>/`, `tenancy/`, `audit/` and `rbac/`. The commands are
+  `python -m trustbridge.worker {worker|reconciler|migrate ...}`, and the
+  shims keep `python -m trustbridge.reconciler` and
+  `python -m trustbridge.migrations upgrade` working. This is the standing
+  design. A template hook (for example an entry-point for routers or
+  lifespan, or an `APP_MODULE` variable in `runner.sh`) would be a possible
+  future simplification, not a prerequisite.
 - `pyproject.toml` (merge tier) gets `packages = ["src/app",
   "src/trustbridge"]` and importlinter `root_packages = ["app",
   "trustbridge"]` plus a contract that `app` never imports `trustbridge`.

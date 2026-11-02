@@ -193,12 +193,12 @@ def _unb64(text: str) -> bytes:
 
 def webhook_secret_ref(host: str) -> str:
     """The secret-store reference of a host's webhook secret."""
-    return f"github-hosts/{host}/webhook-secret"
+    return f"store:github-hosts/{host}/webhook-secret"
 
 
 def client_secret_ref(host: str) -> str:
     """The secret-store reference of a host's OAuth client secret."""
-    return f"github-hosts/{host}/client-secret"
+    return f"store:github-hosts/{host}/client-secret"
 
 
 class ManifestFlow:

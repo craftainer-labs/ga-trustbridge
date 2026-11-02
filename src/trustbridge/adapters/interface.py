@@ -78,6 +78,10 @@ class CredentialScope:
     # scope (capability, host kind, `oidc_id_claims` and eligibility, invariant A12 all agree).
     # An adapter returns an `OidcTrust` exactly when it is True, otherwise an `IssuedSecret`.
     oidc_eligible: bool = False
+    # Additive field (API_VERSION 1): the `RepoSpec.key` of the platform repository this
+    # credential is limited to. When set, the adapter grants per repository (least privilege);
+    # None keeps the project- or tenant-wide grant narrowed by claims. Not part of `key`.
+    platform_repository_key: str | None = None
 
     @classmethod
     def build(

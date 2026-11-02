@@ -53,10 +53,12 @@ enterprise-owned GitHub Apps.
 ```python
 from typing import Protocol
 
+
 class AppKeySigner(Protocol):
-    key_id: str                                  # stable id of the key (fingerprint / KMS key id)
+    key_id: str  # stable id of the key (fingerprint / KMS key id)
+
     async def sign_jwt(self, signing_input: bytes) -> bytes: ...
-    async def public_key_pem(self) -> str: ...   # for self-test against the App's registered key
+    async def public_key_pem(self) -> str: ...  # for self-test against the App's registered key
 ```
 
 trustbridge builds the JWT header and claims (`iss`: App id or client
@@ -77,7 +79,7 @@ backends or different keys (an App is registered per host, so each has its
 own key):
 
 ```python
-class SignerConfig(BaseModel):          # discriminated on "kind"; extra="forbid"
+class SignerConfig(BaseModel):  # discriminated on "kind"; extra="forbid"
     kind: Literal["file", "vault-transit", "aws-kms", "gcp-kms", "azure-key-vault"]
     # kind-specific fields, e.g. file: path; vault-transit: addr, mount, key, auth.
     # Credentials are file references (secret_id_file, token_file), never inline values.
@@ -122,19 +124,23 @@ For the webhook secret and client secret the same secret store is used.
 ```python
 @dataclass(frozen=True, slots=True)
 class GitHubHostConfig:
-    name: str                  # tenant-facing key, e.g. "github.com", "ghes-prod"
-    kind: HostKind             # ADR 0029: Literal["github.com", "ghes", "ghe.com"]
-    web_url: str               # https://github.com | https://HOST | https://SUB.ghe.com
-    api_url: str               # https://api.github.com | https://HOST/api/v3 | https://api.SUB.ghe.com
-    oidc_issuer: str           # configured, never derived (see Context)
-    registry_host: str         # ghcr.io | containers.HOST (GHES) | containers.SUB.ghe.com (GHE.com), as in ADR 0029
-    oidc_id_claims: bool       # tokens carry the id claims (repository_owner_id always, repository_id for repo scopes; ADR 0029 A6); no field default: the host loader sets it explicitly (kind-dependent default True for github.com, False for ghes and ghe.com until NG4 confirms)
-    app_id: int | None         # None while the host is unregistered (no App yet)
-    signer: str                # key into SIGNERS (see "Named signers")
-    webhook_secret_ref: str | None   # None while the host is unregistered
-    ca_bundle: Path | None = None   # custom CA for this host (EB-5)
+    name: str  # tenant-facing key, e.g. "github.com", "ghes-prod"
+    kind: HostKind  # ADR 0029: Literal["github.com", "ghes", "ghe.com"]
+    web_url: str  # https://github.com | https://HOST | https://SUB.ghe.com
+    api_url: str  # https://api.github.com | https://HOST/api/v3 | https://api.SUB.ghe.com
+    oidc_issuer: str  # configured, never derived (see Context)
+    registry_host: (
+        str  # ghcr.io | containers.HOST (GHES) | containers.SUB.ghe.com (GHE.com), as in ADR 0029
+    )
+    oidc_id_claims: bool  # tokens carry the id claims (repository_owner_id always, repository_id for repo scopes; ADR 0029 A6); no field default: the host loader sets it explicitly (kind-dependent default True for github.com, False for ghes and ghe.com until NG4 confirms)
+    app_id: int | None  # None while the host is unregistered (no App yet)
+    signer: str  # key into SIGNERS (see "Named signers")
+    webhook_secret_ref: str | None  # None while the host is unregistered
+    ca_bundle: Path | None = None  # custom CA for this host (EB-5)
 
-    def to_host(self) -> GitHubHost: ...   # ADR 0029's adapter-facing projection: name, kind, api_url, oidc_issuer, oidc_id_claims, registry_host
+    def to_host(
+        self,
+    ) -> GitHubHost: ...  # ADR 0029's adapter-facing projection: name, kind, api_url, oidc_issuer, oidc_id_claims, registry_host
 ```
 
 Hosts come from a settings list (`GITHUB_HOSTS`, a file or env JSON). An

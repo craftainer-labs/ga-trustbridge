@@ -9,7 +9,7 @@ from datetime import datetime
 from uuid import UUID
 
 from craftainer_crud.models.base import Base
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, func, text
+from sqlalchemy import BigInteger, Boolean, DateTime, Index, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -72,7 +72,7 @@ class CredentialOperationRow(Base):
     oidc_offered: Mapped[bool] = mapped_column(Boolean, nullable=False)
     base_state: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     base_kind: Mapped[str | None] = mapped_column(String, nullable=True)
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    attempts: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     manual_action: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
