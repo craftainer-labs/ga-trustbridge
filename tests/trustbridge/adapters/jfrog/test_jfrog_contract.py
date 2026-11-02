@@ -84,7 +84,6 @@ def make_scope(
     *,
     repo: int | None = 10,
     env: str | None = None,
-    eligible: bool = False,
     tenant: Tenant = TENANT,
     platform_repository_key: str | None = None,
 ) -> CredentialScope:
@@ -96,7 +95,7 @@ def make_scope(
         environment=env,
         permission=permission,
     )
-    return replace(scope, oidc_eligible=eligible, platform_repository_key=platform_repository_key)
+    return replace(scope, platform_repository_key=platform_repository_key)
 
 
 PUSH = make_scope("push", env="prod")
@@ -425,7 +424,7 @@ async def test_trust_creation_race_converges() -> None:
 async def test_a_ghes_host_uses_the_generic_provider_with_its_issuer() -> None:
     """ADR matrix: GHES goes through a `Generic OpenID Connect` integration on the host's issuer."""
     tenant = make_tenant("ghes")
-    scope = make_scope("push", env="prod", eligible=True, tenant=tenant)
+    scope = replace(make_scope("push", env="prod", tenant=tenant), oidc_eligible=True)
     replay, adapter = build("credentials.json", "trust_create_ghes", tenant)
     outcome = await adapter.ensure_credential(scope, prior_for(PUSH_SLOT))
     replay.assert_exhausted()
@@ -760,3 +759,59 @@ async def test_health_check() -> None:
     assert not health.ok
     assert health.detail is not None
     assert "503" in health.detail
+
+
+# ---- branches: repositories, deletion, shapes, config ------------------------------------------
+async def test_a_non_docker_repository_is_matched_without_a_docker_api_version() -> None:
+    """Other package types are reconciled the same way."""
+    replay, adapter = build("repositories.json", "exists_maven")
+    applied = await adapter.ensure_repository(PROJECT_REF, RepoSpec("images", "maven"), None)
+    replay.assert_exhausted()
+    assert applied.change.state is ChangeState.UNCHANGED
+
+
+async def test_ensure_repository_refuses_a_repository_of_another_project() -> None:
+    """A repository key that exists in a different project is never adopted."""
+    _, adapter = build("repositories.json", "other_project")
+    with pytest.raises(AdapterError) as err:
+        await adapter.ensure_repository(PROJECT_REF, RepoSpec("images"), None)
+    assert not err.value.retryable
+
+
+async def test_delete_rejects_an_unknown_resource_kind() -> None:
+    """A state this adapter did not write is a non-retryable error, not a guess."""
+    with pytest.raises(AdapterError) as err:
+        await offline_adapter().delete(ResourceState("x", {"kind": "bogus"}))
+    assert not err.value.retryable
+
+
+async def test_credentials_need_a_current_slot() -> None:
+    """The core always commits a current slot; without one the call fails before any request."""
+    with pytest.raises(AdapterError) as err:
+        await offline_adapter().ensure_credential(PUSH, CredentialState(current=None))
+    assert not err.value.retryable
+
+
+async def test_a_token_response_without_a_token_is_rejected() -> None:
+    """A 200 that carries no `access_token` or `token_id` is a non-retryable error."""
+    _, adapter = build("credentials.json", "token_bad_response")
+    with pytest.raises(AdapterError) as err:
+        await adapter.ensure_credential(PUSH, prior_for(PUSH_SLOT))
+    assert not err.value.retryable
+
+
+async def test_the_mapping_list_may_be_an_object_holding_the_array() -> None:
+    """The listing shape is unconfirmed, so both an array and an object are accepted."""
+    replay, adapter = build("credentials.json", "list_object_shape")
+    listed = await adapter.list_credentials(TENANT)
+    replay.assert_exhausted()
+    assert [c.name for c in listed] == [CONTEXT["cred_pull"]]
+
+
+async def test_the_project_for_credentials_can_be_set_in_connection_data() -> None:
+    """`project_key` in the connection data replaces the derived default project."""
+    adapter = offline_adapter(project_key=SecretStr("custom"))
+    scope = replace(PUSH, oidc_eligible=True, platform_repository_key="Bad/Key")
+    with pytest.raises(AdapterConfigurationError):
+        await adapter.ensure_credential(scope, prior_for(PUSH_SLOT))
+    assert adapter._project_for_credentials() == "custom"
