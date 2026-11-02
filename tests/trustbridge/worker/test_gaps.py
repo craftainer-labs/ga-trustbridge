@@ -12,7 +12,7 @@ import app.db as app_db
 from tests.trustbridge.fakes import FakeHookClient, FakeHostChecker, FakeRedis
 from tests.trustbridge.helpers import as_redis, make_settings
 from tests.trustbridge.worker.harness import Harness
-from tests.trustbridge.worker.test_reconciler import _hd, _reconciler, _recon
+from tests.trustbridge.worker.test_reconciler import _hd, _recon, _reconciler
 from trustbridge.worker import metrics, migrate, runtime
 from trustbridge.worker.deliveries import InMemoryDeliveryStore, NewDelivery
 from trustbridge.worker.lease import InMemoryLeaseStore, LeaseLost, LeaseManager
