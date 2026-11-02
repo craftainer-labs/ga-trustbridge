@@ -257,7 +257,7 @@ async def test_an_api_without_an_injected_valkey_opens_and_closes_its_own(
     app = _template([])
 
     class Session:
-        async def __aenter__(self) -> "Session":
+        async def __aenter__(self) -> Session:
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
