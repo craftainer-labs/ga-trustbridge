@@ -1,0 +1,3 @@
+ignore:
+  # Instance-owned pytest hook: keeps trustbridge out of the e2e coverage run.
+  - conftest.py

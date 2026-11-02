@@ -135,6 +135,29 @@ controller/CRUD stack runs with zero containers. See
 and [src/app/README.md](../src/app/README.md)'s "MODE (dev / mock /
 production)" section.
 
+## trustbridge instance package
+
+`src/trustbridge/` sits beside `src/app/` (it imports `app`; `app` never imports it) and holds the
+GitHub App built on this template ([ADR 0028](adrs/0028-trustbridge-architecture-and-instance-layout.md),
+[0029](adrs/0029-adapter-plugin-interface.md), [0030](adrs/0030-key-signer-and-github-hosts.md)).
+One image runs three processes: the api (`trustbridge.main:app`, which wraps the template's
+lifespan), the worker and the reconciler (`python -m trustbridge.worker worker|reconciler`); the
+migrate Job is the only process that runs migrations.
+
+| Subpackage | Role |
+| --- | --- |
+| `webhooks/` | The webhook ingress (limiter, signature check, transactional outbox) and the Argo CD notification route. |
+| `worker/` | Shared runtime core: outbox store, Valkey stream, worker, relay, reconciler, fenced leases, schema gate, secret store, tenants, and the ports the two cores need. |
+| `github/` | The GitHub core: host configuration, per-host availability (`HostMonitor`), installation tokens, secret/variable/environment writer, check runs and deployments, handler registry, manifest flow. |
+| `adapters/` | The adapter plugin interface (I2) and the write-ahead credential core. |
+| `signer/` | App-key signers (`file`, `vault-transit`). |
+
+A webhook is verified and committed to Postgres by the api, relayed to the stream by id, and
+handled by the worker through the handler registry; a host whose signer, GitHub or OIDC check
+fails is `unavailable` (per process, rechecked every `HOST_RECHECK_SECONDS`) and its deliveries
+wait in the outbox until it turns `ready`. See [src/trustbridge/README.md](../src/trustbridge/README.md)
+for the wiring and each subpackage's `README.md` for detail.
+
 ## Do
 
 - Base any change to this document on

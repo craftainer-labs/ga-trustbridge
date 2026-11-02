@@ -31,8 +31,11 @@ dependencies = [
     "craftainer-crud[mqtt,xml]>=0.7.0,<0.8",
     "craftainer-observability[otel,sqlalchemy,redis,s3,http,analytics]>=0.4.0,<0.5",
     "githubkit[auth-app]==0.17.0",
+    # githubkit uses httpx2 + hishel's httpx2 integration when installed (else a deprecated
+    # httpx fallback that warns); NG4 builds on githubkit, so both are runtime dependencies.
+    "httpx2==2.13.0",
+    "hishel[async,httpx2]==1.4.0",
     "pynacl==1.6.2",
-    "valkey==6.2.0",
 ]
 
 [project.optional-dependencies]
@@ -42,7 +45,6 @@ dev = [
     "ruff==0.16.8",
     "mypy==2.3.1",
     "prek==0.5.3",
-    "httpx2==2.13.0",
     "playwright==1.63.0",
     "pytest-playwright==0.9.0",
     "selenium==4.49.0",
@@ -69,7 +71,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/app"]
+packages = ["src/app", "src/trustbridge"]
 
 [tool.ruff]
 line-length = 100
@@ -93,7 +95,7 @@ select = [
 ignore = ["COM812", "ISC001"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["app"]
+known-first-party = ["app", "trustbridge"]
 
 [tool.ruff.lint.per-file-ignores]
 # assert is the point of a test, and comparing to literal expected values
@@ -113,7 +115,7 @@ known-first-party = ["app"]
 # their repos): a layer may import any layer listed after it, never one listed
 # before it (e.g. app.models must never import from app.controllers). Run via `uv run lint-imports` (wired into
 # .pre-commit-config.yaml's manual/pre-push stage).
-root_packages = ["app"]
+root_packages = ["app", "trustbridge"]
 
 [[tool.importlinter.contracts]]
 name = "app layers"
@@ -137,6 +139,41 @@ layers = [
     "config",
 ]
 
+# trustbridge is the instance package beside the template's `app` (ADR 0028): it may import
+# `app`, never the other way round. Its own layers, top to bottom: main, webhooks, worker,
+# settings (worker is the shared runtime core: queue, leases, schema gate, stores, ports).
+# `github` (the GitHub core) sits beside the layers because `settings` types its fields with
+# `github.hosts` and `github.runtime` takes the settings; the contracts below keep the
+# plugin-facing packages (`adapters`, `signer`) free of it.
+[[tool.importlinter.contracts]]
+name = "app never imports trustbridge"
+type = "forbidden"
+source_modules = ["app"]
+forbidden_modules = ["trustbridge"]
+
+[[tool.importlinter.contracts]]
+name = "adapters never import the GitHub core"
+type = "forbidden"
+source_modules = ["trustbridge.adapters"]
+forbidden_modules = ["trustbridge.github"]
+
+[[tool.importlinter.contracts]]
+name = "signers never import the GitHub core"
+type = "forbidden"
+source_modules = ["trustbridge.signer"]
+forbidden_modules = ["trustbridge.github"]
+
+[[tool.importlinter.contracts]]
+name = "trustbridge layers"
+type = "layers"
+containers = ["trustbridge"]
+layers = [
+    "main",
+    "webhooks",
+    "worker",
+    "settings",
+]
+
 [tool.mypy]
 python_version = "3.14"
 mypy_path = "src"
@@ -148,11 +185,14 @@ cache_dir = "/home/vscode/.cache/mypy"
 [tool.pytest.ini_options]
 # cache_dir: see the cache-dir comment under [tool.ruff] above -- same reasoning.
 cache_dir = "/home/vscode/.cache/pytest"
-addopts = "--strict-markers --strict-config -ra --ignore=tests/e2e --ignore=tests/bench --cov=app --cov-report=term-missing"
+addopts = "--strict-markers --strict-config -ra --ignore=tests/e2e --ignore=tests/bench --cov=app --cov=trustbridge --cov-report=term-missing"
 # Lets an `async def test_...` run without a per-test @pytest.mark.asyncio marker --
 # needed once tests exercise app.interfaces/app.repositories/health directly (not just
 # through TestClient, which stays sync regardless of this setting).
 asyncio_mode = "auto"
+# `integration`: needs the stack's Postgres (and Valkey), so it only runs where those exist
+# (the devcontainer and CI); the unit tests under tests/trustbridge use in-memory fakes.
+markers = ["integration: needs the devcontainer stack's Postgres/Valkey"]
 # app.models.base's engine/session factory are process-wide singletons (like
 # get_settings()), matching how the app itself runs in a single event loop. A
 # per-test event loop (pytest-asyncio's default) would hand asyncpg connections
