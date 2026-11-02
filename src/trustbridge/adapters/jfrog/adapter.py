@@ -80,7 +80,10 @@ MAX_REPO_SLUG = 41
 # ones. This is the selection rule ADR 0029's open issue asks the fixtures to show.
 PRIORITY: dict[Permission, int] = {"admin": 10, "push": 20, "pull": 30}
 ORG_WIDE_PRIORITY_OFFSET = 5
-ROLES: dict[Permission, str] = {"pull": "Viewer", "push": "Developer", "admin": "Project Admin"}
+# Resource permission scope actions (r read, w write, d delete, a annotate, m manage).
+ACTIONS: dict[Permission, str] = {"pull": "r", "push": "r,w", "admin": "r,w,d,a,m"}
+DEFAULT_ENVIRONMENT = "DEV"
+"""The project environment repositories are assigned to (JFrog requires one) unless set."""
 
 _SLUG = re.compile(r"[a-z0-9][a-z0-9-]*")
 
@@ -168,6 +171,22 @@ class JFrogAdapter:
             raise AdapterConfigurationError("JFrog admin access token is not configured")
         return JFrogClient(self._base_url(), token, self._transport)
 
+    def _environment(self) -> str:
+        override = self._config.connection.get("environment")
+        return override.get_secret_value() if override is not None else DEFAULT_ENVIRONMENT
+
+    def _grant_scope(self, s: CredentialScope) -> str:
+        """Return the token scope: one repository when the core names it, else the project's.
+
+        Uses JFrog's resource permission scope `artifact:<repo key or ant pattern>:<actions>`,
+        which needs no predefined permission target. Repositories of a project are keyed
+        `<project key>-<slug>`, so `<project key>-*` covers exactly the project's repositories.
+        """
+        project = self._project_for_credentials()
+        slug = s.platform_repository_key
+        target = f"{project}-*" if slug is None else self._repo_key(project, slug)
+        return f"artifact:{target}:{ACTIONS[s.permission]}"
+
     def _project_for_credentials(self) -> str:
         override = self._config.connection.get("project_key")
         if override is not None:
@@ -215,6 +234,7 @@ class JFrogAdapter:
             "projectKey": project_key,
             "rclass": "local",
             "packageType": package_type,
+            "environments": [self._environment()],
             "description": "managed by trustbridge",
         }
         if package_type == "docker":
@@ -262,6 +282,7 @@ class JFrogAdapter:
         events = list(t.events or DEFAULT_WEBHOOK_EVENTS)
         body: JsonObj = {
             "key": key,
+            "project_key": self._project_for_credentials(),
             "description": "managed by trustbridge",
             "enabled": True,
             "event_filter": {
@@ -270,8 +291,9 @@ class JFrogAdapter:
                 "criteria": {
                     "anyLocal": True,
                     "anyRemote": False,
-                    "anyFederated": False,
                     "repoKeys": [],
+                    "includePatterns": [],
+                    "excludePatterns": [],
                 },
             },
             "handlers": [
@@ -442,8 +464,8 @@ class JFrogAdapter:
         self, c: JFrogClient, s: CredentialScope, prior: CredentialState, slot: CredentialSlot
     ) -> CredentialOutcome:
         provider = provider_name(s.tenant.id)
-        provider_changed = await self._ensure_provider(c, s, provider)
         desired = self._mapping_body(s, slot, provider)
+        provider_changed = await self._ensure_provider(c, s, provider)
         path = f"{ACCESS}/oidc/{seg(provider)}/identity_mappings"
         found = await c.call("GET", f"{path}/{seg(slot.name)}", accept=NOT_FOUND)
         if found.status_code == HTTP_NOT_FOUND:
@@ -489,20 +511,16 @@ class JFrogAdapter:
         }
         if host.kind == "github.com":
             body["provider_type"] = "GitHub"
-            body["organization"] = tenant.org
         else:
-            body["provider_type"] = "Generic OpenID Connect"
+            body["provider_type"] = "generic"
             body["token_issuer"] = host.oidc_issuer
         return body
 
     def _mapping_body(self, s: CredentialScope, slot: CredentialSlot, provider: str) -> JsonObj:
-        project = self._project_for_credentials()
-        scope = f"applied-permissions/roles:{project}:{ROLES[s.permission]}"
+        scope = self._grant_scope(s)
         return {
             "name": slot.name,
             "description": "managed by trustbridge",
-            "provider_name": provider,
-            "project_key": project,
             "priority": mapping_priority(s),
             "claims": trust_claims(s),
             "token_spec": {
@@ -555,12 +573,10 @@ class JFrogAdapter:
     ) -> CredentialOutcome:
         """Create the new token first, then revoke older ones under the same name (A2, A3)."""
         slot = self._current(base)
-        project = self._project_for_credentials()
         body: JsonObj = {
             "username": slot.name,
             "description": slot.name,
-            "scope": f"applied-permissions/roles:{project}:{ROLES[s.permission]}",
-            "project_key": project,
+            "scope": self._grant_scope(s),
             "expires_in": TOKEN_TTL_SECONDS,
             "refreshable": False,
         }

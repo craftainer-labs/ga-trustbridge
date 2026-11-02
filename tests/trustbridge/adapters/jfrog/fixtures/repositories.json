@@ -5,14 +5,14 @@
       {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
        "response": {"status": 400, "json": {"errors": [{"status": 400, "message": "Bad Request"}]}}},
       {"request": {"method": "PUT", "path": "/artifactory/api/repositories/${project}-images",
-                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
+                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "environments": ["DEV"], "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
        "response": {"status": 200, "text": "Successfully created repository '${project}-images'"}}
     ]},
     "create_after_404": {"exchanges": [
       {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
        "response": {"status": 404, "json": {"errors": [{"status": 404, "message": "Not Found"}]}}},
       {"request": {"method": "PUT", "path": "/artifactory/api/repositories/${project}-images",
-                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
+                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "environments": ["DEV"], "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
        "response": {"status": 200, "text": "Successfully created repository '${project}-images'"}}
     ]},
     "exists": {"exchanges": [
@@ -27,7 +27,7 @@
       {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
        "response": {"status": 404, "json": {"errors": [{"status": 404, "message": "Not Found"}]}}},
       {"request": {"method": "PUT", "path": "/artifactory/api/repositories/${project}-images",
-                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
+                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "environments": ["DEV"], "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
        "response": {"status": 400, "json": {"errors": [{"status": 400, "message": "Case insensitive repository key already exists"}]}}},
       {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
        "response": {"status": 200, "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker"}}}
@@ -36,7 +36,7 @@
       {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
        "response": {"status": 404, "json": {"errors": [{"status": 404, "message": "Not Found"}]}}},
       {"request": {"method": "PUT", "path": "/artifactory/api/repositories/${project}-images",
-                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
+                   "json": {"key": "${project}-images", "projectKey": "${project}", "rclass": "local", "packageType": "docker", "environments": ["DEV"], "description": "managed by trustbridge", "dockerApiVersion": "V2"}},
        "response": {"status": 400, "json": {"errors": [{"status": 400, "message": "Invalid repository configuration"}]}}},
       {"request": {"method": "GET", "path": "/artifactory/api/repositories/${project}-images"},
        "response": {"status": 404, "json": {"errors": [{"status": 404, "message": "Not Found"}]}}}

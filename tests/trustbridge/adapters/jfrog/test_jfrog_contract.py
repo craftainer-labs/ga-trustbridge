@@ -4,6 +4,7 @@ Each test names the ADR 0029 invariant it covers. The fixtures under `fixtures/`
 JFrog's documented request and response shapes; the module README lists what is unconfirmed.
 """
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -85,6 +86,7 @@ def make_scope(
     env: str | None = None,
     eligible: bool = False,
     tenant: Tenant = TENANT,
+    platform_repository_key: str | None = None,
 ) -> CredentialScope:
     """Build a credential scope for owner 5."""
     scope = CredentialScope.build(
@@ -94,7 +96,7 @@ def make_scope(
         environment=env,
         permission=permission,
     )
-    return replace(scope, oidc_eligible=eligible)
+    return replace(scope, oidc_eligible=eligible, platform_repository_key=platform_repository_key)
 
 
 PUSH = make_scope("push", env="prod")
@@ -541,6 +543,49 @@ async def test_a_lost_response_is_retried_to_one_token_per_name() -> None:
     outcome = await adapter.ensure_credential(PUSH, prior_for(PUSH_SLOT))
     replay.assert_exhausted()
     assert isinstance(outcome.credential, IssuedSecret)
+
+
+# ---- per-repository grants (CredentialScope.platform_repository_key) --------------------------
+async def test_a_secret_scoped_to_one_repository_when_the_core_names_it() -> None:
+    """The token scope covers just `<project>-images`; without the key it is `<project>-*`."""
+    scope = replace(PUSH, platform_repository_key="images")
+    replay, adapter = build("credentials.json", "token_issue_per_repo")
+    outcome = await adapter.ensure_credential(scope, prior_for(PUSH_SLOT))
+    replay.assert_exhausted()
+    assert isinstance(outcome.credential, IssuedSecret)
+    body = json.loads(replay.seen[-1].content)
+    assert body["scope"] == f"artifact:{PROJECT}-images:r,w"
+    replay, adapter = build("credentials.json", "token_issue")
+    await adapter.ensure_credential(PUSH, prior_for(PUSH_SLOT))
+    assert json.loads(replay.seen[-1].content)["scope"] == f"artifact:{PROJECT}-*:r,w"
+
+
+async def test_a_trust_scoped_to_one_repository_keeps_the_exact_claims() -> None:
+    """The mapping grants one repository; the claims (A6) do not change with the grant."""
+    scope = replace(PUSH, oidc_eligible=True, platform_repository_key="images")
+    replay, adapter = build("credentials.json", "trust_create_per_repo")
+    outcome = await adapter.ensure_credential(scope, prior_for(PUSH_SLOT))
+    replay.assert_exhausted()
+    assert isinstance(outcome.credential, OidcTrust)
+    assert dict(outcome.credential.claims) == expected_claims(scope)
+    mapping = json.loads(replay.seen[-1].content)
+    assert mapping["token_spec"]["scope"] == f"artifact:{PROJECT}-images:r,w"
+
+
+async def test_a_mapping_is_reconciled_when_the_repository_grant_appears() -> None:
+    """A project-wide mapping is PUT back narrowed once the core names a repository."""
+    scope = replace(PUSH, oidc_eligible=True, platform_repository_key="images")
+    replay, adapter = build("credentials.json", "trust_scope_drift")
+    outcome = await adapter.ensure_credential(scope, prior_for(PUSH_SLOT))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UPDATED
+
+
+async def test_an_unusable_repository_key_is_a_configuration_error_before_any_call() -> None:
+    """The key must be a valid slug; nothing is sent when it is not."""
+    scope = replace(PUSH, oidc_eligible=True, platform_repository_key="Bad/Key")
+    with pytest.raises(AdapterConfigurationError):
+        await offline_adapter().ensure_credential(scope, prior_for(PUSH_SLOT))
 
 
 # ---- rotation (single) and its rules (A9) ----------------------------------------------------
