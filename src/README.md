@@ -4,6 +4,8 @@ Source layout for the installable package.
 
 - `app/` — the FastAPI application package (`app.main:app`); see its own
   `README.md`.
+- `trustbridge/` — the instance package (`trustbridge.main:app`, worker, reconciler);
+  see its own `README.md`.
 
 The generic CRUD framework (`craftainer_crud`: router factories, interface,
 repositories, model/view bases) and the observability toolkit
@@ -26,7 +28,7 @@ layering/import order, a new cross-cutting flat module) makes
 - Add new top-level modules as their own package under `src/`, each with
   its own `README.md`.
 - Keep `pyproject.toml`'s `[tool.hatch.build.targets.wheel] packages`
-  list in sync with what's actually here (only `src/app`).
+  list in sync with what's actually here (`src/app` and `src/trustbridge`).
 
 ## Don't
 

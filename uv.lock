@@ -1124,6 +1124,11 @@ httpx = [
     { name = "anysqlite" },
     { name = "httpx" },
 ]
+httpx2 = [
+    { name = "anyio" },
+    { name = "anysqlite" },
+    { name = "httpx2" },
+]
 
 [[package]]
 name = "httpcore"
@@ -2675,7 +2680,9 @@ dependencies = [
     { name = "fastapi" },
     { name = "githubkit", extra = ["auth-app"] },
     { name = "granian" },
+    { name = "hishel", extra = ["async", "httpx2"] },
     { name = "httpx" },
+    { name = "httpx2" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-instrumentation-fastapi" },
     { name = "opentelemetry-instrumentation-logging" },
@@ -2689,14 +2696,12 @@ dependencies = [
     { name = "slowapi" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
-    { name = "valkey" },
 ]
 
 [package.optional-dependencies]
 dev = [
     { name = "boto3-stubs", extra = ["s3"] },
     { name = "craftainer-crud-sdk" },
-    { name = "httpx2" },
     { name = "import-linter" },
     { name = "locust" },
     { name = "mypy" },
@@ -2732,8 +2737,9 @@ requires-dist = [
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "githubkit", extras = ["auth-app"], specifier = "==0.17.0" },
     { name = "granian", specifier = "==2.8.4" },
+    { name = "hishel", extras = ["async", "httpx2"], specifier = "==1.4.0" },
     { name = "httpx", specifier = "==0.28.1" },
-    { name = "httpx2", marker = "extra == 'dev'", specifier = "==2.13.0" },
+    { name = "httpx2", specifier = "==2.13.0" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = "==2.15" },
     { name = "locust", marker = "extra == 'dev'", specifier = "==2.46.6" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==2.3.1" },
@@ -2765,7 +2771,6 @@ requires-dist = [
     { name = "squawk-cli", marker = "extra == 'dev'", specifier = "==2.70.0" },
     { name = "types-defusedxml", marker = "extra == 'dev'", specifier = "==0.7.0.20260504" },
     { name = "uvicorn", extras = ["standard"], specifier = "==0.53.0" },
-    { name = "valkey", specifier = "==6.2.0" },
 ]
 provides-extras = ["dev"]
 
@@ -2948,15 +2953,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c1/37/945b4ca0ac27e3dc4952642d4c900edd030b3da6c9634875af6e13ae80e5/uvloop-0.22.1-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b91328c72635f6f9e0282e4a57da7470c7350ab1c9f48546c0f2866205349d21", size = 4467065, upload-time = "2025-10-16T22:16:58.206Z" },
     { url = "https://files.pythonhosted.org/packages/97/cc/48d232f33d60e2e2e0b42f4e73455b146b76ebe216487e862700457fbf3c/uvloop-0.22.1-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:daf620c2995d193449393d6c62131b3fbd40a63bf7b307a1527856ace637fe88", size = 4328384, upload-time = "2025-10-16T22:16:59.36Z" },
     { url = "https://files.pythonhosted.org/packages/e4/16/c1fd27e9549f3c4baf1dc9c20c456cd2f822dbf8de9f463824b0c0357e06/uvloop-0.22.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:6cde23eeda1a25c75b2e07d39970f3374105d5eafbaab2a4482be82f272d5a5e", size = 4296730, upload-time = "2025-10-16T22:17:00.744Z" },
-]
-
-[[package]]
-name = "valkey"
-version = "6.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/90/c7/38b3ae24672abcc19e668858c4c8c4f7b7d0dda06973f46d755190452fdc/valkey-6.2.0.tar.gz", hash = "sha256:7337c493ce55d7fe58ab44c93c37f56552dad75f9512e97c5808374ab5af4939", size = 4596658, upload-time = "2026-10-12T10:24:28.403Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/10/84312ccb0d328702e27f2e79c18aa84004482dd1737dc58d2b352d7289e2/valkey-6.2.0-py3-none-any.whl", hash = "sha256:94a12c87cd070e356b2c89e2946fa582d9f65ec2e003ab1867e987220e2beae8", size = 261233, upload-time = "2026-10-12T10:24:26.871Z" },
 ]
 
 [[package]]
