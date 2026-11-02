@@ -205,10 +205,11 @@ def _adapter(platform: FakePlatform, wrong: str) -> type:
                 )
             if wrong == "no-credential":
                 return CredentialOutcome(Change(ChangeState.UNCHANGED), prior, None)
-            outcome = await super().ensure_credential(s, prior)
+            outcome: CredentialOutcome = await super().ensure_credential(s, prior)
             if wrong == "issuer" and isinstance(outcome.credential, OidcTrust):
                 trust = replace(outcome.credential, issuer="https://evil.example")
-                return replace(outcome, credential=trust)
+                swapped: CredentialOutcome = replace(outcome, credential=trust)
+                return swapped
             return outcome
 
     return Odd
