@@ -254,30 +254,34 @@ async def test_repository_events_cover_unknown_tenants_and_metadata_changes() ->
 
 def test_host_settings_problems_cover_missing_hosts_and_ghe_com_paths() -> None:
     """A URL without a host, and a ghe.com API URL with a path, are settings errors."""
-    nohost = load_hosts([
-        {
-            "name": "h",
-            "kind": "github.com",
-            "web_url": "https://",
-            "api_url": "https://api.github.com",
-            "oidc_issuer": "https://token.actions.githubusercontent.com",
-            "registry_host": "ghcr.io",
-            "signer": "s",
-        }
-    ])
+    nohost = load_hosts(
+        [
+            {
+                "name": "h",
+                "kind": "github.com",
+                "web_url": "https://",
+                "api_url": "https://api.github.com",
+                "oidc_issuer": "https://token.actions.githubusercontent.com",
+                "registry_host": "ghcr.io",
+                "signer": "s",
+            }
+        ]
+    )
     with pytest.raises(HostSettingsError, match="has no host"):
         validate_hosts(nohost, {"s": _file_signer()}, production=False)
-    ghe = load_hosts([
-        {
-            "name": "e",
-            "kind": "ghe.com",
-            "web_url": "https://acme.ghe.com",
-            "api_url": "https://api.acme.ghe.com/v3",
-            "oidc_issuer": "https://x",
-            "registry_host": "r",
-            "signer": "s",
-        }
-    ])
+    ghe = load_hosts(
+        [
+            {
+                "name": "e",
+                "kind": "ghe.com",
+                "web_url": "https://acme.ghe.com",
+                "api_url": "https://api.acme.ghe.com/v3",
+                "oidc_issuer": "https://x",
+                "registry_host": "r",
+                "signer": "s",
+            }
+        ]
+    )
     with pytest.raises(HostSettingsError, match="no path"):
         validate_hosts(ghe, {"s": _file_signer()}, production=False)
 
