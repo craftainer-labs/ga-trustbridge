@@ -96,7 +96,9 @@ class FileSigner:
         self._key = key
 
     def _write(self, raw: bytes) -> None:
-        fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _PRIVATE_MODE)
+        tmp = self._path.with_name(self._path.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _PRIVATE_MODE)
         os.fchmod(fd, _PRIVATE_MODE)
         with os.fdopen(fd, "wb") as handle:
             handle.write(raw)
+        tmp.replace(self._path)

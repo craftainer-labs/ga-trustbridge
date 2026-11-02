@@ -36,13 +36,16 @@ from trustbridge.github.manifest import (
     ManifestFlowError,
     ManualApp,
     StartRequest,
+    client_secret_ref,
+    webhook_secret_ref,
 )
 from trustbridge.github.models import Registration
 from trustbridge.signer.base import AppKeySigner, SignerImportUnsupportedError
 from trustbridge.signer.file import FileSigner
+from trustbridge.worker.secrets import LocalSecrets
 
 PEM = pem_of(make_key())
-WEBHOOK_REF = "github-hosts/github.com/webhook-secret"
+WEBHOOK_REF = "store:github-hosts/github.com/webhook-secret"
 
 
 class Nonces:
@@ -195,8 +198,8 @@ async def test_trustbridge_flow_stores_key_secrets_and_registration(
     assert f.regs.items["github.com"] == Registration(
         123, result.webhook_secret_ref or "", "trustbridge-github-com"
     )
-    assert f.secrets.items["github-hosts/github.com/webhook-secret"] == "whsec"
-    assert f.secrets.items["github-hosts/github.com/client-secret"] == "csec"
+    assert f.secrets.items["store:github-hosts/github.com/webhook-secret"] == "whsec"
+    assert f.secrets.items["store:github-hosts/github.com/client-secret"] == "csec"
     assert f.signer_path.read_text() == PEM
     assert oct(f.signer_path.stat().st_mode & 0o777) == "0o600"
     # Invariant 5: no PEM or secret in the result (what the browser gets) or in any log record.
@@ -481,3 +484,11 @@ async def test_unknown_events_and_installations_are_ignored() -> None:
     )
     await handlers.on_repository(ctx("repository", "renamed", {"installation": None}))
     await handlers.on_installation(ctx("installation", "weird", {"installation": INSTALLATION}))
+
+
+async def test_secret_refs_round_trip_through_the_production_secret_store(tmp_path: Path) -> None:
+    """Both generated refs use the `store:` scheme that `LocalSecrets` can write and read."""
+    secrets = LocalSecrets(tmp_path)
+    for ref in (webhook_secret_ref("github.com"), client_secret_ref("github.com")):
+        await secrets.write(ref, SecretStr("value"))
+        assert (await secrets.read(ref)).get_secret_value() == "value"
