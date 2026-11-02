@@ -78,7 +78,7 @@ async def test_the_migrate_job_runs_alembic_upgrade_head(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         "alembic.command.upgrade", lambda cfg, rev: calls.append((cfg.config_file_name or "", rev))
     )
-    migrate._alembic_upgrade()  # noqa: SLF001
+    migrate._alembic_upgrade()
     assert calls == [("alembic.ini", "head")]
 
     async def fake_upgrade(_settings: object) -> int:
@@ -163,7 +163,7 @@ async def test_the_worker_loop_backs_off_after_a_stream_error_and_survives_a_fai
     async def broken(entry: StreamEntry, *, from_pending: bool) -> None:
         raise RuntimeError("postgres down")
 
-    h.worker._process = broken  # type: ignore[method-assign]  # noqa: SLF001
+    h.worker._process = broken  # type: ignore[method-assign]
     h.valkey.down = True  # the re-add fails too
     await h.worker.process(StreamEntry("1-0", "d1"), from_pending=False)
 
