@@ -100,7 +100,7 @@ CONTEXT = {
     "hook_secret": HOOK_SECRET,
 }
 HOOK = CONTEXT["hook"]
-HOOK_AUTH = sha256(f"{HOOK}|{HOOK_SECRET}".encode()).hexdigest()[:20]
+HOOK_AUTH = sha256(f"{HOOK}|{HOOK_SECRET}".encode()).hexdigest()
 SLOT = CredentialSlot(2, CRED)
 DELIVERED_SLOT = CredentialSlot(2, CRED, {"kind": "robot", "robot_id": "11"}, True)
 PREV_SLOT = CredentialSlot(1, PREV, {"kind": "robot", "robot_id": "10", "project": PROJECT}, True)
@@ -347,11 +347,52 @@ async def test_ensure_webhook_updates_a_drifted_policy(scenario: str) -> None:
 
 
 async def test_ensure_webhook_tolerates_a_creation_race() -> None:
-    """A3: a 409 on POST means a parallel worker created it."""
+    """A3: a 409 on POST re-reads the policy; a matching one with a known secret is UNCHANGED."""
     replay, adapter = build("webhooks.json", "race")
-    applied = await adapter.ensure_webhook(TARGET, None)
+    prior = ResourceState(HOOK, {"kind": "webhook", "project": PROJECT, "auth": HOOK_AUTH})
+    applied = await adapter.ensure_webhook(TARGET, prior)
     replay.assert_exhausted()
     assert applied.change.state is ChangeState.UNCHANGED
+
+
+async def test_a_webhook_race_applies_the_desired_body_when_it_differs() -> None:
+    """A 409 re-reads the winner's policy and PUTs ours over it (also for an unknown secret)."""
+    replay, adapter = build("webhooks.json", "race_drift")
+    applied = await adapter.ensure_webhook(TARGET, None)
+    replay.assert_exhausted()
+    assert applied.change.state is ChangeState.UPDATED
+
+
+async def test_a_webhook_race_with_a_vanished_or_foreign_policy_is_an_error() -> None:
+    """A 409 whose policy then cannot be found retries; an unmarked one is never adopted."""
+    _, adapter = build("webhooks.json", "race_gone")
+    with pytest.raises(AdapterError) as info:
+        await adapter.ensure_webhook(TARGET, None)
+    assert info.value.retryable
+    _, adapter = build("webhooks.json", "race_foreign")
+    with pytest.raises(AdapterError) as info:
+        await adapter.ensure_webhook(TARGET, None)
+    assert not info.value.retryable
+
+
+async def test_ensure_project_refuses_an_existing_public_project() -> None:
+    """The adapter creates private projects only; a public one of that name is not adopted."""
+    _, adapter = build("projects.json", "exists_public")
+    with pytest.raises(AdapterError) as info:
+        await adapter.ensure_project(TENANT, ProjectSpec("default"), None)
+    assert not info.value.retryable
+
+
+async def test_a_previous_robot_found_by_id_in_another_project_is_deleted() -> None:
+    """A recorded robot id finds the robot even when it sits in another project than the ref."""
+    replay, adapter = build("credentials.json", "finish_moved")
+    done = await adapter.rotate_finish(PUSH, state_of(SLOT, PREV_SLOT))
+    replay.assert_exhausted()
+    assert done.change.state is ChangeState.DELETED
+    replay, adapter = build("credentials.json", "finish_moved")
+    gone = await adapter.delete_credential(PUSH, CredentialState(current=None, previous=PREV_SLOT))
+    replay.assert_exhausted()
+    assert gone.change.state is ChangeState.DELETED
 
 
 async def test_ensure_webhook_uses_the_project_in_its_prior_ref() -> None:

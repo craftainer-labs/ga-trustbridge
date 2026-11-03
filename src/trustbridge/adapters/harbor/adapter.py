@@ -179,9 +179,18 @@ class HarborAdapter:
                     else ChangeState.CREATED
                 )
             else:
+                self._require_private(found)
                 state = ChangeState.UNCHANGED
         ref = {"kind": "project", "project_name": name}
         return Applied(Change(state), ResourceState(name=name, ref=ref))
+
+    @staticmethod
+    def _require_private(found: httpx.Response) -> None:
+        """Refuse an existing project that is public: the adapter only ever creates private ones."""
+        metadata = json_object(found).get("metadata")
+        public = metadata.get("public") if isinstance(metadata, dict) else None
+        if str(public).lower() == "true":
+            raise AdapterError(False, "Harbor project exists but is public; not adopting it")
 
     # ---- repositories ----------------------------------------------------
     async def ensure_repository(
@@ -230,27 +239,26 @@ class HarborAdapter:
         base = f"{API}/projects/{seg(project)}/webhook/policies"
         # Harbor never returns `auth_header` in the clear, so a rotated secret is detected by a
         # digest kept in the ref; a missing digest (or a changed one) pushes the body again.
-        auth = sha256(f"{name}|{secret.get_secret_value()}".encode()).hexdigest()[
-            :PROJECT_DIGEST_LENGTH
-        ]
+        auth = sha256(f"{name}|{secret.get_secret_value()}".encode()).hexdigest()
+        known_auth = prior.ref.get("auth") if prior is not None else None
         async with self._client() as c:
             existing = await self._find_policy(c, project, name)
-            if existing is not None and existing.get("description") != MARKER:
-                raise AdapterError(False, "Harbor webhook policy is not managed by trustbridge")
+            state = ChangeState.UNCHANGED
             if existing is None:
                 post = await c.call("POST", base, json=body, accept=CONFLICT)
-                state = (
-                    ChangeState.UNCHANGED
-                    if post.status_code == HTTP_CONFLICT
-                    else ChangeState.CREATED
-                )
-            elif auth == (prior.ref.get("auth") if prior is not None else None) and (
-                self._webhook_matches(existing, t.url, events)
-            ):
-                state = ChangeState.UNCHANGED
-            else:
-                await c.call("PUT", f"{base}/{self._policy_id(existing)}", json=body)
-                state = ChangeState.UPDATED
+                if post.status_code == HTTP_CONFLICT:
+                    # A parallel writer created it: re-read and reconcile against its policy.
+                    existing = await self._find_policy(c, project, name)
+                    if existing is None:
+                        raise AdapterError(True, "Harbor webhook policy was created concurrently")
+                else:
+                    state = ChangeState.CREATED
+            if existing is not None:
+                if existing.get("description") != MARKER:
+                    raise AdapterError(False, "Harbor webhook policy is not managed by trustbridge")
+                if auth != known_auth or not self._webhook_matches(existing, t.url, events):
+                    await c.call("PUT", f"{base}/{self._policy_id(existing)}", json=body)
+                    state = ChangeState.UPDATED
         ref = {"kind": "webhook", "project": project, "policy": name, "auth": auth}
         return Applied(Change(state), ResourceState(name=name, ref=ref))
 
@@ -455,15 +463,23 @@ class HarborAdapter:
         """List project robots whose name contains `name_part` (the listing spans the instance)."""
         return await HarborAdapter._pages(c, f"{API}/robots", f"Level=project,name=~{name_part}")
 
-    async def _find_robot(self, c: HarborClient, project: str, name: str) -> JsonObj | None:
-        """Return the project robot `name`; its full name is `<prefix><project>+<name>`."""
+    async def _find_robot(
+        self, c: HarborClient, project: str, name: str, robot_id: str | None = None
+    ) -> JsonObj | None:
+        """Return the project robot `name`; its full name is `<prefix><project>+<name>`.
+
+        With `robot_id` (deleting a recorded slot) the robot also matches by that id, so one that
+        sits in another project than the ref says is still found; the name must match either way.
+        """
         for robot in await self._robots(c, name):
             full = robot.get("name")
             if not isinstance(full, str) or "+" not in full:
                 continue
             head, slot_name = full.rsplit("+", 1)
-            if slot_name == name and head.rsplit("$", 1)[-1] == project:
-                self._robot_id(robot)
+            if slot_name != name:
+                continue
+            found_id = self._robot_id(robot)
+            if head.rsplit("$", 1)[-1] == project or found_id == robot_id:
                 return robot
         return None
 
@@ -564,7 +580,7 @@ class HarborAdapter:
         if not slot.name.startswith(tenant_prefix(self._config.tenant.id)):
             return False
         project = slot.ref.get("project") or self._project_for_credentials()
-        robot = await self._find_robot(c, project, slot.name)
+        robot = await self._find_robot(c, project, slot.name, slot.ref.get("robot_id"))
         if robot is None or robot.get("description") != MARKER:
             return False
         gone = await c.call("DELETE", f"{API}/robots/{self._robot_id(robot)}", accept=NOT_FOUND)

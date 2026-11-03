@@ -99,6 +99,8 @@ No primary-documentation statement exists for these; the fixtures encode best-ef
   `Default`.
 - That `expires_at` in `RobotCreated` is an epoch in seconds (`-1` for never).
 - That `DELETE /projects/{name}` answers 412 for a project that still holds repositories.
+- Robot expiry renewal: whether `PUT /robots/{id}` with a larger `duration` extends `expires_at`
+  (follow-up NG5bf; see the 90-day limitation below).
 - Whether MSR 4 differs from upstream Harbor in any of these endpoints (its docs do not say).
 - That `GET /projects/{name}` answers 404 (not 403) for an absent project to the admin account.
 - Pagination: `page` and `page_size=100` are sent and pages are read until a short page (at most
@@ -111,8 +113,13 @@ No primary-documentation statement exists for these; the fixtures encode best-ef
   user decision "Harbor scope"; `platform_repository_key` is accepted and ignored. Isolation
   between repositories needs separate Harbor projects, which this adapter does not create.
 - A repository resource is never created or deleted by the adapter (Harbor creates it on push).
-- Credentials target the adapter's configured project key; it must equal the key the projects
-  were ensured under (nothing validates that they agree).
+- **Credential project is not bound to the ProjectSpec.** `CredentialScope` (interface I2) carries
+  no project identity, so robots and webhooks target the project derived for the spec key
+  `default`, or the operator's `project_key` connection entry; nothing validates that this is a
+  project `ensure_project` created. Binding them needs an I2 decision (follow-up).
+- An existing project that is public is refused (the adapter only creates private projects).
+- Listings are read up to 50 pages of 100 (5000 items); beyond that every credential call fails
+  with a non-retryable error.
 - A scope whose permission changes gets a new robot name (the scope key changes); the old robot is
   removed by `delete_credential` or the orphan sweep, not rewritten in place.
 - **Ownership.** The adapter never adopts, updates or deletes what it did not create. Robots and

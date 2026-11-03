@@ -442,6 +442,40 @@
        ]
       }
      }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}/webhook/policies",
+      "query": {
+       "q": "name=${hook}",
+       "page_size": "100",
+       "page": "1"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": [
+       {
+        "id": 3,
+        "name": "${hook}",
+        "project_id": 7,
+        "enabled": true,
+        "event_types": [
+         "PUSH_ARTIFACT"
+        ],
+        "targets": [
+         {
+          "type": "http",
+          "address": "${hook_url}",
+          "auth_header": "***",
+          "skip_cert_verify": false
+         }
+        ],
+        "description": "managed by trustbridge"
+       }
+      ]
+     }
     }
    ]
   },
@@ -737,6 +771,273 @@
   },
   "foreign": {
    "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}/webhook/policies",
+      "query": {
+       "q": "name=${hook}",
+       "page_size": "100",
+       "page": "1"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": [
+       {
+        "id": 3,
+        "name": "${hook}",
+        "project_id": 7,
+        "enabled": true,
+        "event_types": [
+         "PUSH_ARTIFACT"
+        ],
+        "targets": [
+         {
+          "type": "http",
+          "address": "${hook_url}",
+          "auth_header": "***",
+          "skip_cert_verify": false
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "race_drift": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}/webhook/policies",
+      "query": {
+       "q": "name=${hook}",
+       "page_size": "100",
+       "page": "1"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": []
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/api/v2.0/projects/${project}/webhook/policies",
+      "json": {
+       "name": "${hook}",
+       "description": "managed by trustbridge",
+       "enabled": true,
+       "event_types": [
+        "PUSH_ARTIFACT"
+       ],
+       "targets": [
+        {
+         "type": "http",
+         "address": "${hook_url}",
+         "auth_header": "${hook_secret}",
+         "skip_cert_verify": false,
+         "payload_format": "Default"
+        }
+       ]
+      }
+     },
+     "response": {
+      "status": 409,
+      "json": {
+       "errors": [
+        {
+         "code": "CONFLICT",
+         "message": "resource already exists"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}/webhook/policies",
+      "query": {
+       "q": "name=${hook}",
+       "page_size": "100",
+       "page": "1"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": [
+       {
+        "id": 3,
+        "name": "${hook}",
+        "project_id": 7,
+        "enabled": true,
+        "event_types": [
+         "PUSH_ARTIFACT"
+        ],
+        "targets": [
+         {
+          "type": "http",
+          "address": "https://old.example/hook",
+          "auth_header": "***",
+          "skip_cert_verify": false
+         }
+        ],
+        "description": "managed by trustbridge"
+       }
+      ]
+     }
+    },
+    {
+     "request": {
+      "method": "PUT",
+      "path": "/api/v2.0/projects/${project}/webhook/policies/3",
+      "json": {
+       "name": "${hook}",
+       "description": "managed by trustbridge",
+       "enabled": true,
+       "event_types": [
+        "PUSH_ARTIFACT"
+       ],
+       "targets": [
+        {
+         "type": "http",
+         "address": "${hook_url}",
+         "auth_header": "${hook_secret}",
+         "skip_cert_verify": false,
+         "payload_format": "Default"
+        }
+       ]
+      }
+     },
+     "response": {
+      "status": 200
+     }
+    }
+   ]
+  },
+  "race_gone": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}/webhook/policies",
+      "query": {
+       "q": "name=${hook}",
+       "page_size": "100",
+       "page": "1"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": []
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/api/v2.0/projects/${project}/webhook/policies",
+      "json": {
+       "name": "${hook}",
+       "description": "managed by trustbridge",
+       "enabled": true,
+       "event_types": [
+        "PUSH_ARTIFACT"
+       ],
+       "targets": [
+        {
+         "type": "http",
+         "address": "${hook_url}",
+         "auth_header": "${hook_secret}",
+         "skip_cert_verify": false,
+         "payload_format": "Default"
+        }
+       ]
+      }
+     },
+     "response": {
+      "status": 409,
+      "json": {
+       "errors": [
+        {
+         "code": "CONFLICT",
+         "message": "resource already exists"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}/webhook/policies",
+      "query": {
+       "q": "name=${hook}",
+       "page_size": "100",
+       "page": "1"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": []
+     }
+    }
+   ]
+  },
+  "race_foreign": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}/webhook/policies",
+      "query": {
+       "q": "name=${hook}",
+       "page_size": "100",
+       "page": "1"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": []
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/api/v2.0/projects/${project}/webhook/policies",
+      "json": {
+       "name": "${hook}",
+       "description": "managed by trustbridge",
+       "enabled": true,
+       "event_types": [
+        "PUSH_ARTIFACT"
+       ],
+       "targets": [
+        {
+         "type": "http",
+         "address": "${hook_url}",
+         "auth_header": "${hook_secret}",
+         "skip_cert_verify": false,
+         "payload_format": "Default"
+        }
+       ]
+      }
+     },
+     "response": {
+      "status": 409,
+      "json": {
+       "errors": [
+        {
+         "code": "CONFLICT",
+         "message": "resource already exists"
+        }
+       ]
+      }
+     }
+    },
     {
      "request": {
       "method": "GET",

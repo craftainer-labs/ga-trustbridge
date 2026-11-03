@@ -155,6 +155,26 @@
      }
     }
    ]
+  },
+  "exists_public": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "project_id": 7,
+       "name": "${project}",
+       "metadata": {
+        "public": "true"
+       }
+      }
+     }
+    }
+   ]
   }
  }
 }
