@@ -333,7 +333,7 @@ privilege, explicit grants); NIST SP 800-53 AC-5, AC-6.
 
 ## Invariants the implementation must test
 
-Each is one testable sentence; NG6b, NG6d and NG6e implement and test them. 
+Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
 
 **Authentication and authorization**
 
