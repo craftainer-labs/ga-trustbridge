@@ -100,8 +100,9 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    role has no `DELETE` on `tenants`), each batch its own transaction and
    counted. Webhook bodies are cleared for deliveries recorded for the tenant: an expand
    migration adds a nullable `tenant_id` to `webhook_deliveries`, set by the worker when it
-   resolves the delivery; deletion nulls `body` (keeping the row for deduplication, as the
-   retention purge does, 0028 item 5). Rows with no `tenant_id` (never resolved, or older than
+   resolves the delivery; deletion nulls `body` and sets the row terminal with status `deleted`, which the relay, the
+   re-relay sweep and the worker skip (the row stays for deduplication, as the retention purge
+   keeps rows, 0028 item 5), so a held, body-less row is never re-relayed. Rows with no `tenant_id` (never resolved, or older than
    the column) fall to the normal retention and are counted under `skipped` as
    `retention_only`.
 6. **Done.** The record's `state` becomes `done` with its counts. The audit trail of the
@@ -117,11 +118,12 @@ singleton duty (EB-6). There is no cancel after the first destructive step; befo
 
 Events (0032) are written by the deletion itself: `tenant.deletion.requested` (who, reason, and the tenant id,
 host and installation id; **no organisation login and no tenant content**, `before` is ids,
-states and counts only, so nothing identifying survives in the append-only trail), one `tenant.deletion.step`
+states and counts only, so no organisation name or other tenant content survives in the append-only trail (only the
+opaque identifiers, see Open issues)), one `tenant.deletion.step`
 per completed step with counts, `tenant.deletion.skipped` per skipped category, and
 `tenant.deletion.completed`. They carry the tenant id, are inserted in the same transaction as
 the step they record, and **survive the deletion**: `audit_events` has no foreign key to the
-tenant and the database step never touches it. The reconciler's audit purge (0032) removes them
+tenant and the database step never touches it. The reconciler's audit purge (0032) removes the events
 only at retention. What happens to the **other** audit rows of the tenant is user decision 3.
 
 ### After deletion
@@ -186,7 +188,7 @@ adapter fakes.
 
 6. After `done`, no row with the tenant's id exists in the six tenant-keyed tables, and the
    `tenants` row is the last one removed.
-7. After `done`, the bodies of the webhook deliveries recorded for the tenant are null, and a
+7. After `done`, the bodies of the webhook deliveries recorded for the tenant are null and their status is `deleted` (never relayed or handled again), and a
    delivery with no recorded tenant is left to normal retention and listed under `skipped`.
 8. The platform step calls only adapter delete or revoke operations through the write-ahead
    path; with `delete_platform_resources` unset it deletes no project or repository (user decision 1), and with it set it deletes exactly what
@@ -235,8 +237,14 @@ adapter fakes.
   retention is the deployment's (EB-6) and is documented in the Helm chart's notes (NG7).
 - **Large tenants.** Batch size and a per-step time budget are settings; a tenant with very
   many repositories makes the GitHub step long, which the resumable cursor handles.
-- **Deletion records' retention.** They hold ids and counts only and are purged with the audit
-  retention; an alternative is to keep them indefinitely as a compliance record.
+- **Deletion records' retention.** `tenant_deletions` rows hold ids and counts only and are
+  **kept indefinitely** as a compliance record (the app role has no `DELETE` on the table; a
+  purge would need its own owner-only function and is not part of this ADR).
+- **Identifiers that survive.** The tenant id, host and installation id remain in
+  `tenant_deletions` and in the deletion's audit events until retention. They are treated as
+  non-personal operational identifiers, not tenant content; this is a judgement call listed so
+  the user can overrule it (the alternative is hashing them, which makes the record unusable
+  for an operator).
 
 ## Consequences
 

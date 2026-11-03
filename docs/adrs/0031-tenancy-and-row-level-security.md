@@ -127,7 +127,7 @@ role has `EXECUTE` on them and nothing else on that table outside its own row:
 | `tb_resolve_tenant(host, installation_id) -> uuid` | the tenant id of a pair, or `NULL` |
 | `tb_upsert_tenant(host, installation_id, org, org_id, state) -> uuid` | the `installation` event's create-or-update; never touches the admin-disable columns (0033, tenant disable) |
 | `tb_list_tenants() -> setof (id, host, installation_id, org, org_id, state, admin_disabled_at, deleting)` | what `iterate_tenants`, the admin API's tenant list and the RBAC tenant-grant resolution (0033) read; `deleting` is true while a non-terminal `tenant_deletions` row exists (0034) |
-| `tb_delete_tenant(tenant_id) -> void` | removes the `tenants` row as the last step of a deletion (0034); refuses unless the tenant is admin-disabled, has a non-terminal deletion in its database step and has no remaining tenant-keyed rows |
+| `tb_delete_tenant(tenant_id) -> void` | removes the `tenants` row as the last step of a deletion (0034); refuses unless the tenant is admin-disabled, has a non-terminal deletion in its database step and has no rows left in the five other tenant-owned tables (`tenant_repositories`, `scope_leases`, `adapter_resources`, `adapter_credentials`, `credential_operations`); it does not count `audit_events` or `tenant_deletions`, which survive |
 
 A function is a deliberate, greppable, parameter-checked gap; the alternative (a setting such
 as `app.tenant_scope = 'all'` that a policy honours) lets any code path, including a bug, flip
@@ -179,7 +179,10 @@ fleet before the N+1 migrate Job runs. Skipping release N is not supported.
 `owner_all` policy, the `FORCE` and owner-policy test (invariant 9), the role checks and the
 runtime check below all cover it too; "the six tables" in this ADR's text means the six
 tenant-owned tables, and each such check applies to `audit_events` as well. It needs no staged
-rollout because no previous release touches it.
+rollout because no previous release touches it. **Consequence for the runtime check:** it
+applies as soon as any RLS-forced table exists, so from the release that creates `audit_events`
+a runtime process whose role is a superuser or `BYPASSRLS` reports not ready; the check is
+skipped only when no table is yet forced.
 
 ### Role safety checks
 
@@ -189,7 +192,7 @@ rollout because no previous release touches it.
 - The api, worker and reconciler check at startup, once the schema's `schema_compat` is 2 or
   more, that `current_user` is neither a superuser nor `BYPASSRLS`. If it is, the process
   reports not ready with the reason and, in production, exits after `SCHEMA_WAIT_SECONDS`, like
-  any other unmet schema condition. (Before the enforcing release the check is skipped.)
+  any other unmet schema condition. (It is skipped only while no RLS table is forced yet; `audit_events` counts, see below.)
 
 ### Decisions this ADR records that the user can overrule
 
@@ -223,7 +226,11 @@ app role (not the owner, not a superuser).
    each other's context, including across `await` points and threadpool hops.
 5. The hook is the only writer of `app.tenant_id`, `tenant_context` resets the ContextVar on
    exit including when the body raises, and a request or event field never reaches the hook
-   without passing the RBAC or resolution step first.
+   without passing the RBAC or resolution step first. **Ordering:** the hook runs only when a
+   transaction begins, so the RBAC check and tenant-grant resolution run in their own session
+   and transaction, closed before `tenant_context` is entered, and the handler's session is
+   opened inside the context; an invariant tests that a handler never inherits a transaction
+   begun before its context was set.
 
 **Policies and functions**
 
@@ -256,7 +263,8 @@ app role (not the owner, not a superuser).
     `trustbridge_app` is a superuser, has `BYPASSRLS` or owns a tenant-owned table; no
     migration issues `CREATE ROLE`.
 16. A runtime process whose database role is a superuser or has `BYPASSRLS` reports not ready
-    once RLS is enforced, with the reason in its readiness detail.
+    once any RLS table is forced (`audit_events` from its release, the six from N+1), with the
+    reason in its readiness detail.
 17. A test that disables a policy (or connects as the owner without `FORCE`) fails the
     isolation tests, so a silently inert policy is caught.
 
@@ -294,8 +302,10 @@ that `tb_upsert_tenant` never writes (invariant 7); tenant data deletion is in N
   context are meant to make visible.
 - The two-release rollout means RLS is not enforced until release N+1; between the two,
   isolation rests on the application's own filters, as it does today.
-- Four `SECURITY DEFINER` functions are new privileged surface. They are small, take no
-  free-form SQL and are covered by invariants 6, 7 and 10.
+- Six `SECURITY DEFINER` functions are new privileged surface: the four here and
+  `tb_audit_purge` and `tb_audit_list` (0032), the last of which reads across tenants. They
+  are small, take no free-form SQL and are covered by invariants 6, 7 and 10, and invariant 10
+  (fixed `search_path`, no shadowing) applies to all six.
 - Tests for tenant-owned tables need a real Postgres and the app role; fakes cannot show RLS.
   The existing memory twins stay for unit tests and gain a context check of their own.
 - A superuser-run dev database makes RLS a no-op; dev compose therefore creates and uses the

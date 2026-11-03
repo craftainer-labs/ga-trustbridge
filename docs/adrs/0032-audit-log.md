@@ -52,7 +52,7 @@ One table, `audit_events`, one row per event, written by trustbridge code only:
 | `actor_sub`, `actor_iss` | for `user`: the token's `sub` and `iss`, the durable id. Never email, handle or display name (EB-1). For `system`: a fixed name (`worker`, `reconciler`, `github-webhook`, `migrate`) and `actor_iss` null |
 | `on_behalf_of` | nullable; for a webhook-driven event the GitHub sender's numeric `id` and the delivery id, never the login |
 | `source_ip` | `inet`, from `request.client.host`; null for system events. Never read from `X-Forwarded-For` directly (0028) |
-| `action` | dotted verb, from a closed enum in code: `tenant.disable`, `credential.rotate`, `delivery.requeue`, `host.registration.start`, `authz.denied`, `authn.rejected`, ... |
+| `action` | dotted verb, from a closed enum in code: `tenant.disable`, `credential.rotate`, `delivery.requeue`, `host.registration.start`, `authz.denied`, ... (there is no `authn.rejected` action: unauthenticated rejections are never rows, user decision 1) |
 | `resource_type`, `resource_id` | what was acted on; ids, not names that can change |
 | `outcome` | `success`, `denied` or `failure` |
 | `before`, `after` | `jsonb`, redacted (below); null when not applicable |
@@ -119,6 +119,11 @@ null; `SELECT` of rows whose `tenant_id` equals the context tenant. Reading even
 `tenant_id`, or across tenants (instance-scoped auditors), goes through
 `tb_audit_list(filters...)`, a `SECURITY DEFINER` function with the same shape and the same
 caveat as 0031's functions; the API calls it only for an instance-scoped role.
+
+**No `RETURNING`.** PostgreSQL applies the `SELECT` policy to the rows an `INSERT ... RETURNING`
+returns, and a null-tenant row (an `authz.denied`) is not selectable by the app role. Audit
+inserts therefore supply the `id` (a UUID generated in code) and never use `RETURNING`
+(`seq` and the defaults are not read back); an invariant tests a null-tenant insert.
 
 ### Read scope
 
@@ -206,6 +211,8 @@ with the app role.
 3. `tb_audit_purge` deletes only rows older than its cut-off, refuses a cut-off inside
    `AUDIT_RETENTION_MIN_DAYS`, never runs for another role to delete directly, and writes its
    own summary event.
+3a. An `authz.denied` row with a null `tenant_id` is inserted by the app role in a context-less
+   transaction without error (no `RETURNING`).
 4. `occurred_at` is assigned by the database: a caller-supplied value is ignored or rejected.
 
 **Content**

@@ -412,6 +412,9 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
     starts no adapter operation other than a deletion's own delete and revoke operations (0034), its webhooks are stored and not handled until it is enabled,
     `enable` makes them deliverable again, and enable and disable need the `admin` role at
     instance scope; a tenant with a non-terminal deletion cannot be enabled.
+19a. With `RBAC_ALIAS_TEMPLATE_PERSONAS` on, each persona grants exactly its aliased role at
+    instance scope; with it off, a persona grants nothing in the admin API and only the
+    namespaced roles count.
 20. A renamed organisation (`tenants.org` updated by `_sync`) stops matching its old
     tenant-scoped role names immediately and grants nothing until the role is renamed.
 21. Every mounted admin route is under `/admin/v1`, and no admin route exists at an unversioned
