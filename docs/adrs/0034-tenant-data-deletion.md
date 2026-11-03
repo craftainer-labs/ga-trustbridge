@@ -3,8 +3,8 @@
 ## Status
 
 Proposed. The user decided on 2026-11-03 (G-api) that tenant data deletion is **in NG6**,
-overriding the earlier lean to defer it; this ADR holds its design, with three decisions still
-open for the user ("Decision needed"). No code is written yet. It becomes Accepted when the
+overriding the earlier lean to defer it; this ADR holds its design and the user's answers on
+the remaining items ("User decisions"). No code is written yet. It becomes Accepted when the
 implementation merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (write-ahead operations, leases,
 parked values, retention),
@@ -81,7 +81,7 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
 2. **Platform.** For each tracked `adapter_resources` and `adapter_credentials` row, run the
    adapter's delete or revoke operation through the normal write-ahead `credential_operations`
    path (so a crash is resumed, and the platform-side name is deterministic, 0029). **What is
-   deleted is "Decision needed 1".**
+   deleted is user decision 1.**
 3. **GitHub.** Remove the secrets, variables and environments trustbridge wrote, as tracked in
    the tenant's resource and credential rows, using an installation token, per repository. If
    the installation no longer exists (the App was uninstalled), GitHub has already revoked
@@ -91,8 +91,7 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
 4. **Secret store.** Remove the tenant's parked values and its per-tenant Argo CD webhook token.
    **The adapter connection data (`store:tenants/<uuid>/<adapter>`) is not deleted by the API**,
    consistent with it being operator-only (0033): the record lists the keys under `skipped` as
-   `operator_owned`, for the operator to remove. (A judgement call, listed so the user can
-   overrule: it keeps the API from gaining any write path to that store.)
+   `operator_owned`, for the operator to remove. (User decision 4: it keeps the API from gaining any write path to that store.)
 5. **Database.** In the tenant's context (0031), in batches and in the order
    `credential_operations`, `adapter_credentials`, `adapter_resources`, `scope_leases`,
    `tenant_repositories`, then the `tenants` row last, each batch its own transaction and
@@ -107,7 +106,7 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
 
 A step that fails records the error and is retried with backoff; a **blocked step** (for example
 a platform that stays unreachable) holds the deletion in that state until the operator decides
-(**Decision needed 2**). The reconciler resumes non-terminal deletions whose lease is free, as a
+(user decision 2). The reconciler resumes non-terminal deletions whose lease is free, as a
 singleton duty (EB-6). There is no cancel after the first destructive step; before it (state
 `requested`) an admin may cancel.
 
@@ -119,8 +118,7 @@ per completed step with counts, `tenant.deletion.skipped` per skipped category, 
 `tenant.deletion.completed`. They carry the tenant id, are inserted in the same transaction as
 the step they record, and **survive the deletion**: `audit_events` has no foreign key to the
 tenant and the database step never touches it. The reconciler's audit purge (0032) removes them
-only at retention. What happens to the **other** audit rows of the tenant is **Decision needed
-3**.
+only at retention. What happens to the **other** audit rows of the tenant is user decision 3.
 
 ### After deletion
 
@@ -129,64 +127,36 @@ creates a new tenant with a new id (`tb_upsert_tenant`); the response to the del
 and its record state this, and recommend uninstalling the App first. Re-creation is not
 prevented (see Open issues).
 
+## User decisions (G-api, 2026-11-03)
+
+1. **Platform step: a per-request flag.** **User decision (G-api, 2026-11-03).** The request
+   carries `delete_platform_resources`, default **false**. Credentials and trust (tokens, robot
+   accounts, OIDC identity mappings, webhook policies, repository credentials) are always
+   removed; projects and repositories, which hold customer artifacts, are removed only when the
+   flag is set, and the confirmation then echoes it. The record lists per adapter what was
+   removed. (Considered and not chosen: credentials only with no flag; everything always.)
+2. **A step that cannot complete: block and retry, with an audited `skip-step`.** **User
+   decision (G-api, 2026-11-03).** The deletion stays in the blocked step and retries with
+   backoff (an alert is raised); it never advances on its own. An instance-scoped `admin` may
+   call `POST /admin/v1/tenant-deletions/{id}/skip-step`, which records in `skipped` what was
+   left behind, who acknowledged it (`acknowledged_by`) and when, is audited, and lets the next
+   step run. (Considered and not chosen: an automatic skip after a timeout.)
+3. **The deleted tenant's other audit rows: kept until normal retention.** **User decision
+   (G-api, 2026-11-03).** Audit rows of the tenant stay until `AUDIT_RETENTION_DAYS`, so the
+   append-only guarantee stays whole; `before` and `after` are redacted allow-lists (0032) and
+   hold few tenant data. (Considered and not chosen: stripping them through an owner-only
+   function, or purging them at deletion.)
+4. **Connection data: not deleted by the API.** **User decision (G-api, 2026-11-03)**
+   (accepted judgement call). Adapter connection data `store:tenants/<uuid>/<adapter>` is
+   operator-owned, matching the operator-only rule (0033); deletion lists its keys under
+   `skipped` as `operator_owned` for the operator to remove.
+
+Sources: EB-15; 0029 adapter delete semantics; 0028 invariants 22-23; GDPR Art. 17(3)(b) and
+(e), as general context and not legal advice.
+
 ## Decision needed
 
-For each item: the options, their trade-offs, the sources, and a lean that is only a lean.
-
-### 1. What the platform step deletes
-
-- **A. Credentials and trust only.** Revoke tokens and robot accounts, remove OIDC identity
-  mappings and webhook policies, remove repository credentials: everything that grants access
-  or that CI uses. Projects, repositories and artifacts on the platform stay. The tenant's data
-  in the platform is not destroyed, and a wrong click cannot delete artifacts; cost: the
-  platform keeps projects that trustbridge created, which the customer must remove.
-- **B. Everything trustbridge provisioned, including projects and repositories.** A complete
-  removal, which is what "deletion" can mean for a compliance request; cost: irreversible loss
-  of artifacts and images stored there (Harbor project with images, Docker Hub repository),
-  and adapters differ in whether they can delete a non-empty project at all.
-- **C. A per-request flag**: A by default, B when the request sets `delete_platform_resources`
-  (and the confirmation echoes it), listed per adapter in the record.
-
-Lean: **C**, defaulting to A. Credentials and trust are what trustbridge is responsible for;
-deleting stored artifacts is a different order of harm and should be an explicit, per-request
-choice. Sources: EB-15; 0029 adapter delete semantics (the adapter contract says what each
-adapter can delete); NIST SP 800-88 (media sanitization scope) is not directly applicable, so
-this is a judgement.
-
-### 2. When a platform or GitHub step cannot complete
-
-- **A. Block until it can** (retry with backoff, `state` stays at the step, an alert is
-  raised): nothing is left behind silently; cost: a platform that is gone or an installation
-  that is revoked blocks the deletion indefinitely.
-- **B. Proceed with an explicit operator acknowledgement**: the admin calls
-  `POST /admin/v1/tenant-deletions/{id}/skip-step` for the blocked step, which records what was
-  left (`skipped`, `acknowledged_by`), is audited, and lets the database step run. Orphans
-  remain on the platform, named in the record.
-- **C. Proceed automatically after a timeout** (`TENANT_DELETION_STEP_TIMEOUT`): never blocks;
-  silently leaves orphans, which an auditor may object to.
-
-Lean: **B**, with A as the behaviour until the acknowledgement. Deleting the customer's data
-from our side must not wait forever on a third party, and the left-behind state must be named
-and attributed. Sources: EB-15; 0028 invariants 22-23 (orphan sweep reasoning).
-
-### 3. The deleted tenant's other audit rows
-
-- **A. Keep them until normal retention** (`AUDIT_RETENTION_DAYS`). Preserves the audit trail
-  an auditor needs (what happened to this tenant before it was deleted); `before`/`after` may
-  still hold the organisation login and repository full names for up to the retention period.
-- **B. Keep them but reduce them** to ids and actions (clear `before` and `after` and strip
-  names) through an owner-only definer function that the append-only trigger allows for this
-  case alone. Removes tenant content from the trail while keeping its shape; costs a second
-  owner-only mutation path against append-only (0032) and a rule for what is stripped.
-- **C. Purge them** at deletion except the deletion events: a full erasure; costs the audit
-  history (a SOC 2 reviewer cannot see what happened before) and needs a third owner-only
-  path.
-
-Lean: **A**. Audit data is the account of actions by admins (keyed by `sub`); it carries few
-tenant data by design (redacted allow-lists, 0032), and it keeps the append-only guarantee
-whole; revisit with B if a customer's erasure request demands it. Sources: EB-4, EB-15;
-GDPR Art. 17(3)(b) and (e) (the right to erasure does not apply where retention is needed for
-a legal obligation or legal claims), cited as general context and not as legal advice.
+None open.
 
 ## Invariants the implementation must test
 
@@ -215,8 +185,7 @@ adapter fakes.
 7. After `done`, the bodies of the webhook deliveries recorded for the tenant are null, and a
    delivery with no recorded tenant is left to normal retention and listed under `skipped`.
 8. The platform step calls only adapter delete or revoke operations through the write-ahead
-   path; with `delete_platform_resources` unset it deletes no project or repository (the
-   lean for decision 1; adjust to the user's choice), and with it set it deletes exactly what
+   path; with `delete_platform_resources` unset it deletes no project or repository (user decision 1), and with it set it deletes exactly what
    the tenant's resource rows track.
 9. The GitHub step removes only the secrets, variables and environments tracked for the
    tenant; for an uninstalled App it removes nothing, makes no GitHub call that needs the
@@ -240,7 +209,7 @@ adapter fakes.
 **Failure policy**
 
 15. A blocked step holds the deletion in that state and never advances to `database` without
-    an acknowledgement (under the lean for decision 2); the acknowledgement is audited with
+    an acknowledgement (user decision 2); the acknowledgement is audited with
     the acknowledger's `sub` and what was left.
 16. A tenant whose installation still exists is re-created with a new tenant id on its next
     event, and the deletion record and response say so.
@@ -274,7 +243,7 @@ adapter fakes.
   what remains.
 - A new host-scoped table and a new column on `webhook_deliveries` are added outside RLS;
   deleting webhook bodies per tenant depends on the worker recording `tenant_id` at resolution.
-- The audit trail keeps tenant references past deletion (decision 3's lean), which is the
+- The audit trail keeps tenant references past deletion (user decision 3), which is the
   trade between auditability and erasure.
 - Platform-side deletion depends on each adapter's delete semantics (0029), so the adapters'
   contract tests gain delete and revoke cases.

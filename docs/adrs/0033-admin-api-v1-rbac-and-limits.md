@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed. G-api answers from the user are recorded below (2026-11-03); one item stays open
-("Decision needed: roles"). No code is written yet. It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
+Proposed. G-api answers from the user are recorded below (2026-11-03); none are open.
+No code is written yet. It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
 endpoints) merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (instance layout, the abuse
 limiter, the NG6 split of limits),
@@ -94,13 +94,11 @@ settles them; they are recorded for visibility.
 
 ### Roles and their source
 
-The role set is "Decision needed: roles" below (the four-role set is the starting point, the
-user decided on 2026-11-03). Roles are read from the Keycloak client roles in
+The role set and the persona aliases are user decision 2 below. Roles are read from the Keycloak client roles in
 `resource_access.<OIDC_CLIENT_ID>.roles`, the template's `require_roles` path, by the RBAC
 dependency (`trustbridge.rbac`), which turns the token into a `Principal`: `sub`, `iss`, and the
 set of `(role, scope)` grants described under "User decisions" items 3 and 4. A role name that
-does not parse as a trustbridge role grants nothing here (it may still be a template persona for
-the template's own routes).
+is neither a template persona (aliased, decision 2) nor a trustbridge role grants nothing.
 
 ### Tenant disable (user decision 8: in NG6)
 
@@ -116,7 +114,7 @@ with a non-terminal deletion (0034) cannot be enabled.
 
 ## User decisions (G-api, 2026-11-03)
 
-Recorded from the user's answers. Items 2 (roles) stays open in part, see the next section.
+Recorded from the user's answers. Item 2 (roles) is recorded after the personas analysis, in the next section.
 
 ### 1. Base path: `/admin/v1`
 
@@ -210,8 +208,7 @@ The numbers are starting points to measure with the UI.
   (`docs/openapi/admin-v1.json`) with a **drift test** that fails when the generated spec
   differs from the snapshot. The snapshot is attached to each release.
 
-**Endpoint list.** Base `/admin/v1`; `{t}` is a tenant id. Roles are the names from "Decision
-needed: roles" (the four-role set).
+**Endpoint list.** Base `/admin/v1`; `{t}` is a tenant id. Roles are the four of decision 2.
 
 Read-only (NG6d):
 
@@ -239,7 +236,7 @@ Mutating (NG6e):
 | `POST /hosts/{host}/registration` (start the manifest flow), `POST /hosts/{host}/registration/manual` (App id, PEM, webhook secret; 0030) | instance | admin |
 | `POST /tenants/{t}/disable`, `POST /tenants/{t}/enable` | instance | admin |
 | `POST /tenants/{t}/deletion` (0034; the tenant must be disabled), `POST /tenant-deletions/{id}/cancel` (before the first destructive step) | instance | admin |
-| `POST /tenant-deletions/{id}/skip-step` (only if 0034's decision 2 lean is accepted) | instance | admin |
+| `POST /tenant-deletions/{id}/skip-step` (0034, user decision 2) | instance | admin |
 
 Not in v1 by design: any write of adapter connection data (decided), a policies endpoint (no
 policy table exists yet; the UI's "policies" screen needs a separate item and ADR), and any
@@ -261,12 +258,10 @@ to a SIEM is a follow-up.
 **User decision (G-api, 2026-11-03):** in NG6 (the user overrode the lean to defer it). The
 design is large enough for its own ADR: [0034](0034-tenant-data-deletion.md).
 
-## Decision needed: roles
+## Roles and the template's personas
 
-The user decided to **start from the four roles** `admin`, `operator`, `auditor`, `viewer` and
-asked that the template's existing personas be examined and a proposal made for how they
-integrate. This section is that analysis; what remains for the user is whether to accept the
-proposal.
+The user decided to start from the four roles and asked that the template's existing personas
+be examined. The analysis is here; the decision is item 2 at the end of this section.
 
 ### Where the template's personas are defined and used
 
@@ -296,40 +291,52 @@ The template ships five roles, all Keycloak client roles of the `api` client:
 | `security` | reads `/audit` | Matches `auditor` in intent (audit read, no change) |
 | `detective` | reads `/audit` and Hero data, cannot write either | Matches `auditor` exactly (reads everything, mutates nothing) |
 
-### Proposal (the lean)
+### 2. Roles: the four roles, with the template personas aliased
 
-1. **Keep the template personas as they are, for the template's own routes.** They define the
-   example Hero and `/audit` behaviour and their tests; nothing under `src/app/` changes, and
-   they keep working for anyone running the example.
-2. **Give trustbridge its own namespaced roles**, never reusing the template's bare names:
-   `trustbridge:admin`, `trustbridge:operator`, `trustbridge:auditor`, `trustbridge:viewer`
-   (and the tenant-scoped form of decision 4). This removes the `viewer` collision and means a
-   persona granted for the demo gives no access to trustbridge.
-3. **No aliasing.** `security` and `detective` are not treated as `auditor`, and `editor` and
-   `maintainer` are not treated as `operator` and `admin`. Aliasing would make granting a demo
-   role carry production privilege, and the meanings differ enough (table above) to make the
-   mapping misleading. A deployment that really wants a persona to act as a trustbridge role
-   assigns the trustbridge role to it in Keycloak, which is explicit and audited.
-4. **The role matrix** (cumulative by assignment, not by hierarchy: a user needing two roles
-   holds two): `viewer` reads operational data except audit; `auditor` adds audit list and
-   export and mutates nothing; `operator` adds requeue, reconcile, rotate and registration
-   start; `admin` adds registration upload, tenant disable/enable and deletion. Separation of
-   duties: the operator who changes things is not the auditor who reads the audit.
-5. **Production note.** The template's Hero and `/audit` example routes stay mounted in the
-   same app; whether a production deployment should disable them is a template question, not
-   decided here (open issue below).
+**User decision (G-api, 2026-11-03):** the role set is `admin`, `operator`, `auditor`, `viewer`
+(matrix below), and the template's personas are **aliased** onto it. The earlier lean
+(namespaced roles only, no aliasing) was rejected.
 
-Options the user may prefer instead:
+**Alias table.** A bare persona role in `resource_access.<OIDC_CLIENT_ID>.roles` grants the
+trustbridge role below **at instance scope**:
 
-- **Alias the personas** (`security` and `detective` to `auditor`, `editor` to `operator`,
-  `maintainer` to `admin`): the dev realm's existing users work out of the box, at the cost of
-  the privilege-carryover problem above.
-- **Reduce to the template's five** and drop the four-role set: fewest names, but the
-  template's names do not describe the operations here.
+| Template persona | Trustbridge role | Why |
+| --- | --- | --- |
+| `viewer` | `viewer` | same meaning (read-only) |
+| `security` | `auditor` | audit read, no change |
+| `detective` | `auditor` | reads audit and data, writes neither; exactly an auditor |
+| `editor` | `operator` | closest in power: changes things, but not configuration |
+| `maintainer` | `admin` | the template's highest write role; its delete is owner-scoped on example data, so this is the loosest fit |
 
-Lean: the proposal above (own namespaced roles, no aliasing, personas untouched). Sources:
-EB-2; NFR-0011, NFR-0014; FR-0015, FR-0016; ADR 0011; Kubernetes RBAC good practices (least
-privilege, explicit grants); NIST SP 800-53 AC-5, AC-6.
+My analysis gave no better mapping for `editor` or `maintainer`: the template's meanings are
+about editing records, not operations or configuration, so these two are the weakest matches
+and are aliased as the user asked.
+
+**Role names and scope.** The namespaced forms stay and are the way to grant a role at
+**tenant scope**: `trustbridge:<role>` (instance) and `trustbridge:<host>:<org>:<role>` (one
+tenant), user decision 4. Personas are bare names, so they can only grant instance scope. A
+principal's roles are the union of its namespaced roles and its aliased personas.
+
+**Matrix** (by assignment, not hierarchy: a user needing two roles holds two): `viewer` reads
+operational data except audit; `auditor` adds audit list and export and mutates nothing;
+`operator` adds requeue, reconcile, rotate and registration start; `admin` adds registration
+upload, tenant disable and enable, and tenant data deletion (0034). Separation of duties: the
+operator who changes things is not the auditor who reads the audit.
+
+**Accepted consequence:** a template persona grant carries production privilege in
+trustbridge, for example a `maintainer` is an instance `admin` who can disable and delete
+tenants, and the dev realm's persona users are therefore trustbridge users. Personas must be
+assigned deliberately; a deployment that does not want this removes the persona roles from the
+client or does not assign them. The alias can be switched off by a setting
+(`RBAC_ALIAS_TEMPLATE_PERSONAS`, default on) if the user wants a deployment to be namespaced-only.
+Because the personas already exist in the devcontainer realm, the dev users work against the
+admin API without a realm change (only the tenant-scoped roles need new realm entries).
+
+**Still a template question, not decided here:** the Hero CRUD and `/audit` example routes stay
+mounted in the same app; whether production disables them is open (Open issues).
+
+Sources: EB-2; NFR-0011, NFR-0014; FR-0015, FR-0016; ADR 0011; Kubernetes RBAC good practices;
+NIST SP 800-53 AC-5, AC-6.
 
 ## Invariants the implementation must test
 
@@ -344,9 +351,11 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
    `MODE=dev`.
 3. A valid token with no role, or a role that is not enough for the route, gets 403 problem
    details and an `authz.denied` audit event (0032) carrying its `sub`.
-4. Roles come only from `resource_access.<OIDC_CLIENT_ID>.roles`; a role name that is not
-   `trustbridge:<role>` or `trustbridge:<host>:<org>:<role>` with a known role grants nothing
-   (a template persona such as `security` grants no trustbridge access), a role naming an org
+4. Roles come only from `resource_access.<OIDC_CLIENT_ID>.roles`; a role name that is not a
+   template persona, `trustbridge:<role>` or `trustbridge:<host>:<org>:<role>` with a known
+   role grants nothing, each persona grants exactly its aliased role at instance scope
+   (security and detective: auditor; viewer: viewer; editor: operator; maintainer: admin), a
+   role naming an org
    with no tenant grants nothing, and a token without `resource_access` yields a principal
    with no roles, not an error.
 5. A route with `{tenant_id}` answers 404, the same body as for an unknown tenant, to a
@@ -420,8 +429,9 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
   (user decision 4). A DB mapping table, rejected for now, would remove the risk.
 - **Template example routes in production.** The Hero CRUD and `/audit` stay mounted in the
   same app; whether a production deployment disables them is a template-level question.
-- **Dev realm.** Adding the trustbridge roles and test users to the devcontainer realm export is
-  a `.devcontainer/` change that needs the user and a rebuild.
+- **Dev realm.** The persona users already exist and work through the aliases; adding the
+  tenant-scoped trustbridge roles to the devcontainer realm export is a `.devcontainer/`
+  change that needs the user and a rebuild.
 - **CORS.** The API is called by the BFF server-side; no CORS is added for v1.
 - **Idempotency keys** for POSTs are not part of v1; requeue and enable/disable are idempotent
   by nature and rotate is serialised by the lease (0028).
@@ -446,6 +456,8 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
   not emit `resource_access`, unless a broker or mapper writes it (NFR-0014 trade-off).
 - A role per tenant and role per user is administrative work in Keycloak and is not created by
   trustbridge when a tenant is installed.
+- Aliasing makes a template persona grant carry production privilege (decision 2); personas
+  must be assigned deliberately.
 - Tenant deletion (0034) is an irreversible admin action available from the API.
 
 ## Sources
