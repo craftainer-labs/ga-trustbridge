@@ -382,12 +382,11 @@ class PgDeliveryStore:
         terminal marker row instead. Two concurrent first inserts of one body race on the
         `(host, body_sha256)` index; the loser retries once and takes the replay path.
         """
-        for _ in range(2):
-            try:
-                async with self._sf() as session, session.begin():
-                    return await self._insert_once(session, delivery)
-            except IntegrityError:
-                continue  # lost the body-hash race: the first row exists now
+        try:
+            async with self._sf() as session, session.begin():
+                return await self._insert_once(session, delivery)
+        except IntegrityError:
+            _log.info("lost a body-hash race for delivery %s; retrying", delivery.delivery_id)
         async with self._sf() as session, session.begin():
             return await self._insert_once(session, delivery)
 

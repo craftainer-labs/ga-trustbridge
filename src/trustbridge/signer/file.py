@@ -1,6 +1,7 @@
 """The `file` signer: a PEM on disk. For development only (refused when `mode=production`)."""
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import stat
@@ -119,7 +120,8 @@ class FileSigner:
                 handle.flush()
                 os.fsync(handle.fileno())
             tmp.replace(self._path)
-            _fsync_dir(self._path.parent)
+            with contextlib.suppress(OSError):  # the key is in place; the flush is best effort
+                _fsync_dir(self._path.parent)
         except OSError as exc:
             tmp.unlink(missing_ok=True)
             msg = f"cannot write the signer key file {self._path}"

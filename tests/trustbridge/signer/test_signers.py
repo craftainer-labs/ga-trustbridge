@@ -304,3 +304,29 @@ async def test_file_signer_import_into_a_missing_directory_is_a_signer_error(
     signer = FileSigner(tmp_path / "missing" / "new.pem")
     with pytest.raises(SignerError, match="cannot write"):
         await signer.import_key(SecretStr(pem_of(make_key())))
+
+
+async def test_file_signer_failed_write_leaves_no_temp_key_and_a_failed_dir_flush_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing `fchmod` is a `SignerError` and removes the temp file; a dir fsync error is not."""
+    path = tmp_path / "new.pem"
+    signer = FileSigner(path)
+    pem = SecretStr(pem_of(make_key()))
+
+    def failing_fchmod(fd: int, mode: int) -> None:
+        raise OSError("no chmod here")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fchmod", failing_fchmod)
+        with pytest.raises(SignerError, match="cannot write"):
+            await signer.import_key(pem)
+    assert not path.exists()
+    assert not path.with_name("new.pem.tmp").exists()
+
+    def failing_dir_fsync(directory: Path) -> None:
+        raise OSError("fsync unsupported")
+
+    monkeypatch.setattr("trustbridge.signer.file._fsync_dir", failing_dir_fsync)
+    await signer.import_key(pem)  # the key is in place; the best-effort flush is not an error
+    assert path.exists()

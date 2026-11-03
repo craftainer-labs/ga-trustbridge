@@ -20,7 +20,8 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from craftainer_crud.models.base import Base
 from sqlalchemy import delete, select, text, update
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from alembic import command
 from app.db import engine, session_factory
@@ -506,3 +507,28 @@ async def test_the_migrate_job_refuses_the_wrong_role() -> None:  # inv. 18
     """The migrate job refuses the wrong role."""
     settings = make_settings(mode="dev", allow_mock_mode=False, migrate_expected_role="nobody-here")
     assert await migrate.run_upgrade(settings, upgrade=lambda: None) == 1
+
+
+async def test_a_lost_body_hash_race_is_retried_once_as_a_replay(
+    ids: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An `IntegrityError` from a concurrent first insert of one body takes the replay path."""
+    store = PgDeliveryStore(session_factory)
+    host = f"it-{uuid.uuid4().hex[:8]}"
+    first = _new(ids, host=host)
+    assert await store.insert(first) is True
+    replay = NewDelivery(f"it-{uuid.uuid4()}", host, "push", {}, first.body, datetime.now(UTC))
+    ids.append(replay.delivery_id)
+    real = PgDeliveryStore._insert_once
+    calls: list[int] = []
+
+    async def racing(session: AsyncSession, delivery: NewDelivery) -> bool:
+        calls.append(1)
+        if len(calls) == 1:
+            raise IntegrityError("INSERT", {}, Exception("ux_wd_host_body_sha256"))
+        return await real(session, delivery)
+
+    monkeypatch.setattr(PgDeliveryStore, "_insert_once", staticmethod(racing))
+    assert await store.insert(replay) is False
+    assert len(calls) == 2
+    assert await store.existing_keys([replay.key]) == {replay.key}
