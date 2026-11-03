@@ -1,0 +1,160 @@
+{
+ "source": "Shapes from the Harbor API v2.0 swagger (https://raw.githubusercontent.com/goharbor/harbor/main/api/v2.0/swagger.yaml): GET/POST /projects, DELETE /projects/{project_name_or_id}. Dummy values only.",
+ "scenarios": {
+  "create": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 404,
+      "json": {
+       "errors": [
+        {
+         "code": "NOT_FOUND",
+         "message": "project not found"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/api/v2.0/projects",
+      "json": {
+       "project_name": "${project}",
+       "metadata": {
+        "public": "false"
+       }
+      }
+     },
+     "response": {
+      "status": 201
+     }
+    }
+   ]
+  },
+  "exists": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "project_id": 7,
+       "name": "${project}",
+       "metadata": {
+        "public": "false"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "race": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 404,
+      "json": {
+       "errors": [
+        {
+         "code": "NOT_FOUND",
+         "message": "project not found"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/api/v2.0/projects",
+      "json": {
+       "project_name": "${project}",
+       "metadata": {
+        "public": "false"
+       }
+      }
+     },
+     "response": {
+      "status": 409,
+      "json": {
+       "errors": [
+        {
+         "code": "CONFLICT",
+         "message": "resource already exists"
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "delete": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "DELETE",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 200
+     }
+    }
+   ]
+  },
+  "delete_absent": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "DELETE",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 404,
+      "json": {
+       "errors": [
+        {
+         "code": "NOT_FOUND",
+         "message": "project not found"
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "delete_not_empty": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "DELETE",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 412,
+      "json": {
+       "errors": [
+        {
+         "code": "PRECONDITION",
+         "message": "project contains repositories"
+        }
+       ]
+      }
+     }
+    }
+   ]
+  }
+ }
+}
