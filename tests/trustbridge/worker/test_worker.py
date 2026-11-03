@@ -248,11 +248,11 @@ async def test_infrastructure_errors_re_add_the_entry_without_counting() -> None
     real_get = h.store.get
     boom = {"on": True}
 
-    async def flaky_get(row_key: DeliveryKey):  # type: ignore[no-untyped-def]  # noqa: ANN202
+    async def flaky_get(key: DeliveryKey):  # type: ignore[no-untyped-def]  # noqa: ANN202
         if boom["on"]:
             boom["on"] = False
             raise ConnectionError("postgres down")
-        return await real_get(row_key)
+        return await real_get(key)
 
     h.store.get = flaky_get  # type: ignore[method-assign]
     await h.worker.run_once()
