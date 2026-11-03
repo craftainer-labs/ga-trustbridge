@@ -39,6 +39,8 @@ def _drop_if_invalid(index: str) -> None:
 
     ``IF NOT EXISTS`` alone would skip an INVALID index and leave it enforcing nothing.
     """
+    if op.get_context().as_sql:  # offline rendering (the SQL lint) cannot query the catalog
+        return
     invalid = (
         op.get_bind()
         .execute(
