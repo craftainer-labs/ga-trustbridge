@@ -270,7 +270,8 @@ class HostMonitor:
             after = await self._check_host(cfg)
             self._status[name] = after
             if after.state is HostState.READY:
-                self._probed[name] = fingerprint  # only a passed probe; a change meanwhile re-probes
+                # Only a passed probe is recorded; a change meanwhile re-probes next round.
+                self._probed[name] = fingerprint
             if after.state is HostState.READY and before.state is not HostState.READY:
                 await self._notify_ready(cfg)
 

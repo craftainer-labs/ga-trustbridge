@@ -25,6 +25,7 @@ runs in the dedicated migrate job before the rollout (ADR 0028).
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -35,7 +36,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def _drop_if_invalid(index: str) -> None:
-    """Drop a half-built index left by a failed ``CREATE INDEX CONCURRENTLY`` so a retry rebuilds it.
+    """Drop an INVALID index left by a failed ``CREATE INDEX CONCURRENTLY``, so a retry rebuilds it.
 
     ``IF NOT EXISTS`` alone would skip an INVALID index and leave it enforcing nothing.
     """
