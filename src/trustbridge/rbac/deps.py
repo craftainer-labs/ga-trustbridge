@@ -1,16 +1,16 @@
 """The FastAPI dependency: authenticate, check the role, then (tenant routes) enter the context.
 
 ADR 0033 "Tenant context" and ADR 0031 invariant 5: the role check and the tenant-grant
-resolution run first, in their own session and transaction (`TenantAccess.list_tenants`), which
+resolution run first, in their own session and transaction (`TenantAccess.get_tenant`), which
 is closed before `TenantAccess.tenant_context` is entered; a handler's session opens inside it.
 
 `require_role` returns a dependency that works on any route; mounting is NG6d's. The wiring is
 `app.state.rbac = RbacRuntime(config, access)`; `TenantAccess` is the interface NG6a's
-`trustbridge.tenancy` (`tb_list_tenants()` and `tenant_context`) satisfies through a thin adapter.
+`trustbridge.tenancy` (`tb_list_tenants()`/by-id lookup and `tenant_context`) satisfies through a thin adapter.
 """
 
 import logging
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Annotated, Any, Protocol
@@ -28,8 +28,11 @@ logger = logging.getLogger(__name__)
 class TenantAccess(Protocol):
     """What the dependency needs from the tenancy layer (ADR 0031)."""
 
-    async def list_tenants(self) -> Sequence[TenantRef]:
-        """`tb_list_tenants()` in its own short transaction, closed before it returns."""
+    async def get_tenant(self, tenant_id: UUID) -> TenantRef | None:
+        """The tenant row by id (None if absent), read in its own short transaction.
+
+        The session and transaction are closed before it returns.
+        """
         ...
 
     def tenant_context(self, tenant_id: UUID) -> AbstractContextManager[None]:
@@ -151,10 +154,7 @@ async def _find_tenant(raw: object, runtime: RbacRuntime) -> TenantRef | None:
         return None
     if str(raw).lower() != str(tenant_id):  # one spelling per tenant: no braces, urn: or bare hex
         return None
-    for tenant in await runtime.access.list_tenants():
-        if tenant.id == tenant_id:
-            return tenant
-    return None
+    return await runtime.access.get_tenant(tenant_id)
 
 
 __all__ = [

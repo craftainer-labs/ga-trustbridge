@@ -20,10 +20,16 @@ No endpoints and no mounting here (NG6d). Imports `app.oidc` (authentication) an
 ## Wiring (NG6d)
 
 `app.state.rbac = RbacRuntime(RbacConfig(client_id, separator, alias_personas), access)`, where
-`access` implements `TenantAccess`: `list_tenants()` runs `tb_list_tenants()` in its own session
+`access` implements `TenantAccess`: `get_tenant(tenant_id)` reads the tenant row (from
+`tb_list_tenants()`) in its own session
 and transaction and closes it before returning (ADR 0031: the `after_begin` hook only fires when a
 transaction begins, so the check must not leave one open), and `tenant_context(tenant_id)` is
 `trustbridge.tenancy.tenant_context`. The handler's session opens inside the context.
+
+Integration invariant (verified in NG6d against the real module, not here): `require_role` enters
+the sync `tenant_context` inside an async-generator dependency and holds it across the `yield`.
+If `tenant_context` is ContextVar-backed, its set and reset must happen in one context and the
+handler's session must see it; the unit tests only use a fake.
 
 ## Settings
 

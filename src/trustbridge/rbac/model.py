@@ -46,6 +46,13 @@ class Grant:
     host: str | None = None
     org: str | None = None
 
+    def __post_init__(self) -> None:
+        """Fail closed: a half-scoped grant must never read as instance-wide."""
+        if not isinstance(self.role, Role):
+            raise ValueError(f"invalid role {self.role!r}")
+        if (self.host is None) != (self.org is None):
+            raise ValueError("a grant sets host and org together, or neither")
+
     @property
     def instance(self) -> bool:
         """Whether this grant covers the whole instance."""

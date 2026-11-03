@@ -64,3 +64,17 @@ def test_org_without_a_name_and_instance_grants() -> None:
     p = _principal(Grant(Role.ADMIN, "github.com", "acme"), Grant(Role.AUDITOR))
     assert tenant_roles(p, NO_ORG) == {Role.AUDITOR, Role.VIEWER}
     assert tenant_roles(p, B) == {Role.AUDITOR, Role.VIEWER}
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        (Role.ADMIN, None, "acme"),
+        (Role.ADMIN, "github.com", None),
+        ("admin", None, None),
+    ],
+)
+def test_grant_fails_closed_on_half_scope_or_bad_role(args: tuple[object, ...]) -> None:
+    """A half-scoped grant must never become instance-wide; the role must be a `Role`."""
+    with pytest.raises(ValueError, match="grant|role"):
+        Grant(*args)  # type: ignore[arg-type]

@@ -26,10 +26,10 @@ class FakeAccess:
         self.tenants = tenants
         self.events: list[str] = []
 
-    async def list_tenants(self) -> Sequence[TenantRef]:
+    async def get_tenant(self, tenant_id: UUID) -> TenantRef | None:
         """Record the (closed-session) read."""
-        self.events.append("list")
-        return self.tenants
+        self.events.append("get")
+        return next((t for t in self.tenants if t.id == tenant_id), None)
 
     @contextmanager
     def tenant_context(self, tenant_id: UUID) -> Iterator[None]:
@@ -172,7 +172,7 @@ def test_tenant_route_runs_the_check_before_the_context() -> None:
     client = _client(_app(access), "trustbridge:github.com:Acme:operator")
     response = client.get(f"/t/{ACME.id}/operator")
     assert response.json() == {"tenant": str(ACME.id)}
-    assert access.events == ["list", f"enter:{ACME.id}", "handler", "exit"]
+    assert access.events == ["get", f"enter:{ACME.id}", "handler", "exit"]
 
 
 def test_instance_grant_covers_a_tenant_route() -> None:
@@ -218,7 +218,7 @@ def test_too_weak_tenant_grant_is_403_without_the_context() -> None:
     access = FakeAccess([ACME])
     client = _client(_app(access), "trustbridge:github.com:acme:viewer")
     _problem(client.get(f"/t/{ACME.id}/operator"), 403)
-    assert access.events == ["list"]
+    assert access.events == ["get"]
 
 
 def test_context_exits_when_the_handler_raises() -> None:
