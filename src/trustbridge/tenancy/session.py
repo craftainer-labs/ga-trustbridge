@@ -1,7 +1,7 @@
 """Tenant-scoped sessions and the iteration used by background duties (ADR 0031)."""
 
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -66,7 +66,7 @@ async def list_tenants(session_factory: async_sessionmaker[AsyncSession]) -> lis
 
 async def iterate_tenants(
     session_factory: async_sessionmaker[AsyncSession],
-) -> AsyncIterator[UUID]:
+) -> AsyncGenerator[UUID]:
     """Yield each tenant id once, with that tenant as the current tenant while it is yielded.
 
     The list is read first (a transaction closed before any work starts). The context is reset

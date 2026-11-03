@@ -276,6 +276,11 @@ async def _admin_scalar(db: Db, statement: Executable) -> object:
         return (await conn.execute(statement)).scalar_one()
 
 
+async def _values(session: AsyncSession, name: str, key: str) -> list[Any]:
+    result = await session.execute(select(column(key)).select_from(table(name)))
+    return list(result.scalars().all())
+
+
 async def _count(session: AsyncSession, name: str) -> int:
     return (await session.execute(select(func.count()).select_from(table(name)))).scalar_one()
 
@@ -285,11 +290,7 @@ async def _isolation_holds(factory: async_sessionmaker[AsyncSession], a: UUID) -
     for name in SIX:
         key = "id" if name == "tenants" else "tenant_id"
         async with tenant_session(factory, a) as session:
-            rows = (
-                (await session.execute(select(column(key)).select_from(table(name))))
-                .scalars()
-                .all()
-            )
+            rows = await _values(session, name, key)
         if not rows or set(rows) != {a}:
             return False
     return True
@@ -393,15 +394,7 @@ async def test_concurrent_tenant_sessions_never_see_each_others_context(
                 await session.execute(text("SELECT current_setting('app.tenant_id')"))
             ).scalar_one()
             await asyncio.sleep(0.05)
-            rows = (
-                (
-                    await session.execute(
-                        select(column("tenant_id")).select_from(table("scope_leases"))
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            rows = await _values(session, "scope_leases", "tenant_id")
             later = (
                 await session.execute(text("SELECT current_setting('app.tenant_id')"))
             ).scalar_one()
@@ -456,11 +449,7 @@ async def test_the_app_role_cannot_insert_or_delete_a_tenant_and_updates_only_it
     async with tenant_session(db.app, db.a) as session:
         assert _rowcount(await session.execute(delete(table("tenants")))) == 0
     async with tenant_session(db.app, db.a) as session:
-        seen = (
-            (await session.execute(select(column("id")).select_from(table("tenants"))))
-            .scalars()
-            .all()
-        )
+        seen = await _values(session, "tenants", "id")
         assert seen == [db.a]
         changed = await session.execute(
             update(table("tenants", column("state"))).values(state="suspended")
@@ -657,15 +646,7 @@ async def test_iterate_tenants_yields_every_tenant_once_each_inside_its_own_cont
             assert current_tenant.get() == tenant_id
             seen.append(tenant_id)
             async with db.app() as session:
-                owners = (
-                    (
-                        await session.execute(
-                            select(column("tenant_id")).select_from(table("scope_leases"))
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
+                owners = await _values(session, "scope_leases", "tenant_id")
             assert owners == [tenant_id]  # the planted foreign row is not visible
     assert sorted(seen) == sorted(set(seen))
     assert {db.a, db.b} <= set(seen)
