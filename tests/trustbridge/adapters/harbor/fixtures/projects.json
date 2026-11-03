@@ -98,6 +98,22 @@
        ]
       }
      }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "project_id": 7,
+       "name": "${project}",
+       "metadata": {
+        "public": "false"
+       }
+      }
+     }
     }
    ]
   },
@@ -172,6 +188,177 @@
         "public": "true"
        }
       }
+     }
+    }
+   ]
+  },
+  "race_public": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 404,
+      "json": {
+       "errors": [
+        {
+         "code": "NOT_FOUND",
+         "message": "project not found"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/api/v2.0/projects",
+      "json": {
+       "project_name": "${project}",
+       "metadata": {
+        "public": "false"
+       }
+      }
+     },
+     "response": {
+      "status": 409,
+      "json": {
+       "errors": [
+        {
+         "code": "CONFLICT",
+         "message": "resource already exists"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "project_id": 7,
+       "name": "${project}",
+       "metadata": {
+        "public": "true"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "race_no_metadata": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 404,
+      "json": {
+       "errors": [
+        {
+         "code": "NOT_FOUND",
+         "message": "project not found"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/api/v2.0/projects",
+      "json": {
+       "project_name": "${project}",
+       "metadata": {
+        "public": "false"
+       }
+      }
+     },
+     "response": {
+      "status": 409,
+      "json": {
+       "errors": [
+        {
+         "code": "CONFLICT",
+         "message": "resource already exists"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "project_id": 7,
+       "name": "${project}",
+       "metadata": {}
+      }
+     }
+    }
+   ]
+  },
+  "race_gone": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 404,
+      "json": {
+       "errors": [
+        {
+         "code": "NOT_FOUND",
+         "message": "project not found"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/api/v2.0/projects",
+      "json": {
+       "project_name": "${project}",
+       "metadata": {
+        "public": "false"
+       }
+      }
+     },
+     "response": {
+      "status": 409,
+      "json": {
+       "errors": [
+        {
+         "code": "CONFLICT",
+         "message": "resource already exists"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/projects/${project}"
+     },
+     "response": {
+      "status": 404
      }
     }
    ]
