@@ -1,0 +1,13 @@
+{
+  "source": "Failure responses a JFrog Platform returns (error bodies use the {errors: [{status, message}]} envelope); the bodies carry a value that must never reach an AdapterError",
+  "scenarios": {
+    "http_429": {"exchanges": [{"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"}, "response": {"status": 429, "json": {"errors": [{"message": "leaky-body-secret"}]}}}]},
+    "http_500": {"exchanges": [{"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"}, "response": {"status": 500, "json": {"errors": [{"message": "leaky-body-secret"}]}}}]},
+    "http_503": {"exchanges": [{"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"}, "response": {"status": 503, "json": {"errors": [{"message": "leaky-body-secret"}]}}}]},
+    "http_401": {"exchanges": [{"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"}, "response": {"status": 401, "json": {"errors": [{"message": "leaky-body-secret"}]}}}]},
+    "http_403": {"exchanges": [{"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"}, "response": {"status": 403, "json": {"errors": [{"message": "leaky-body-secret"}]}}}]},
+    "connect_error": {"exchanges": [{"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"}, "response": {"status": 0, "raise": "ConnectError"}}]},
+    "read_timeout": {"exchanges": [{"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"}, "response": {"status": 0, "raise": "ReadTimeout"}}]},
+    "bad_body": {"exchanges": [{"request": {"method": "GET", "path": "/access/api/v1/projects/${project}"}, "response": {"status": 200, "text": "<html>login</html>"}}]}
+  }
+}
