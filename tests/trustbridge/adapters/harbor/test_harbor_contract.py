@@ -53,7 +53,7 @@ NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 TENANT_ID = UUID("00000000-0000-4000-8000-000000000001")
 GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
 HOOK_URL = "https://tb.example/hooks/harbor"
-REFRESHED = "refreshed-secret-value"  # noqa: S105 - a dummy used only in these fixtures
+REFRESHED = "refreshed-secret-value"
 HOOK_SECRET = "whsec-dummy-value"  # noqa: S105 - a dummy used only in these fixtures
 
 HOST = GitHubHost(
@@ -351,6 +351,7 @@ async def test_ensure_webhook_uses_the_project_in_its_prior_ref() -> None:
     prior = ResourceState(HOOK, {"kind": "webhook", "project": PROJECT})
     applied = await adapter.ensure_webhook(TARGET, prior)
     replay.assert_exhausted()
+    assert applied.state is not None
     assert applied.state.ref["project"] == PROJECT
     assert applied.state.name == HOOK
 
