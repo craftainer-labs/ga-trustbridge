@@ -24,6 +24,7 @@ runs in the dedicated migrate job before the rollout (ADR 0028).
 
 from collections.abc import Sequence
 
+import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -33,12 +34,34 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _drop_if_invalid(index: str) -> None:
+    """Drop a half-built index left by a failed ``CREATE INDEX CONCURRENTLY`` so a retry rebuilds it.
+
+    ``IF NOT EXISTS`` alone would skip an INVALID index and leave it enforcing nothing.
+    """
+    invalid = (
+        op.get_bind()
+        .execute(
+            sa.text(
+                "SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+                "WHERE c.relname = :name AND NOT i.indisvalid"
+            ),
+            {"name": index},
+        )
+        .first()
+    )
+    if invalid:
+        op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {index}")
+
+
 def upgrade() -> None:
     """Upgrade schema."""
     op.execute("SET lock_timeout = '5s'")
     op.execute("SET statement_timeout = '120s'")
     op.execute("ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS body_sha256 text")
     with op.get_context().autocommit_block():
+        _drop_if_invalid("ux_wd_host_delivery")
+        _drop_if_invalid("ux_wd_host_body_sha256")
         op.execute(
             "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_wd_host_delivery "
             "ON webhook_deliveries (host, delivery_id)"
@@ -55,6 +78,8 @@ def upgrade() -> None:
         "ALTER TABLE webhook_deliveries DROP CONSTRAINT webhook_deliveries_pkey, "
         "ADD CONSTRAINT webhook_deliveries_pkey PRIMARY KEY USING INDEX ux_wd_host_delivery"
     )
+    op.execute("RESET statement_timeout")
+    op.execute("RESET lock_timeout")
 
 
 def downgrade() -> None:
@@ -63,6 +88,7 @@ def downgrade() -> None:
     op.execute("SET statement_timeout = '120s'")
     with op.get_context().autocommit_block():
         op.execute("DROP INDEX CONCURRENTLY IF EXISTS ux_wd_host_body_sha256")
+        _drop_if_invalid("ux_wd_delivery")
         op.execute(
             "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_wd_delivery "
             "ON webhook_deliveries (delivery_id)"
@@ -74,3 +100,5 @@ def downgrade() -> None:
         "ADD CONSTRAINT webhook_deliveries_pkey PRIMARY KEY USING INDEX ux_wd_delivery"
     )
     op.execute("ALTER TABLE webhook_deliveries DROP COLUMN IF EXISTS body_sha256")
+    op.execute("RESET statement_timeout")
+    op.execute("RESET lock_timeout")

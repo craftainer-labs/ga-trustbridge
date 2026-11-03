@@ -99,10 +99,16 @@ class FileSigner:
         tmp = self._path.with_name(self._path.name + ".tmp")
         try:
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _PRIVATE_MODE)
-            os.fchmod(fd, _PRIVATE_MODE)
-            with os.fdopen(fd, "wb") as handle:
+            try:
+                os.fchmod(fd, _PRIVATE_MODE)
+                handle = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with handle:
                 handle.write(raw)
             tmp.replace(self._path)
         except OSError as exc:
+            tmp.unlink(missing_ok=True)
             msg = f"cannot write the signer key file {self._path}"
             raise SignerError(msg) from exc
