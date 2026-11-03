@@ -91,7 +91,9 @@ In the Argo CD namespace only: `get`, `list`, `create`, `update` on `secrets`; `
 `get`, `patch` on `configmaps` and `secrets` named `argocd-notifications-cm` /
 `argocd-notifications-secret`; `get`, `list`, `create`, `update`, `delete` on
 `argoproj.io` `appprojects`. Nothing cluster-wide. (A `resourceNames` rule cannot restrict `create`
-or `list`, so `secrets` is namespace-wide for those verbs.)
+or `list`, so `secrets` is namespace-wide for those verbs: the token can read and delete every Secret
+in the Argo CD namespace, including other tenants' repository Secrets and Argo CD's own. Run the
+adapter in a namespace you accept that for, or put an admission policy in front of it.)
 
 ## Sources
 
@@ -132,9 +134,25 @@ The fixtures encode these as best-effort shapes; check them against a real Argo 
   `token $github-token`) and that a key containing `-` is a valid `$` reference.
 - An AppProject with empty `destinations` and `sourceRepos` is accepted by the CRD.
 - The ServiceAccount RBAC above is sufficient, including `list` with a `labelSelector`.
+- That `list` on Secrets returns the whole labelled set in one response (no `limit` is sent, so the
+  API server should not paginate); the adapter follows no `continue` token.
+- That a `PATCH` removing a key (`{key: null}`) from `argocd-notifications-cm` or
+  `argocd-notifications-secret` is accepted as a merge-patch delete.
 
 ## Known limitations
 
+- Same-name adoption: `ensure_project` and `ensure_credential` adopt an existing AppProject or Secret
+  of the generated name (a POST `409` is UNCHANGED, by the A3 convention) without checking the
+  `managed-by` label, and `delete` later removes it. Names embed the whole tenant id, so a clash needs
+  an operator to create an object by that exact name.
+- `ensure_webhook` writes the token Secret and then the ConfigMap in two calls; if the second fails
+  the retry completes it, but a webhook dropped from state before then leaves an orphan
+  `<name>-token` key. `delete` of a webhook aborts (non-retryable) if either object vanishes between
+  its read and its patch.
+- `web_base` derives the web URL by dropping a leading `api.` from a github.com or ghe.com API host; a
+  GHES host is used as given minus `/api/v3`.
+- `base_url` and `namespace` come only from operator-provisioned connection data, never from tenant
+  input; the adapter requires an https `base_url` and percent-encodes `namespace` into the path.
 - Destinations: a new AppProject allows no deployment destination, because the interface carries
   none. An operator (or a later item) must add `spec.destinations` by hand.
 - The notifications trigger, template and the per-Application subscription annotations are not
