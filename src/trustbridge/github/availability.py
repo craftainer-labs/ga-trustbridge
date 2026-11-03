@@ -34,6 +34,10 @@ DEFAULT_CHECK_TIMEOUT_SECONDS = 10.0
 """Upper bound on all checks of one host in one round (`HOST_CHECK_TIMEOUT_SECONDS`)."""
 
 
+Fingerprint = tuple[GitHubHostConfig, str | None]
+"""What a host was probed with: its effective config and its signer's key id."""
+
+
 class HostState(StrEnum):
     """Where a configured host is."""
 
@@ -165,6 +169,7 @@ class HostMonitor:
         self._on_ready = deps.on_ready
         self._timeout = deps.check_timeout
         self._config = dict(self._base)
+        self._probed: dict[str, Fingerprint] = {}  # what each host was last probed with
         self._status: dict[str, HostStatus] = {
             h.name: (
                 HostStatus(HostState.UNAVAILABLE, "not checked yet")
@@ -210,28 +215,63 @@ class HostMonitor:
         await self._check(list(self._base))
 
     async def recheck(self) -> None:
-        """Re-check every host that is not ready (ready hosts get no probe, so no GitHub call)."""
-        pending = [n for n, s in self._status.items() if s.state is not HostState.READY]
-        await self._check(pending)
+        """Re-check every host that is not ready, and every ready host whose config changed.
 
-    async def _check(self, names: Sequence[str]) -> None:
-        registrations: Mapping[str, Registration] = {}
-        if self._registrations is not None:
-            try:
-                registrations = await self._registrations.load_all()
-            except Exception:
-                _log.warning("could not read host registrations; keeping the previous view")
-                registrations = {
-                    n: Registration(c.app_id, c.webhook_secret_ref)
-                    for n, c in self._config.items()
-                    if c.app_id is not None and c.webhook_secret_ref is not None
-                }
+        A ready host whose effective configuration (App id, webhook secret reference, signer,
+        URLs: the registration is overlaid) differs from the one it last passed with is probed
+        again, so rotating them is picked up without a restart; an unchanged ready host gets no
+        probe, so no GitHub call.
+        """
+        registrations = await self._load_registrations()
+        pending = [
+            n
+            for n, s in self._status.items()
+            if s.state is not HostState.READY
+            or await self._fingerprint(effective_config(self._base[n], registrations))
+            != self._probed.get(n)
+        ]
+        await self._check(pending, registrations)
+
+    async def _fingerprint(self, cfg: GitHubHostConfig) -> Fingerprint:
+        """The effective config plus the signer's key id, which a rotation changes.
+
+        `key_id` may read the key file, so it runs off the event loop.
+        """
+        signer = self._signers.get(cfg.signer)
+        try:
+            key_id = None if signer is None else await asyncio.to_thread(lambda: signer.key_id)
+        except Exception:
+            key_id = None  # an unreadable key surfaces in the probe, not here
+        return cfg, key_id
+
+    async def _load_registrations(self) -> Mapping[str, Registration]:
+        if self._registrations is None:
+            return {}
+        try:
+            return await self._registrations.load_all()
+        except Exception:
+            _log.warning("could not read host registrations; keeping the previous view")
+            return {
+                n: Registration(c.app_id, c.webhook_secret_ref)
+                for n, c in self._config.items()
+                if c.app_id is not None and c.webhook_secret_ref is not None
+            }
+
+    async def _check(
+        self, names: Sequence[str], registrations: Mapping[str, Registration] | None = None
+    ) -> None:
+        if registrations is None:
+            registrations = await self._load_registrations()
         for name in names:
             cfg = effective_config(self._base[name], registrations)
             self._config[name] = cfg
+            fingerprint = await self._fingerprint(cfg)  # taken before the probe it describes
             before = self._status[name]
             after = await self._check_host(cfg)
             self._status[name] = after
+            if after.state is HostState.READY:
+                # Only a passed probe is recorded; a change meanwhile re-probes next round.
+                self._probed[name] = fingerprint
             if after.state is HostState.READY and before.state is not HostState.READY:
                 await self._notify_ready(cfg)
 

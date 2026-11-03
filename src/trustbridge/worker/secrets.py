@@ -22,6 +22,16 @@ class SecretUnavailable(Exception):  # noqa: N818 -- a result, named for what it
     """The secret could not be read or written (store down, ref unknown, empty value)."""
 
 
+class SecretNotFound(SecretUnavailable):
+    """A `store:` secret that is definitely absent (the store answered; nothing is there).
+
+    A subclass of `SecretUnavailable`, so callers that treat both alike keep working; callers
+    that must tell "absent" from "store down" (read-modify-write) catch this one only. Every
+    backend must raise this for an absent ref: a plain `SecretUnavailable` is treated as an
+    outage and fails closed.
+    """
+
+
 def _store_name(ref: str) -> str:
     """The validated `store:` name of `ref`; anything else is not writable."""
     name = ref.removeprefix(_STORE_PREFIX)
@@ -57,6 +67,10 @@ class LocalSecrets:
             path = Path(target) if scheme == "file" else self._path(ref)
             try:
                 value = await asyncio.to_thread(path.read_text, "utf-8")
+            except FileNotFoundError as exc:
+                if scheme == "store":
+                    raise SecretNotFound("secret not found") from exc
+                raise SecretUnavailable("secret file unreadable") from exc
             except OSError as exc:
                 raise SecretUnavailable("secret file unreadable") from exc
         else:
@@ -132,7 +146,7 @@ class MemorySecrets:
         if not ref.startswith(_STORE_PREFIX):
             return await self._fallback.read(ref)
         if ref not in self.values:
-            raise SecretUnavailable("unavailable")
+            raise SecretNotFound("not found")
         return SecretStr(self.values[ref])
 
     async def write(self, ref: str, value: SecretStr) -> None:

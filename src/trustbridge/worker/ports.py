@@ -15,7 +15,9 @@
   satisfy the core's `LeaseProvider` and `Lease`.
 """
 
+import asyncio
 import json
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Protocol
@@ -30,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from trustbridge.adapters.interface import AdapterConfig, GitHubHost, IssuedSecret, Tenant
 from trustbridge.worker.models import Tenant as TenantRow
 from trustbridge.worker.models import TenantRepository
-from trustbridge.worker.secrets import SecretUnavailable
+from trustbridge.worker.secrets import SecretNotFound, SecretUnavailable
 
 PARKED_PREFIX = "parked/"
 PRIVILEGED_KEY = "privileged_credential"
@@ -73,15 +75,16 @@ class SqlTenants:
         self._hosts = hosts
 
     async def upsert_installation(
-        self, host: str, installation_id: int, org: str, org_id: int
+        self, host: str, installation_id: int, org: str, org_id: int, *, suspended: bool = False
     ) -> UUID:
-        """Create or update (and re-activate) the tenant of `(host, installation_id)`."""
+        """Create or update the tenant of `(host, installation_id)` as `suspended` or `active`."""
+        state = "suspended" if suspended else "active"
         insert = pg_insert(TenantRow).values(
-            host=host, installation_id=installation_id, org=org, org_id=org_id, state="active"
+            host=host, installation_id=installation_id, org=org, org_id=org_id, state=state
         )
         upsert = insert.on_conflict_do_update(
             constraint="uq_tenants_host_inst",
-            set_={"org": org, "org_id": org_id, "state": "active"},
+            set_={"org": org, "org_id": org_id, "state": state},
         ).returning(TenantRow.id)
         async with self._sf() as session, session.begin():
             tenant_id: UUID = (await session.execute(upsert)).scalar_one()
@@ -175,16 +178,16 @@ class MemoryTenants:
         self.repositories: dict[UUID, dict[int, str]] = {}
 
     async def upsert_installation(
-        self, host: str, installation_id: int, org: str, org_id: int
+        self, host: str, installation_id: int, org: str, org_id: int, *, suspended: bool = False
     ) -> UUID:
-        """Create or update (and re-activate) the tenant."""
+        """Create or update the tenant as `suspended` or `active`."""
         tenant_id = self._by_key.setdefault((host, installation_id), uuid4())
         self._rows[tenant_id] = {
             "host": host,
             "installation_id": installation_id,
             "org": org,
             "org_id": org_id,
-            "state": "active",
+            "state": "suspended" if suspended else "active",
         }
         return tenant_id
 
@@ -279,24 +282,40 @@ class ConnectionData:
     def __init__(self, secrets: WritableSecrets) -> None:
         """Use `secrets` for the JSON object of each `(tenant, adapter)`."""
         self._secrets = secrets
+        # Per-ref locks, dropped once nobody holds them. The secret store has no compare-and-set,
+        # so this serialises read-modify-write within one process only.
+        self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     @staticmethod
     def _ref(tenant_id: UUID, adapter: str) -> str:
         return f"store:tenants/{tenant_id}/{adapter}"
 
+    def _lock(self, ref: str) -> asyncio.Lock:
+        lock = self._locks.get(ref)
+        if lock is None:
+            lock = self._locks[ref] = asyncio.Lock()
+        return lock
+
     async def _load(self, tenant_id: UUID, adapter: str) -> dict[str, str]:
+        """The stored object; `{}` only when it is absent. An outage propagates.
+
+        Treating an outage as "absent" would let `put` overwrite the stored blob with a
+        partial one and lose data.
+        """
         try:
             raw = await self._secrets.read(self._ref(tenant_id, adapter))
-        except SecretUnavailable:
+        except SecretNotFound:
             return {}
         loaded: dict[str, str] = json.loads(raw.get_secret_value())
         return loaded
 
     async def put(self, tenant_id: UUID, adapter: str, values: Mapping[str, SecretStr]) -> None:
         """Merge `values` into the stored object (last writer wins per key)."""
-        merged = await self._load(tenant_id, adapter)
-        merged.update({k: v.get_secret_value() for k, v in values.items()})
-        await self._secrets.write(self._ref(tenant_id, adapter), SecretStr(json.dumps(merged)))
+        ref = self._ref(tenant_id, adapter)
+        async with self._lock(ref):
+            merged = await self._load(tenant_id, adapter)
+            merged.update({k: v.get_secret_value() for k, v in values.items()})
+            await self._secrets.write(ref, SecretStr(json.dumps(merged)))
 
     async def config_for(self, tenant: Tenant, adapter: str) -> AdapterConfig:
         """The adapter's config; a tenant with no data gets an empty one."""

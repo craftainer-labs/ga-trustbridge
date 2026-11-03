@@ -8,9 +8,11 @@ The GitHub core ([ADR 0028](../../../docs/adrs/0028-trustbridge-architecture-and
 - `availability.py` — `HostMonitor`: per-host `unregistered` / `unavailable` / `ready`, the signer
   self-test, the OIDC discovery check, and the `HOST_RECHECK_SECONDS` loop. Only invalid settings
   stop a process; everything that needs the signer, network or GitHub marks one host unavailable.
+  The recheck loop also re-probes a ready host whose effective config (stored registration) or
+  signer key id changed, so a rotation needs no restart.
 - `app_jwt.py`, `tokens.py` — own JWT assembly through a signer (`exp` <= 9 min, `iat` 60 s back);
   installation tokens cached until ~5 min before expiry and down-scoped per repository and
-  permission.
+  permission. `invalidate` also discards a mint that was in flight and re-mints once.
 - `client.py`, `gateway.py` — a thin githubkit facade (token auth strategy per call; the host's CA
   bundle and base URL).
 - `writer.py` — libsodium sealed-box secrets, variables and environments; the environment
@@ -22,7 +24,9 @@ The GitHub core ([ADR 0028](../../../docs/adrs/0028-trustbridge-architecture-and
 - `manifest.py` — the manifest flow for trustbridge's own App and the per-tenant read-only Argo CD
   App, and the manual fallback. `models.py` stores a host's registration for every process.
 - `handlers.py` — the handler registry the worker dispatches through, and the installation
-  lifecycle handlers. `webhook_secrets.py` caches webhook secrets (0030 invariant 11) and
+  lifecycle handlers. GitHub does not order deliveries, so `created`/`deleted`/`suspend`/
+  `unsuspend` are triggers: `installations.py` (`AppInstallationLookup`) re-reads the
+  installation with the App JWT (404 = gone) and that state is applied. `webhook_secrets.py` caches webhook secrets (0030 invariant 11) and
   re-reads one after a signature mismatch (rotation).
 - `hook_deliveries.py` — `GET /app/hook/deliveries` (cursor pagination) and redelivery, for the
   reconciler.

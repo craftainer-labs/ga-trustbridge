@@ -234,3 +234,104 @@ async def test_a_check_that_hangs_is_cut_off_by_the_timeout() -> None:
     status = mon.status("github.com")
     assert status.state is HostState.UNAVAILABLE
     assert status.reason == "check timed out"
+
+
+async def test_a_ready_host_is_probed_again_when_its_registration_changes() -> None:
+    """A re-registered App (new id and secret ref) is picked up by recheck without a restart."""
+    regs = Registrations()
+    regs.items["github.com"] = Registration(55, "ref/webhook")
+    checker = FakeChecker(app_id=55)
+    mon = HostMonitor(
+        [make_host_config(app_id=None)],
+        {"main": KeySigner()},
+        MonitorDeps(checker=checker, registrations=regs),
+    )
+    await mon.check_all()
+    await mon.recheck()
+    assert checker.app_calls == 1  # unchanged and ready: no probe
+    regs.items["github.com"] = Registration(88, "ref/webhook-2")
+    checker.app_id = 88
+    await mon.recheck()
+    assert checker.app_calls == 2
+    assert mon.status("github.com").state is HostState.READY
+    assert mon.config("github.com").app_id == 88
+    assert mon.config("github.com").webhook_secret_ref == "ref/webhook-2"  # noqa: S105 -- a ref
+
+
+async def test_a_ready_host_whose_new_registration_fails_the_probe_becomes_unavailable() -> None:
+    """The re-probe fails closed: a rotated App that does not match the key is not served."""
+    regs = Registrations()
+    regs.items["github.com"] = Registration(55, "ref/webhook")
+    checker = FakeChecker(app_id=55)
+    mon = HostMonitor(
+        [make_host_config(app_id=None)],
+        {"main": KeySigner()},
+        MonitorDeps(checker=checker, registrations=regs),
+    )
+    await mon.check_all()
+    regs.items["github.com"] = Registration(88, "ref/webhook")  # GitHub still reports 55
+    await mon.recheck()
+    assert mon.status("github.com").state is HostState.UNAVAILABLE
+
+
+async def test_a_ready_host_is_probed_again_when_its_signer_key_changes() -> None:
+    """A rotated key (a new key id on the signer) triggers a probe of a ready host."""
+    signer = KeySigner()
+    checker = FakeChecker(app_id=77)
+    mon = HostMonitor([make_host_config()], {"main": signer}, MonitorDeps(checker=checker))
+    await mon.check_all()
+    await mon.recheck()
+    assert checker.app_calls == 1
+    signer.key_id = "rotated-key"
+    await mon.recheck()
+    assert checker.app_calls == 2
+    assert mon.status("github.com").state is HostState.READY
+
+
+async def test_a_key_rotated_during_the_probe_is_probed_again() -> None:
+    """The fingerprint is taken before the probe, so a change meanwhile re-probes next time."""
+    signer = KeySigner()
+
+    class Rotating(FakeChecker):
+        async def get_app_id(self, host: GitHubHostConfig, jwt: str) -> int:
+            signer.key_id = "rotated-mid-probe"
+            return await super().get_app_id(host, jwt)
+
+    checker = Rotating(app_id=77)
+    mon = HostMonitor([make_host_config()], {"main": signer}, MonitorDeps(checker=checker))
+    await mon.check_all()
+    assert checker.app_calls == 1
+    await mon.recheck()
+    assert checker.app_calls == 2
+    await mon.recheck()
+    assert checker.app_calls == 2  # settled: the new key id is what was probed
+
+
+async def test_a_failed_probe_is_not_recorded_as_probed() -> None:
+    """Only a passed probe records the fingerprint; the host stays unavailable and is retried."""
+    checker = FakeChecker(app_id=1)  # GitHub reports another App id than configured
+    mon = HostMonitor([make_host_config()], {"main": KeySigner()}, MonitorDeps(checker=checker))
+    await mon.check_all()
+    assert mon.status("github.com").state is HostState.UNAVAILABLE
+    await mon.recheck()
+    assert checker.app_calls == 2
+
+
+async def test_an_unreadable_signer_key_id_does_not_break_the_recheck() -> None:
+    """A signer whose key id cannot be read is fingerprinted without it; the probe reports."""
+
+    class Unreadable(KeySigner):
+        @property
+        def key_id(self) -> str:
+            raise RuntimeError("key file missing")
+
+        @key_id.setter
+        def key_id(self, value: str) -> None:
+            del value
+
+    mon = HostMonitor(
+        [make_host_config()], {"main": Unreadable()}, MonitorDeps(checker=FakeChecker())
+    )
+    await mon.check_all()
+    await mon.recheck()
+    assert mon.status("github.com").state is HostState.READY

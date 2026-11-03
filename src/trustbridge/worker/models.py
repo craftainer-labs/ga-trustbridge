@@ -33,6 +33,10 @@ NIL_TENANT = uuid.UUID(int=0)
 class WebhookDelivery(Base):
     """One received webhook delivery: the transactional outbox and the dedupe record.
 
+    `body_sha256` (hex SHA-256 of the raw signed body) is unique per host: `X-GitHub-Delivery` is
+    not signed, so the same captured body replayed under a new delivery id is a duplicate.
+    The primary key is `(host, delivery_id)`: GitHub's delivery GUID is unique per host, and a
+    host must not be able to suppress another host's delivery by reusing its id.
     Host-scoped and outside tenant RLS (written before the tenant is known). `status` is
     `pending`, `processed` or `dead`; `attempts` counts handler failures only.
     """
@@ -43,10 +47,11 @@ class WebhookDelivery(Base):
         Index("ix_wd_status_next", "status", "next_attempt_at"),
         Index("ix_wd_host_status", "host", "status"),
         Index("ix_wd_received_at", "received_at"),
+        Index("ux_wd_host_body_sha256", "host", "body_sha256", unique=True),
     )
 
+    host: Mapped[str] = mapped_column(String, primary_key=True)
     delivery_id: Mapped[str] = mapped_column(String, primary_key=True)
-    host: Mapped[str] = mapped_column(String)
     event: Mapped[str] = mapped_column(String)
     headers: Mapped[dict[str, str]] = mapped_column(JSONB)
     body: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
@@ -60,6 +65,7 @@ class WebhookDelivery(Base):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     dead_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    body_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ScopeLease(Base):

@@ -1,6 +1,7 @@
 """The `file` signer: a PEM on disk. For development only (refused when `mode=production`)."""
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import stat
@@ -36,6 +37,15 @@ def public_key_fingerprint(public_pem: bytes) -> str:
         serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
     )
     return "sha256:" + hashlib.sha256(der).hexdigest()
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Flush a directory entry (the rename) to disk."""
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 class FileSigner:
@@ -97,8 +107,22 @@ class FileSigner:
 
     def _write(self, raw: bytes) -> None:
         tmp = self._path.with_name(self._path.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _PRIVATE_MODE)
-        os.fchmod(fd, _PRIVATE_MODE)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(raw)
-        tmp.replace(self._path)
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _PRIVATE_MODE)
+            try:
+                os.fchmod(fd, _PRIVATE_MODE)
+                handle = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            tmp.replace(self._path)
+            with contextlib.suppress(OSError):  # the key is in place; the flush is best effort
+                _fsync_dir(self._path.parent)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            msg = f"cannot write the signer key file {self._path}"
+            raise SignerError(msg) from exc

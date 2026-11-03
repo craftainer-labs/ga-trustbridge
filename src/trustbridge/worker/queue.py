@@ -1,9 +1,9 @@
 """The Valkey stream client (redis-py `redis.asyncio`, ADR 0013 and 0028 "Queue client").
 
-The stream `tb:events` carries delivery ids only; Postgres is the source of truth. The
-dead-letter stream `tb:events:dead` carries `{delivery_id, error}` and no body. Everything
-here is the shared Redis protocol subset Valkey implements, kept behind this class so a
-client switch stays contained.
+The stream `tb:events` carries delivery keys (`host` and `id`) only; Postgres is the source of
+truth. The dead-letter stream `tb:events:dead` carries `{host, delivery_id, error}` and no body.
+Everything here is the shared Redis protocol subset Valkey implements, kept behind this class so
+a client switch stays contained.
 
 Trimming (invariant 6) removes only entries strictly below the smallest of every group's
 oldest pending entry and last-delivered id, so nothing unread or unacknowledged is lost,
@@ -16,6 +16,8 @@ from typing import Any
 
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
+
+from trustbridge.worker.deliveries import DeliveryKey
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,7 @@ class StreamEntry:
     """One stream entry read by a consumer."""
 
     entry_id: str
-    delivery_id: str
+    key: DeliveryKey
 
 
 def _text(value: object) -> str:
@@ -44,8 +46,11 @@ def _id_key(entry_id: str) -> tuple[int, int]:
     return int(ms), int(seq or 0)
 
 
-def _entries(raw: Any) -> list[StreamEntry]:  # noqa: ANN401 -- redis-py reply shapes
-    """Normalise the reply of XREADGROUP (RESP2 list or RESP3 dict) / XAUTOCLAIM items."""
+def _entries(raw: Any, orphans: list[str]) -> list[StreamEntry]:  # noqa: ANN401 -- redis-py reply shapes
+    """Normalise the reply of XREADGROUP (RESP2 list or RESP3 dict) / XAUTOCLAIM items.
+
+    Ids of entries without a `host` (the old `{id}`-only format) are appended to `orphans`.
+    """
     items: list[tuple[Any, Any]] = []
     if isinstance(raw, dict):
         for stream_entries in raw.values():
@@ -59,8 +64,10 @@ def _entries(raw: Any) -> list[StreamEntry]:  # noqa: ANN401 -- redis-py reply s
         if not fields:
             continue
         mapping = {_text(k): _text(v) for k, v in fields.items()}
-        if "id" in mapping:
-            found.append(StreamEntry(_text(entry_id), mapping["id"]))
+        if "id" in mapping and "host" in mapping:
+            found.append(StreamEntry(_text(entry_id), DeliveryKey(mapping["host"], mapping["id"])))
+        else:
+            orphans.append(_text(entry_id))
     return found
 
 
@@ -89,16 +96,16 @@ class StreamQueue:
             if "BUSYGROUP" not in str(exc):
                 raise
 
-    async def add(self, delivery_id: str) -> str:
-        """Add a delivery id; the same id may be added again (processing is idempotent)."""
-        return _text(await self._r.xadd(self.stream, {"id": delivery_id}))
+    async def add(self, key: DeliveryKey) -> str:
+        """Add a delivery key; the same key may be added again (processing is idempotent)."""
+        return _text(await self._r.xadd(self.stream, {"id": key.delivery_id, "host": key.host}))
 
     async def read(self, consumer: str, *, count: int, block_ms: int) -> list[StreamEntry]:
         """Read new entries for this consumer (each is now pending for it)."""
         raw = await self._r.xreadgroup(
             self.group, consumer, {self.stream: ">"}, count=count, block=block_ms
         )
-        return _entries(raw)
+        return await self._usable(raw)
 
     async def claim_stale(
         self, consumer: str, *, min_idle_ms: int, count: int
@@ -113,7 +120,16 @@ class StreamQueue:
             count=count,
         )
         items = raw[1] if len(raw) > 1 else []
-        return _entries([(self.stream, items)])
+        return await self._usable([(self.stream, items)])
+
+    async def _usable(self, raw: Any) -> list[StreamEntry]:  # noqa: ANN401 -- redis-py reply shapes
+        """The well-formed entries of a reply; old-format ones are acked so they leave the PEL."""
+        orphans: list[str] = []
+        found = _entries(raw, orphans)
+        for entry_id in orphans:
+            logger.warning("acking stream entry %s without a host (old format)", entry_id)
+            await self.ack(entry_id)
+        return found
 
     async def delivery_count(self, entry_id: str) -> int:
         """How many times the stream has delivered `entry_id` (1 for a fresh read)."""
@@ -124,9 +140,12 @@ class StreamQueue:
         """Acknowledge an entry (it leaves the pending list)."""
         await self._r.xack(self.stream, self.group, entry_id)
 
-    async def dead_letter(self, delivery_id: str, error: str) -> None:
-        """Add `{delivery_id, error}` to the dead-letter stream."""
-        await self._r.xadd(self.dead_stream, {"delivery_id": delivery_id, "error": error[:1000]})
+    async def dead_letter(self, key: DeliveryKey, error: str) -> None:
+        """Add `{host, delivery_id, error}` to the dead-letter stream."""
+        await self._r.xadd(
+            self.dead_stream,
+            {"host": key.host, "delivery_id": key.delivery_id, "error": error[:1000]},
+        )
 
     async def group_infos(self) -> list[dict[str, Any]]:
         """XINFO GROUPS as dicts with text keys (empty when the stream or group is missing)."""

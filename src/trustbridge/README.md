@@ -51,6 +51,21 @@ unmounted; the `CredentialCore` is not instantiated by any process because no ad
 reconcile requests (`ReconcileScheduler`) are recorded in the Valkey set `tb:reconcile`, whose
 consumer is the reconcile loop of NG5/NG6.
 
+## Accepted behaviours
+
+- The token cache's invalidation epoch is process-global: an invalidation for one installation
+  makes any in-flight mint run again, which over-invalidates and is safe.
+- A secret backend must raise `SecretNotFound` for an absent ref; a plain `SecretUnavailable`
+  fails closed (`ConnectionData` does not treat it as an empty blob).
+- A `deleted` installation event that arrives during a GitHub outage is retried and can
+  dead-letter; the tenant stays active until the reconciler or a redelivery catches up.
+- The migration's `RESET`s do not run if a statement fails first; the migrate job is a one-shot
+  process, so the session settings die with it.
+- Old pods insert with `ON CONFLICT (delivery_id)`, which fails once the primary key is
+  `(host, delivery_id)` (migration `a7e2c94b1d63`); the migrate job runs before the rollout.
+- Byte-identical webhook bodies on one host collapse to one delivery for the dedupe window; a
+  replay under a new delivery id is answered `202 duplicate` and kept as a terminal marker row.
+
 ## Don't
 
 - Edit template-owned files to hook in (the `Dockerfile`, `scripts/runner.sh`, `src/app/`);

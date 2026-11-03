@@ -17,6 +17,7 @@ from tests.trustbridge.github.conftest import (
     FakeChecker,
     KeySigner,
     ScriptedGitHub,
+    ScriptedLookup,
     make_host_config,
 )
 from tests.trustbridge.github.test_manifest_handlers import PEM, Flow, state_of
@@ -188,7 +189,9 @@ async def test_the_gateway_forgets_a_renamed_repository(env: Env) -> None:
     assert await env.gateway.full_name(env.tenant, 10) == "acme/web2"
 
 
-Wired = tuple[InstallationHandlers, MemoryTenants, ReconcileRequests, list[tuple[str, int]]]
+Wired = tuple[
+    InstallationHandlers, MemoryTenants, ReconcileRequests, list[tuple[str, int]], ScriptedLookup
+]
 
 
 def _handlers(with_callback: bool) -> Wired:
@@ -196,7 +199,9 @@ def _handlers(with_callback: bool) -> Wired:
     scheduler = ReconcileRequests()
     changed: list[tuple[str, int]] = []
     callback = (lambda host, inst: changed.append((host, inst))) if with_callback else None
-    return InstallationHandlers(tenants, scheduler, callback), tenants, scheduler, changed
+    lookup = ScriptedLookup()
+    handlers = InstallationHandlers(tenants, scheduler, lookup, callback)
+    return handlers, tenants, scheduler, changed, lookup
 
 
 def _ctx(event: str, action: str | None, payload: dict[str, Any]) -> EventContext:
@@ -208,12 +213,14 @@ INSTALLATION = {"id": 7, "account": {"login": "acme", "id": 1}}
 
 async def test_installation_events_work_without_a_token_cache_callback() -> None:
     """The callback is optional; an unknown tenant is not scheduled."""
-    handlers, tenants, scheduler, _ = _handlers(with_callback=False)
+    handlers, tenants, scheduler, _, lookup = _handlers(with_callback=False)
+    lookup.gone = True  # nothing is known and nothing exists on GitHub
     await handlers.on_installation(_ctx("installation", "suspend", {"installation": INSTALLATION}))
     await handlers.on_installation(
         _ctx("installation", "new_permissions_accepted", {"installation": INSTALLATION})
     )
     assert scheduler.local == set()  # nothing known yet
+    lookup.gone = False
     await handlers.on_installation(_ctx("installation", "created", {"installation": INSTALLATION}))
     await handlers.on_installation(
         _ctx("installation", "new_permissions_accepted", {"installation": INSTALLATION})
@@ -224,7 +231,8 @@ async def test_installation_events_work_without_a_token_cache_callback() -> None
 
 async def test_installation_events_notify_the_callback_and_ignore_other_actions() -> None:
     """Suspend and permission changes drop cached tokens; an unlisted action does nothing."""
-    handlers, _, scheduler, changed = _handlers(with_callback=True)
+    handlers, _, scheduler, changed, lookup = _handlers(with_callback=True)
+    lookup.gone = True
     await handlers.on_installation(_ctx("installation", "suspend", {"installation": INSTALLATION}))
     await handlers.on_installation(
         _ctx("installation", "new_permissions_accepted", {"installation": INSTALLATION})
@@ -236,7 +244,7 @@ async def test_installation_events_notify_the_callback_and_ignore_other_actions(
 
 async def test_repository_events_cover_unknown_tenants_and_metadata_changes() -> None:
     """No installation or an unknown tenant is ignored; metadata edits schedule a reconcile."""
-    handlers, tenants, scheduler, _ = _handlers(with_callback=False)
+    handlers, tenants, scheduler, _, _ = _handlers(with_callback=False)
     repo = {"id": 5, "full_name": "acme/web"}
     await handlers.on_repository(_ctx("repository", "renamed", {"repository": repo}))
     await handlers.on_repository(

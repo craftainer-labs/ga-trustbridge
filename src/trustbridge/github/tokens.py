@@ -8,6 +8,7 @@ wider request. `POST /app/installations/{id}/access_tokens` takes `repository_id
 
 import asyncio
 import time
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -50,7 +51,11 @@ class InstallationTokenProvider:
         self._api_factory = api_factory or GitHubApi
         self._clock = clock
         self._cache: dict[_CacheKey, _Cached] = {}
-        self._locks: dict[_CacheKey, asyncio.Lock] = {}
+        # Per-key mint locks, dropped once nobody holds or waits on them (no unbounded growth).
+        self._locks: weakref.WeakValueDictionary[_CacheKey, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
+        self._epoch = 0  # bumped by every `invalidate`; a mint that straddles a bump is not cached
 
     async def token(
         self,
@@ -71,16 +76,32 @@ class InstallationTokenProvider:
             tuple(sorted(repository_ids)) if repository_ids is not None else None,
             tuple(sorted(permissions.items())) if permissions is not None else None,
         )
-        async with self._locks.setdefault(key, asyncio.Lock()):
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = self._locks[key] = asyncio.Lock()
+        async with lock:
             cached = self._cache.get(key)
             if cached is not None and cached.expires_at - self._clock() > REFRESH_MARGIN_SECONDS:
                 return cached.token
+            epoch = self._epoch
             minted = await self._mint(cfg, installation_id, repository_ids, permissions)
-            self._cache[key] = minted
+            if epoch != self._epoch:
+                # An invalidation ran while the mint was in flight: the token may predate it
+                # (suspended or deleted installation, changed permissions). Never cache it;
+                # mint once more, now after the invalidation.
+                epoch = self._epoch
+                minted = await self._mint(cfg, installation_id, repository_ids, permissions)
+            if epoch == self._epoch:
+                self._cache[key] = minted
             return minted.token
 
     def invalidate(self, host: str, installation_id: int) -> None:
-        """Drop every cached token of an installation (it was deleted, suspended or changed)."""
+        """Drop every cached token of an installation (it was deleted, suspended or changed).
+
+        Also makes any mint in flight right now uncacheable (it is retried once, so the caller
+        gets a token minted after the invalidation), so a stale token never outlives this call.
+        """
+        self._epoch += 1
         for key in [k for k in self._cache if k[0] == host and k[1] == installation_id]:
             del self._cache[key]
 

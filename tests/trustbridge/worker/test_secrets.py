@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from trustbridge.worker.secrets import LocalSecrets, MemorySecrets, SecretUnavailable
+from trustbridge.worker.secrets import (
+    LocalSecrets,
+    MemorySecrets,
+    SecretNotFound,
+    SecretUnavailable,
+)
 
 
 async def test_env_and_file_references_are_read_with_the_trailing_newline_stripped(
@@ -52,7 +57,7 @@ async def test_store_references_round_trip_with_mode_0600_delete_and_list(tmp_pa
     assert len(await secrets.list_refs("")) == 3
     await secrets.delete("store:parked/a")
     await secrets.delete("store:parked/a")  # absent is fine
-    with pytest.raises(SecretUnavailable):
+    with pytest.raises(SecretNotFound):
         await secrets.read("store:parked/a")
 
 
@@ -74,6 +79,14 @@ async def test_without_a_store_directory_every_store_operation_fails_closed() ->
         await secrets.delete("store:a")
     with pytest.raises(SecretUnavailable, match="no writable"):
         await secrets.list_refs("a")
+
+
+async def test_a_store_read_error_other_than_absent_is_not_not_found(tmp_path: Path) -> None:
+    """A present-but-unreadable store entry (a directory) is unavailable, not absent."""
+    (tmp_path / "dir").mkdir()
+    with pytest.raises(SecretUnavailable) as err:
+        await LocalSecrets(tmp_path).read("store:dir")
+    assert not isinstance(err.value, SecretNotFound)
 
 
 async def test_os_errors_become_unavailable(tmp_path: Path) -> None:
@@ -99,9 +112,10 @@ async def test_the_memory_store_serves_store_refs_and_falls_back_for_env(
     assert await secrets.list_refs("b/") == ["store:b/c"]
     await secrets.delete("store:b/c")
     await secrets.delete("store:b/c")
-    with pytest.raises(SecretUnavailable):
+    with pytest.raises(SecretNotFound):
         await secrets.read("store:b/c")
     secrets.down = True
-    with pytest.raises(SecretUnavailable):
+    with pytest.raises(SecretUnavailable) as outage:
         await secrets.read("store:a")
+    assert not isinstance(outage.value, SecretNotFound)  # an outage is not "absent"
     assert secrets.reads == 4
