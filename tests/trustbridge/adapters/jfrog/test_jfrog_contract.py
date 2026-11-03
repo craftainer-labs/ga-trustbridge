@@ -800,15 +800,37 @@ async def test_a_token_response_without_a_token_is_rejected() -> None:
     assert not err.value.retryable
 
 
-async def test_a_token_listing_entry_without_token_id_is_rejected() -> None:
-    """A matching entry with no `token_id` is a non-retryable `AdapterError`, not a KeyError."""
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        [{"description": CONTEXT["cred_push"]}],
+        [{"description": CONTEXT["cred_push"], "token_id": 7}],
+        [None],
+        {"not": "a list"},
+    ],
+    ids=["no-token-id", "non-string-token-id", "non-object-entry", "not-a-list"],
+)
+async def test_a_malformed_token_listing_is_an_adapter_error(tokens: object) -> None:
+    """A malformed listing is a non-retryable `AdapterError` (not a KeyError or TypeError)."""
     listing = {
         "request": {"method": "GET", "path": "/access/api/v1/tokens"},
-        "response": {"status": 200, "json": {"tokens": [{"description": CONTEXT["cred_push"]}]}},
+        "response": {"status": 200, "json": {"tokens": tokens}},
     }
     adapter = JFrogAdapter(config(), transport=Replay([listing]).transport(), clock=lambda: NOW)
     with pytest.raises(AdapterError) as err:
         await adapter.list_credentials(TENANT)
+    assert not err.value.retryable
+
+
+async def test_a_malformed_token_listing_also_fails_the_exact_name_lookup() -> None:
+    """`delete_credential` looks tokens up by exact name; an entry without an id is rejected."""
+    listing = {
+        "request": {"method": "GET", "path": "/access/api/v1/tokens"},
+        "response": {"status": 200, "json": {"tokens": [{"description": PUSH_SLOT.name}]}},
+    }
+    adapter = JFrogAdapter(config(), transport=Replay([listing]).transport(), clock=lambda: NOW)
+    with pytest.raises(AdapterError) as err:
+        await adapter.delete_credential(PUSH, prior_for(PUSH_SLOT))
     assert not err.value.retryable
 
 
