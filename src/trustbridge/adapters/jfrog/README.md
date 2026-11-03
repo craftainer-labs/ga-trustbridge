@@ -136,4 +136,7 @@ Found in review and left as is for this item; each needs a design decision or a 
   repositories were ensured under (nothing validates that they agree).
 - A failure deleting an old token after the new one was created loses the new secret; retrying
   creates another token.
-- `connection.base_url` is operator configuration and is not checked against an allow-list.
+- `connection.base_url` is operator configuration and is not checked against an allow-list. No
+  tenant or webhook input reaches it: the only writer of connection data, `ConnectionData.put`
+  (`worker/ports.py`), has one caller (`github/manifest.py`) that writes fixed keys to the `argocd`
+  entry, while the `jfrog` entry is provisioned in the secret store and read back by `config_for`.

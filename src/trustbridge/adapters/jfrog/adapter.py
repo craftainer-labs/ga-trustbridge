@@ -410,7 +410,7 @@ class JFrogAdapter:
             listed = [
                 ListedCredential(
                     str(tok["description"]),
-                    {"kind": "token", "token_id": str(tok["token_id"])},
+                    {"kind": "token", "token_id": tok["token_id"]},
                 )
                 for tok in tokens
             ]
@@ -556,11 +556,19 @@ class JFrogAdapter:
 
     @staticmethod
     async def _find_tokens(c: JFrogClient, name: str, *, prefix: bool = False) -> list[JsonObj]:
-        tokens = json_object(await c.call("GET", f"{ACCESS}/tokens")).get("tokens") or []
+        tokens = json_object(await c.call("GET", f"{ACCESS}/tokens")).get("tokens")
+        if tokens is None:
+            return []
+        if not isinstance(tokens, list):
+            raise AdapterError(False, "JFrog returned a token listing that is not a list")
         found = []
         for token in tokens:
-            description = str(token.get("description") or "")
+            # The listing spans the whole instance: only an entry this call selects must be sound.
+            description = str(token.get("description") or "") if isinstance(token, dict) else ""
             if description.startswith(name) if prefix else description == name:
+                if not isinstance(token.get("token_id"), str):
+                    msg = "JFrog returned a token listing entry without token_id"
+                    raise AdapterError(False, msg)
                 found.append(token)
         return found
 
@@ -586,7 +594,7 @@ class JFrogAdapter:
         if not isinstance(access_token, str) or not isinstance(token_id, str):
             raise AdapterError(False, "JFrog returned an unexpected token response")
         for old in existing:
-            await c.call("DELETE", f"{ACCESS}/tokens/{seg(str(old['token_id']))}", accept=NOT_FOUND)
+            await c.call("DELETE", f"{ACCESS}/tokens/{seg(old['token_id'])}", accept=NOT_FOUND)
         ttl = int(created.get("expires_in") or TOKEN_TTL_SECONDS)
         issued = IssuedSecret(
             {"token": SecretStr(access_token)}, self._clock() + timedelta(seconds=ttl)
@@ -606,7 +614,7 @@ class JFrogAdapter:
         removed = False
         if kind != "mapping":
             for token in await self._find_tokens(c, slot.name):
-                path = f"{ACCESS}/tokens/{seg(str(token['token_id']))}"
+                path = f"{ACCESS}/tokens/{seg(token['token_id'])}"
                 removed |= (
                     await c.call("DELETE", path, accept=NOT_FOUND)
                 ).status_code != HTTP_NOT_FOUND
