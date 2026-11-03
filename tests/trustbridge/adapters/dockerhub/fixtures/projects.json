@@ -1,0 +1,73 @@
+{
+ "source": "Shapes from Docker's Hub API reference (https://docs.docker.com/reference/api/hub/latest/, OpenAPI 2-beta) and the access-token pages. See src/trustbridge/adapters/dockerhub/README.md for what still needs a live check. Dummy token values only.",
+ "scenarios": {
+  "namespace_ok": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/auth/token",
+      "json": {
+       "identifier": "svc-tb",
+       "secret": "dckr_pat_dummy"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "access_token": "jwt-bearer-value"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/namespaces/acme/repositories?page_size=1"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "count": 0,
+       "next": null,
+       "previous": null,
+       "results": []
+      }
+     }
+    }
+   ]
+  },
+  "namespace_missing": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/auth/token",
+      "json": {
+       "identifier": "svc-tb",
+       "secret": "dckr_pat_dummy"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "access_token": "jwt-bearer-value"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/namespaces/acme/repositories?page_size=1"
+     },
+     "response": {
+      "status": 404,
+      "json": {
+       "message": "not found",
+       "errinfo": null
+      }
+     }
+    }
+   ]
+  }
+ }
+}
