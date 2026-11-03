@@ -63,10 +63,11 @@ dev = [
 ]
 
 # Adapter plugin group (ADR 0027): one package per registry/GitOps adapter
-# registers itself here. Registered so far: jfrog, argocd.
+# registers itself here. Registered so far: jfrog, argocd, harbor.
 [project.entry-points."trustbridge.adapters"]
 jfrog = "trustbridge.adapters.jfrog:JFrogAdapter"
 argocd = "trustbridge.adapters.argocd:ArgoCDAdapter"
+harbor = "trustbridge.adapters.harbor:HarborAdapter"
 
 [build-system]
 requires = ["hatchling"]
