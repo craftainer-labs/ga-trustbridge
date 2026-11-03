@@ -82,7 +82,7 @@ class HarborClient:
             response = await self._http.request(
                 method, f"{self._base}{path}", json=json, params=params
             )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             msg = f"Harbor {method} {path} failed: {type(exc).__name__}"
             raise AdapterError(True, msg) from None
         status = response.status_code

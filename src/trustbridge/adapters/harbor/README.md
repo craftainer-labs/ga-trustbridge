@@ -88,20 +88,21 @@ No primary-documentation statement exists for these; the fixtures encode best-ef
 
 - That `PATCH /robots/{id}` with `{"secret": ""}` makes Harbor generate a secret and return it in
   `RobotSec`. The swagger only says "Refresh the robot secret".
-- That the robot list `q=name=~<text>` matches the full or stored name, and which prefix the
+- That the robot list `q=Level=project,name=~<text>` (both filters ANDed) matches the full or stored name, and which prefix the
   listed `name` carries (`robot$` by default, configurable in system settings).
 - That a robot name made of `tb-<hex>-<key>-g<n>` passes Harbor's robot name validation and
   length limit, and the answer for a duplicate name (409 assumed).
 - That a duplicate webhook policy name on `POST` answers 409 (not documented), and that the
-  policy listing accepts `q=name=<exact name>`. A changed secret alone is not detectable: Harbor
-  does not return `auth_header` in the clear.
+  policy listing accepts `q=name=<exact name>`. Harbor does not return `auth_header` in the
+  clear, so a rotated secret is detected by a digest of it kept in the state ref.
 - That `auth_header` is sent as the `Authorization` header value, and the `payload_format` value
   `Default`.
 - That `expires_at` in `RobotCreated` is an epoch in seconds (`-1` for never).
 - That `DELETE /projects/{name}` answers 412 for a project that still holds repositories.
 - Whether MSR 4 differs from upstream Harbor in any of these endpoints (its docs do not say).
 - That `GET /projects/{name}` answers 404 (not 403) for an absent project to the admin account.
-- Pagination: one page of 100 is read for robots and policies; `Link` headers are not followed.
+- Pagination: `page` and `page_size=100` are sent and pages are read until a short page (at most
+  50); `Link` and `X-Total-Count` headers are not used.
 
 ## Known limitations
 
@@ -114,6 +115,14 @@ No primary-documentation statement exists for these; the fixtures encode best-ef
   were ensured under (nothing validates that they agree).
 - A scope whose permission changes gets a new robot name (the scope key changes); the old robot is
   removed by `delete_credential` or the orphan sweep, not rewritten in place.
+- **Ownership.** The adapter never adopts, updates or deletes what it did not create. Robots and
+  webhook policies carry the description `managed by trustbridge`; one with the same name but
+  another description is refused (create, refresh) or left alone (delete). Robot names must also
+  start with the tenant prefix and match the exact project, so a robot of another project with a
+  similar name never counts. Harbor projects have no free-form field: only a project named
+  `tb<20 hex digits>` (derived from tenant and key) is deleted.
+- Robots are created with a 90-day duration. A secret refresh does not extend it, and the adapter
+  does not renew an expiring robot; recreate it (delete the credential) before it lapses.
 - An existing project, robot or policy is not compared on permissions or secret, only on the
   fields named above.
 - `connection.base_url` is operator configuration and is not checked against an allow-list; no

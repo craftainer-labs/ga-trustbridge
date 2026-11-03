@@ -6,6 +6,7 @@ Harbor's published swagger definition; the module README lists what is unconfirm
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from uuid import UUID
 
 import pytest
@@ -99,6 +100,7 @@ CONTEXT = {
     "hook_secret": HOOK_SECRET,
 }
 HOOK = CONTEXT["hook"]
+HOOK_AUTH = sha256(f"{HOOK}|{HOOK_SECRET}".encode()).hexdigest()[:20]
 SLOT = CredentialSlot(2, CRED)
 DELIVERED_SLOT = CredentialSlot(2, CRED, {"kind": "robot", "robot_id": "11"}, True)
 PREV_SLOT = CredentialSlot(1, PREV, {"kind": "robot", "robot_id": "10", "project": PROJECT}, True)
@@ -252,6 +254,13 @@ async def test_delete_project_with_repositories_fails_without_retry() -> None:
     assert not info.value.retryable
 
 
+async def test_delete_refuses_a_project_the_adapter_did_not_name() -> None:
+    """Ownership: only a `tb<digest>` project is deleted; any other name sends nothing."""
+    with pytest.raises(AdapterError) as info:
+        await offline_adapter().delete(ResourceState("production", {"kind": "project"}))
+    assert not info.value.retryable
+
+
 async def test_delete_unknown_kind_is_refused() -> None:
     """A state with no known kind is a non-retryable error and sends nothing."""
     with pytest.raises(AdapterError) as info:
@@ -303,7 +312,7 @@ async def test_ensure_webhook_creates_then_repeats_unchanged() -> None:
     replay.assert_exhausted()
     assert created.change.state is ChangeState.CREATED
     assert created.state == ResourceState(
-        HOOK, {"kind": "webhook", "project": PROJECT, "policy": HOOK}
+        HOOK, {"kind": "webhook", "project": PROJECT, "policy": HOOK, "auth": HOOK_AUTH}
     )
     replay, adapter = build("webhooks.json", "exists")
     again = await adapter.ensure_webhook(TARGET, created.state)
@@ -348,7 +357,7 @@ async def test_ensure_webhook_tolerates_a_creation_race() -> None:
 async def test_ensure_webhook_uses_the_project_in_its_prior_ref() -> None:
     """A prior that names another project keeps that project (the fixture is project-keyed)."""
     replay, adapter = build("webhooks.json", "exists")
-    prior = ResourceState(HOOK, {"kind": "webhook", "project": PROJECT})
+    prior = ResourceState(HOOK, {"kind": "webhook", "project": PROJECT, "auth": HOOK_AUTH})
     applied = await adapter.ensure_webhook(TARGET, prior)
     replay.assert_exhausted()
     assert applied.state is not None
@@ -382,6 +391,29 @@ async def test_a_non_list_policy_listing_is_an_error() -> None:
     with pytest.raises(AdapterError) as info:
         await adapter.ensure_webhook(TARGET, None)
     assert not info.value.retryable
+
+
+async def test_a_rotated_webhook_secret_is_pushed_again() -> None:
+    """Harbor masks `auth_header`, so a changed secret (digest in the ref) triggers a PUT."""
+    replay, adapter = build("webhooks.json", "drift_secret")
+    prior = ResourceState(HOOK, {"kind": "webhook", "project": PROJECT, "auth": "stale"})
+    applied = await adapter.ensure_webhook(TARGET, prior)
+    replay.assert_exhausted()
+    assert applied.change.state is ChangeState.UPDATED
+    assert applied.state is not None
+    assert applied.state.ref["auth"] == HOOK_AUTH
+
+
+async def test_a_policy_without_the_marker_is_never_adopted_or_deleted() -> None:
+    """Ownership: a same-named policy that trustbridge did not create is left alone."""
+    _, adapter = build("webhooks.json", "foreign")
+    with pytest.raises(AdapterError) as info:
+        await adapter.ensure_webhook(TARGET, None)
+    assert not info.value.retryable
+    replay, adapter = build("webhooks.json", "foreign")
+    again = await adapter.delete(ResourceState(HOOK, {"kind": "webhook", "project": PROJECT}))
+    replay.assert_exhausted()
+    assert again.change.state is ChangeState.UNCHANGED
 
 
 async def test_delete_webhook_variants() -> None:
@@ -484,7 +516,7 @@ async def test_ensure_credential_reissues_an_undelivered_secret(
     assert secret_values(outcome.credential)["password"] == REFRESHED
     assert isinstance(outcome.credential, IssuedSecret)
     assert outcome.credential.expires_at == expires_at
-    assert outcome.state.previous is None
+    assert outcome.state.previous == PREV_SLOT
 
 
 async def test_a_robot_of_another_project_does_not_count() -> None:
@@ -493,6 +525,68 @@ async def test_a_robot_of_another_project_does_not_count() -> None:
     outcome = await adapter.ensure_credential(PUSH, state_of(DELIVERED_SLOT))
     replay.assert_exhausted()
     assert outcome.change.state is ChangeState.CREATED
+
+
+async def test_a_robot_without_the_marker_is_never_adopted_or_deleted() -> None:
+    """Ownership: a same-named robot that trustbridge did not create is not touched."""
+    for call in ("ensure", "rotate"):
+        _, adapter = build("credentials.json", "foreign_robot")
+        action = adapter.ensure_credential if call == "ensure" else adapter.rotate_begin
+        with pytest.raises(AdapterError) as info:
+            await action(PUSH, state_of(DELIVERED_SLOT))
+        assert not info.value.retryable
+    replay, adapter = build("credentials.json", "foreign_robot")
+    outcome = await adapter.delete_credential(PUSH, state_of(SLOT))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UNCHANGED
+
+
+async def test_a_slot_outside_the_tenant_prefix_is_never_deleted() -> None:
+    """Ownership: a slot name without this tenant's prefix sends nothing."""
+    foreign = CredentialSlot(1, "someone-elses-robot")
+    outcome = await offline_adapter().delete_credential(PUSH, state_of(foreign))
+    assert outcome.change.state is ChangeState.UNCHANGED
+
+
+def _robot_page(count: int, offset: int) -> list[dict[str, object]]:
+    return [
+        {"id": offset + i, "name": f"robot${PROJECT}+other-{offset + i}", "description": "x"}
+        for i in range(count)
+    ]
+
+
+def _listing(page: int, items: list[dict[str, object]]) -> dict[str, object]:
+    query = {"q": f"Level=project,name=~{CRED}", "page_size": "100", "page": str(page)}
+    request = {"method": "GET", "path": "/api/v2.0/robots", "query": query}
+    return {"request": request, "response": {"status": 200, "json": items}}
+
+
+async def test_listings_follow_every_page() -> None:
+    """A robot beyond the first 100 results is still found (here: created on page two)."""
+    robot = {"id": 300, "name": f"robot${PROJECT}+{CRED}", "description": "managed by trustbridge"}
+    replay = Replay([_listing(1, _robot_page(100, 0)), _listing(2, [robot])])
+    adapter = HarborAdapter(config(), transport=replay.transport(), clock=lambda: NOW)
+    outcome = await adapter.ensure_credential(PUSH, state_of(DELIVERED_SLOT))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UNCHANGED
+
+
+async def test_an_endless_listing_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A listing that never ends is a non-retryable error, not a loop."""
+    monkeypatch.setattr("trustbridge.adapters.harbor.adapter.MAX_PAGES", 1)
+    replay = Replay([_listing(1, _robot_page(100, 0))])
+    adapter = HarborAdapter(config(), transport=replay.transport(), clock=lambda: NOW)
+    with pytest.raises(AdapterError) as info:
+        await adapter.ensure_credential(PUSH, state_of(DELIVERED_SLOT))
+    assert not info.value.retryable
+
+
+async def test_an_invalid_url_is_an_adapter_error_without_the_url() -> None:
+    """A5: a URL httpx rejects becomes a retryable `AdapterError` that names no host."""
+    async with HarborClient("https://harbor.example:bad", ADMIN_USER, SecretStr("x")) as client:
+        with pytest.raises(AdapterError) as info:
+            await client.call("GET", "/api/v2.0/users/current")
+    assert "harbor.example" not in info.value.message
 
 
 async def test_a_creation_conflict_is_retryable() -> None:
@@ -539,13 +633,13 @@ async def test_a_credential_needs_a_current_slot() -> None:
 
 # ---- rotation (single, in place) ------------------------------------------------------------
 async def test_rotate_begin_refreshes_the_secret_in_place() -> None:
-    """A2/A3: the same robot gets a new secret; `previous` is dropped (single rotation)."""
+    """A2/A3: the same robot gets a new secret; `previous` is kept for `rotate_finish`."""
     replay, adapter = build("credentials.json", "rotate_existing")
     outcome = await adapter.rotate_begin(PUSH, state_of(DELIVERED_SLOT, PREV_SLOT))
     replay.assert_exhausted()
     assert outcome.change.state is ChangeState.UPDATED
     assert secret_values(outcome.credential)["password"] == REFRESHED
-    assert outcome.state.previous is None
+    assert outcome.state.previous == PREV_SLOT
     assert outcome.state.current is not None
     assert not outcome.state.current.delivered
 

@@ -70,7 +70,13 @@ WEBHOOK_HEADER = "Authorization"
 DEFAULT_WEBHOOK_EVENTS = ("PUSH_ARTIFACT",)
 ROBOT_DURATION_DAYS = 90
 PROJECT_DIGEST_LENGTH = 20
+_PROJECT_NAME = re.compile(rf"tb[0-9a-f]{{{PROJECT_DIGEST_LENGTH}}}")
 PAGE_SIZE = "100"
+MAX_PAGES = 50
+MARKER = "managed by trustbridge"
+"""Written to the description of every robot and webhook policy the adapter creates; one without
+it is never adopted, updated or deleted (Harbor projects carry no free-form field, so a project
+is recognised by its derived `tb<digest>` name instead)."""
 MAX_REPO_PATH = 200
 
 # Harbor robot permissions stop at project scope (the `repository` resource of a project): there
@@ -208,7 +214,7 @@ class HarborAdapter:
         events = list(t.events or DEFAULT_WEBHOOK_EVENTS)
         body: JsonObj = {
             "name": name,
-            "description": "managed by trustbridge",
+            "description": MARKER,
             "enabled": True,
             "event_types": events,
             "targets": [
@@ -222,8 +228,15 @@ class HarborAdapter:
             ],
         }
         base = f"{API}/projects/{seg(project)}/webhook/policies"
+        # Harbor never returns `auth_header` in the clear, so a rotated secret is detected by a
+        # digest kept in the ref; a missing digest (or a changed one) pushes the body again.
+        auth = sha256(f"{name}|{secret.get_secret_value()}".encode()).hexdigest()[
+            :PROJECT_DIGEST_LENGTH
+        ]
         async with self._client() as c:
             existing = await self._find_policy(c, project, name)
+            if existing is not None and existing.get("description") != MARKER:
+                raise AdapterError(False, "Harbor webhook policy is not managed by trustbridge")
             if existing is None:
                 post = await c.call("POST", base, json=body, accept=CONFLICT)
                 state = (
@@ -231,12 +244,14 @@ class HarborAdapter:
                     if post.status_code == HTTP_CONFLICT
                     else ChangeState.CREATED
                 )
-            elif self._webhook_matches(existing, t.url, events):
+            elif auth == (prior.ref.get("auth") if prior is not None else None) and (
+                self._webhook_matches(existing, t.url, events)
+            ):
                 state = ChangeState.UNCHANGED
             else:
                 await c.call("PUT", f"{base}/{self._policy_id(existing)}", json=body)
                 state = ChangeState.UPDATED
-        ref = {"kind": "webhook", "project": project, "policy": name}
+        ref = {"kind": "webhook", "project": project, "policy": name, "auth": auth}
         return Applied(Change(state), ResourceState(name=name, ref=ref))
 
     def _webhook_secret(self, t: WebhookTarget) -> SecretStr:
@@ -256,15 +271,9 @@ class HarborAdapter:
 
     @staticmethod
     async def _find_policy(c: HarborClient, project: str, name: str) -> JsonObj | None:
-        listing = await c.call(
-            "GET",
-            f"{API}/projects/{seg(project)}/webhook/policies",
-            params={"q": f"name={name}", "page_size": PAGE_SIZE},
-            accept=NOT_FOUND,
-        )
-        if listing.status_code == HTTP_NOT_FOUND:
-            return None
-        return next((p for p in json_list(listing) if p.get("name") == name), None)
+        path = f"{API}/projects/{seg(project)}/webhook/policies"
+        policies = await HarborAdapter._pages(c, path, f"name={name}")
+        return next((p for p in policies if p.get("name") == name), None)
 
     @staticmethod
     def _webhook_matches(existing: JsonObj, url: str, events: list[str]) -> bool:
@@ -286,6 +295,9 @@ class HarborAdapter:
             return await self._delete_webhook(prior)
         if kind != "project":
             raise AdapterError(False, "unknown resource kind in state")
+        if not _PROJECT_NAME.fullmatch(prior.name):
+            # Only a project named by `project_name_for` is ours; never delete any other.
+            raise AdapterError(False, "refusing to delete a project the adapter did not name")
         async with self._client() as c:
             gone = await c.call("DELETE", f"{API}/projects/{seg(prior.name)}", accept=NOT_FOUND)
         state = ChangeState.UNCHANGED if gone.status_code == HTTP_NOT_FOUND else ChangeState.DELETED
@@ -295,7 +307,7 @@ class HarborAdapter:
         project = prior.ref.get("project") or self._project_for_credentials()
         async with self._client() as c:
             existing = await self._find_policy(c, project, prior.name)
-            if existing is None:
+            if existing is None or existing.get("description") != MARKER:
                 return Applied(Change(ChangeState.UNCHANGED), None)
             path = f"{API}/projects/{seg(project)}/webhook/policies/{self._policy_id(existing)}"
             gone = await c.call("DELETE", path, accept=NOT_FOUND)
@@ -317,20 +329,21 @@ class HarborAdapter:
             existing = await self._find_robot(c, project, slot.name)
             if existing is None:
                 return await self._create_robot(c, s, prior, slot, project)
+            self._require_owned(existing)
             if slot.delivered:
                 return CredentialOutcome(Change(ChangeState.UNCHANGED), prior, None)
-            return await self._refresh_robot(c, replace(prior, previous=None), slot, existing)
+            return await self._refresh_robot(c, prior, slot, existing)
 
     async def rotate_begin(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome:
-        """Replace the robot's secret in place (rotation is `single`)."""
+        """Replace the robot's secret in place (rotation is `single`); `previous` is kept."""
         slot = self._current(prior)
         project = self._project_for_credentials()
-        base = replace(prior, previous=None)
         async with self._client() as c:
             existing = await self._find_robot(c, project, slot.name)
             if existing is None:
-                return await self._create_robot(c, s, base, slot, project)
-            return await self._refresh_robot(c, base, slot, existing)
+                return await self._create_robot(c, s, prior, slot, project)
+            self._require_owned(existing)
+            return await self._refresh_robot(c, prior, slot, existing)
 
     async def rotate_finish(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome:
         """Delete `previous` only (never the robot `current` names); idempotent."""
@@ -410,6 +423,12 @@ class HarborAdapter:
         return prior.current
 
     @staticmethod
+    def _require_owned(robot: JsonObj) -> None:
+        """Refuse to touch a robot the adapter did not create (it lacks the marker)."""
+        if robot.get("description") != MARKER:
+            raise AdapterError(False, "Harbor robot account is not managed by trustbridge")
+
+    @staticmethod
     def _robot_id(robot: JsonObj) -> str:
         robot_id = robot.get("id")
         if not isinstance(robot_id, int) or isinstance(robot_id, bool):
@@ -417,18 +436,33 @@ class HarborAdapter:
         return str(robot_id)
 
     @staticmethod
+    async def _pages(c: HarborClient, path: str, query: str) -> list[JsonObj]:
+        """Read every page of a listing; a 404 (an absent project) is an empty listing."""
+        items: list[JsonObj] = []
+        for page in range(1, MAX_PAGES + 1):
+            params = {"q": query, "page_size": PAGE_SIZE, "page": str(page)}
+            listing = await c.call("GET", path, params=params, accept=NOT_FOUND)
+            if listing.status_code == HTTP_NOT_FOUND:
+                return items
+            batch = json_list(listing)
+            items.extend(batch)
+            if len(batch) < int(PAGE_SIZE):
+                return items
+        raise AdapterError(False, f"Harbor listing {path} has more than {MAX_PAGES} pages")
+
+    @staticmethod
     async def _robots(c: HarborClient, name_part: str) -> list[JsonObj]:
-        """List robots whose name contains `name_part` (the listing spans the whole instance)."""
-        listing = await c.call(
-            "GET", f"{API}/robots", params={"q": f"name=~{name_part}", "page_size": PAGE_SIZE}
-        )
-        return json_list(listing)
+        """List project robots whose name contains `name_part` (the listing spans the instance)."""
+        return await HarborAdapter._pages(c, f"{API}/robots", f"Level=project,name=~{name_part}")
 
     async def _find_robot(self, c: HarborClient, project: str, name: str) -> JsonObj | None:
         """Return the project robot `name`; its full name is `<prefix><project>+<name>`."""
-        wanted = f"{project}+{name}"
         for robot in await self._robots(c, name):
-            if str(robot.get("name", "")).endswith(wanted):
+            full = robot.get("name")
+            if not isinstance(full, str) or "+" not in full:
+                continue
+            head, slot_name = full.rsplit("+", 1)
+            if slot_name == name and head.rsplit("$", 1)[-1] == project:
                 self._robot_id(robot)
                 return robot
         return None
@@ -443,7 +477,7 @@ class HarborAdapter:
     ) -> CredentialOutcome:
         body: JsonObj = {
             "name": slot.name,
-            "description": "managed by trustbridge",
+            "description": MARKER,
             "level": "project",
             "duration": ROBOT_DURATION_DAYS,
             "disable": False,
@@ -527,9 +561,11 @@ class HarborAdapter:
 
     async def _delete_slot(self, c: HarborClient, slot: CredentialSlot) -> bool:
         """Delete the robot a slot names (found by name in its project). True if it went."""
+        if not slot.name.startswith(tenant_prefix(self._config.tenant.id)):
+            return False
         project = slot.ref.get("project") or self._project_for_credentials()
         robot = await self._find_robot(c, project, slot.name)
-        if robot is None:
+        if robot is None or robot.get("description") != MARKER:
             return False
         gone = await c.call("DELETE", f"{API}/robots/{self._robot_id(robot)}", accept=NOT_FOUND)
         return gone.status_code != HTTP_NOT_FOUND
