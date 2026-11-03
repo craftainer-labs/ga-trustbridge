@@ -120,3 +120,20 @@ in the fixtures as best-effort shapes and are the first thing to check against a
   and that a project must be empty before it can be deleted.
 - Token and mapping list pagination (none is handled).
 - Which error an unlicensed OIDC call returns; the adapter treats any 4xx as non-retryable.
+
+## Known limitations
+
+Found in review and left as is for this item; each needs a design decision or a live instance.
+
+- A credential that switches between an OIDC mapping and an access token (a scope's `oidc_eligible`
+  changes) does not revoke the credential of the previous kind; delete or rotate it by hand.
+- Whether `GET /access/api/v1/tokens` still lists an expired token is unconfirmed. If it does, a
+  delivered slot whose token expired reports `UNCHANGED` until the next rotation.
+- Webhook subscriptions are created in the `docker` domain only, and an existing subscription with
+  the same URL and events is not compared on secret, project or criteria, so a rotated signing
+  secret is not pushed to it.
+- Credentials are scoped to the adapter's configured project key; it must equal the key the
+  repositories were ensured under (nothing validates that they agree).
+- A failure deleting an old token after the new one was created loses the new secret; retrying
+  creates another token.
+- `connection.base_url` is operator configuration and is not checked against an allow-list.
