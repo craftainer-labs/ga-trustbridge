@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. For the user's G-api review (NG6a0); no code is written yet. It becomes Accepted
+Proposed. The user's G-api answers (2026-11-03) are recorded below; no code is written yet. It becomes Accepted
 when the implementation (NG6c, with the emitters in NG6f) merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (database roles, source address
 behind `TRUSTED_PROXIES`, N-1 migrations) and
@@ -67,10 +67,11 @@ One table, `audit_events`, one row per event, written by trustbridge code only:
   deleted by the sweep, and each OIDC trust created or removed. Metadata only; never a value.
 - Configuration events: tenant state changes by installation events (`_sync`), host
   registration, adapter configuration changes made through the API, role-mapping changes if
-  mappings live in the database (0033, Decision needed 4).
+  mappings live in the database (none: roles live in Keycloak, 0033).
 - The audit purge itself (a summary event with the cut-off and row count) and each export
   request (who exported, the range).
-- Authn failures: see "Decision needed 1".
+- Authn failures: rejected, unauthenticated requests are logs and metrics only; authorization
+  denials are rows (user decision 1 below).
 
 **Same transaction.** For a mutating API call and for a credential state change, the audit row
 is inserted in the transaction that makes the change, so there is no change without its
@@ -120,7 +121,7 @@ tenant. An auditor's reads are themselves not audited per row, but an export req
 
 ### Export
 
-See "Decision needed 2" for the transport. Whatever the transport, the export is:
+The transport is user decision 2 below. The export is:
 
 - **Ordered and resumable** by `seq`, one JSON object per event with the columns above.
 - **Lag-bounded.** Because identity values can commit out of order (a transaction with a lower
@@ -137,9 +138,9 @@ See "Decision needed 2" for the transport. Whatever the transport, the export is
 purge as a singleton duty (EB-6) through `tb_audit_purge`, in bounded batches so it never
 holds a long lock. The function refuses a cut-off inside a configured floor
 (`AUDIT_RETENTION_MIN_DAYS`, default 90) so a typo cannot erase recent history. The retention
-interacts with EB-15 deletion (0033, Decision needed 9): audit rows with a tenant id are kept
-for the retention period even after a tenant's data is deleted; the follow-up that implements
-deletion decides whether they are kept as is or reduced to the minimum needed.
+interacts with EB-15 deletion ([0034](0034-tenant-data-deletion.md)): the deletion's own
+events always survive, and 0034 holds the open decision on the rest of a deleted tenant's
+rows.
 
 ### Migration
 
@@ -149,54 +150,33 @@ functions and the policies; the application writes to it once the migration has 
 previous release, which never touches the table, is unaffected (NFR-0027). Because the table
 is new, the migration writes the existing `schema_compat` without a bump.
 
+## User decisions (G-api, 2026-11-03)
+
+These replace the open options the first draft carried. Alternatives considered are kept in
+one line each so the reasoning survives.
+
+1. **Authentication failures: logs and metrics for unauthenticated rejections; rows for
+   `authz.denied`.** **User decision (G-api, 2026-11-03).** A rejected token has no verified
+   subject and an anonymous caller controls how many there are, so it must not create rows
+   (considered and not chosen: a rate-limited row per rejection; a sampled row per source and
+   minute). A denial of an authenticated principal has a verified `sub`, so it is stored.
+   Rejections are a structured log line with a fixed schema and a counter by reason.
+2. **Export: NDJSON pull plus the JSON list endpoint.** **User decision (G-api,
+   2026-11-03).** `GET /admin/v1/audit-events/export?since_seq=...` streams
+   `application/x-ndjson`, resumable by `seq`, for SIEMs and air-gapped installs (no outbound
+   call, EB-5); the list endpoint (cursor pagination, 0033) serves the UI's viewer. **Push to a
+   SIEM (syslog, webhook, OTLP) is a follow-up**, not part of NG6.
+3. **Tamper evidence: grants, trigger and purge only through the definer function; no hash
+   chain.** **User decision (G-api, 2026-11-03).** The SIEM copy is the evidence an auditor
+   trusts. (Considered and not chosen: a per-tenant hash chain, which serialises inserts on the
+   chain head; revisit if a SOC 2 scope requires in-database tamper evidence.)
+
+Sources: EB-4; EB-5; OWASP Logging Cheat Sheet; NDJSON; NIST SP 800-92 (see Sources).
+
 ## Decision needed
 
-Both are the user's call at G-api (CLAUDE.md: matters of taste and genuine trade-offs go to
-the user). A lean is stated and labelled; none is chosen.
-
-### 1. Authentication failures: where do they go?
-
-The API sees bearer tokens only (Context 2), so an `authn.rejected` event has no subject and
-an unauthenticated caller controls how many there are.
-
-- **A. Structured log line and a metric only** (the template's current behaviour, with a fixed
-  event schema and a counter by reason). No row an unauthenticated caller can create, so no
-  way to fill the table; a SIEM already ingests the JSON logs (ADR 0007).
-- **B. Database row per rejection**, rate-limited per source address. Gives one place to
-  search, but an attacker can still churn rows up to the limit and the rows have no `sub`.
-- **C. Database row, sampled or aggregated** (one row per source per minute with a count).
-  Bounded growth, but loses individual events.
-
-Lean (a lean, not a decision): **A** for unauthenticated rejections, and a database row for
-every `authz.denied`, because a denial has a verified `sub` and so is attributable and cannot
-be spammed by an anonymous caller. Sources: EB-4; OWASP Logging Cheat Sheet (log authn
-failures, protect the log from injection and volume); `app/oidc.py` current behaviour.
-
-### 2. Export transport, and tamper evidence
-
-- **Transport.**
-  - **A. NDJSON pull**: `GET /admin/v1/audit-events/export?since_seq=...` streaming
-    `application/x-ndjson`, resumable by `seq`. A SIEM or a cron job pulls it; it fits
-    air-gapped installs (no outbound calls by default, EB-5) and needs no sink configuration.
-  - **B. JSON array** on the list endpoint (paginated). Simplest for a UI, awkward for a
-    bulk SIEM pull, and holds a page in memory.
-  - **C. Push** (syslog, webhook, OTLP logs). SIEM-native, near real-time, but an outbound call
-    by definition (EB-5 default off), needs delivery guarantees (outbox, retries) and secret
-    handling for the sink.
-  - Lean: **A** plus **B** (the list endpoint for the UI's viewer, the NDJSON export for
-    SIEMs); push (C) as a follow-up if a deployment needs it. Sources: EB-4 ("JSON export for a
-    SIEM"), EB-5, NDJSON (https://github.com/ndjson/ndjson-spec).
-- **Tamper evidence.**
-  - **A. Grants plus triggers plus function-only purge** (above), and the SIEM copy is the
-    evidence.
-  - **B. A hash chain** (each row stores the SHA-256 of its content and the previous row's
-    hash, per tenant or global). Detects deletion or edit by someone with owner access, but
-    serialises inserts on the chain head (a contention point per tenant) and needs a verifier
-    and a rule for purged prefixes.
-  - Lean: **A**; the exported copy in the SIEM is what an auditor trusts, and a hash chain's
-    serialisation cost lands on every credential and API write. Revisit if a customer's
-    SOC 2 scope requires in-database tamper evidence. Sources: PostgreSQL privileges and
-    triggers; NIST SP 800-92 (log management).
+None open in this ADR. The question of what happens to a deleted tenant's audit rows is a
+decision in [0034](0034-tenant-data-deletion.md), because it interacts with deletion.
 
 ## Invariants the implementation must test
 
@@ -230,8 +210,7 @@ with the app role.
 9. A mutating call's event commits with its change, and a change that rolls back leaves no
    `success` event (it may leave a `failure` event in its own transaction).
 10. An `authz.denied` event carries the denied principal's `sub` and the missing role or
-    tenant, and an unauthenticated rejection creates a log line and metric but, under the
-    leaned option, no row.
+    tenant, and an unauthenticated rejection creates a log line and metric but, no row.
 
 **Scope and export**
 
@@ -272,7 +251,7 @@ with the app role.
 - An allow-list per resource type is more code than a generic dump and a reviewer must keep it
   current, but a new secret-bearing column is safe by default.
 - Owner-level access (a DBA) can still change the table; that is outside the threat model of
-  this design and is what the SIEM copy covers (Decision needed 2).
+  this design and is what the SIEM copy covers (user decision 3).
 - The export's lag makes it near-real-time, not real-time; the lag is a setting.
 - Audit rows with a tenant id outlive the tenant's data (EB-15 interplay above) until
   retention expires.

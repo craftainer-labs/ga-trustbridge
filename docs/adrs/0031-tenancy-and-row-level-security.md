@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. For the user's G-api review (NG6a0); no code is written yet. It becomes Accepted
+Proposed. No code is written yet. It becomes Accepted
 when the implementation (NG6a) merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) ("Tenancy", the roles table and
 its open issues), which this ADR settles, and is used by
@@ -149,8 +149,9 @@ another's context. Rules:
 - Each tenant's work is its own transaction(s), so a long sweep never holds one transaction
   across tenants.
 - The webhook body purge and the audit purge (0032) are host- or instance-scoped and do not
-  iterate. EB-15 data deletion per tenant is not part of this ADR (0033, Decision needed 9).
-- A tenant that is `suspended`, or admin-disabled (0033), is still iterated by the lease and
+  iterate. Per-tenant data deletion (EB-15) is [0034](0034-tenant-data-deletion.md), which reads
+  tenants through the same context and removes the tenant's rows last.
+- A tenant that is `suspended`, admin-disabled (0033) or being deleted (0034) is still iterated by the lease and
   orphan sweeps (they release resources and finish in-flight operations) but starts no new
   adapter operation.
 
@@ -182,7 +183,7 @@ fleet before the N+1 migrate Job runs. Skipping release N is not supported.
 ### Decisions this ADR records that the user can overrule
 
 These are design choices made while writing, not user decisions yet; they are listed here so
-G-api sees them next to the Decision needed items below.
+G-api sees them with the user decisions below.
 
 - `SECURITY DEFINER` functions for the unscoped paths instead of a `BYPASSRLS` role or a
   scope-widening setting.
@@ -248,10 +249,13 @@ app role (not the owner, not a superuser).
 17. A test that disables a policy (or connects as the owner without `FORCE`) fails the
     isolation tests, so a silently inert policy is caught.
 
-## Decision needed
+## User decisions (G-api, 2026-11-03)
 
-None. The user-facing choices for this item are in
-[0033](0033-admin-api-v1-rbac-and-limits.md) (API shape, roles, tenant disable, deletion).
+No open options were put to the user for this ADR. The user's answers elsewhere affect it:
+tenant disable is in NG6 (0033), so `tenants` gets the separate `admin_disabled_*` columns
+that `tb_upsert_tenant` never writes (invariant 7); tenant data deletion is in NG6
+([0034](0034-tenant-data-deletion.md)), which adds a host-scoped deletion table outside RLS
+(like `webhook_deliveries`) and a nullable `tenant_id` on `webhook_deliveries`.
 
 ## Open issues
 

@@ -2,15 +2,14 @@
 
 ## Status
 
-Proposed. For the user's G-api review (NG6a0); no code is written yet. Nine items are open for
-the user (see "Decision needed"); the rest is design that follows existing ADRs and NFRs. It
-becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
+Proposed. G-api answers from the user are recorded below (2026-11-03); one item stays open
+("Decision needed: roles"). No code is written yet. It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
 endpoints) merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (instance layout, the abuse
 limiter, the NG6 split of limits),
 [0030](0030-key-signer-and-github-hosts.md) (host state, registration),
 [0031](0031-tenancy-and-row-level-security.md) (tenant context) and
-[0032](0032-audit-log.md) (what is audited). Inherits [0004](0004-uniform-problem-details-error-responses.md)
+[0032](0032-audit-log.md) (what is audited) and [0034](0034-tenant-data-deletion.md) (tenant data deletion). Inherits [0004](0004-uniform-problem-details-error-responses.md)
 (Problem Details), [0003](0003-auth-strategy-and-federated-backends.md) and
 [0026](0026-resource-server-metadata-and-bff.md) (OIDC resource server, BFF), NFR-0001,
 NFR-0002, NFR-0011, NFR-0012 and NFR-0014 from the template.
@@ -61,7 +60,7 @@ EB-2 (RBAC with roles mapped from IdP groups), EB-3 (tenants), EB-4 (audit) and 
   adapter name and whether it is configured (yes/no), plus its capability summary, never the
   stored values, URLs or tokens. Reason: `connection.base_url` receives adapter admin tokens
   (SSRF); any future writer needs its own SSRF review (NG5f, NG5d notes).
-- **Tenant disable, if added, is a separate column** that the installation `_sync` never
+- **Tenant disable is a separate column** that the installation `_sync` never
   touches (see "Tenant disable"). The effective state is the combination of both.
 - **Roles are tied to RLS by 0031**: the tenant context is set only after authorization.
 - **Rate limits are the API's own**; the webhook limiter keeps its own settings (0028).
@@ -93,182 +92,126 @@ settles them; they are recorded for visibility.
 - **Cross-cutting.** Every mutating call is audited (0032) in the same transaction as the
   change; every list endpoint is bounded; request bodies are bounded.
 
-### Roles
+### Roles and their source
 
-The role set is Decision needed 2. Whichever set is chosen is checked in one place, the RBAC
-dependency (`trustbridge.rbac`), which turns the token into a `Principal`: `sub`, `iss`, the
-roles with their scopes. Role names are namespaced by a prefix (default `trustbridge`) so they
-do not collide with the template's personas.
+The role set is "Decision needed: roles" below (the four-role set is the starting point, the
+user decided on 2026-11-03). Roles are read from the Keycloak client roles in
+`resource_access.<OIDC_CLIENT_ID>.roles`, the template's `require_roles` path, by the RBAC
+dependency (`trustbridge.rbac`), which turns the token into a `Principal`: `sub`, `iss`, and the
+set of `(role, scope)` grants described under "User decisions" items 3 and 4. A role name that
+does not parse as a trustbridge role grants nothing here (it may still be a template persona for
+the template's own routes).
 
-### Tenant disable
+### Tenant disable (user decision 8: in NG6)
 
-See Decision needed 8. If added: a tenant row gets `admin_disabled_at timestamptz null`,
-`admin_disabled_by` (the actor's `sub`) and `admin_disable_reason`, all separate from `state`.
-`tb_upsert_tenant` and `_sync` (0031) never write them. A tenant is **effective-active** only
-when `state = 'active'` and `admin_disabled_at IS NULL`. A disabled tenant: its webhooks are
-stored and acknowledged but their handlers are skipped (left unprocessed, like a delivery
-waiting for a host that is not ready, 0028 item 3, and re-relayed when it is enabled again);
-no new adapter operation starts; in-flight operations finish or are abandoned by the normal
-rules; the admin API still reads it. It is reversible (`enable`), audited, and requires the
-`admin` role at instance scope.
+A tenant row gets `admin_disabled_at timestamptz null`, `admin_disabled_by` (the actor's `sub`)
+and `admin_disable_reason`, all separate from `state`. `tb_upsert_tenant` and the installation
+`_sync` (0031) never write them. A tenant is **effective-active** only when `state = 'active'`
+and `admin_disabled_at IS NULL`. A disabled tenant: its webhooks are stored and acknowledged
+but their handlers are skipped (left unprocessed, like a delivery waiting for a host that is not
+ready, 0028 item 3, and re-relayed when it is enabled again); no new adapter operation starts;
+in-flight operations finish or are abandoned by the normal rules; the admin API still reads it.
+It is reversible (`enable`), audited, and needs the `admin` role at instance scope. A tenant
+with a non-terminal deletion (0034) cannot be enabled.
 
-## Decision needed
+## User decisions (G-api, 2026-11-03)
 
-For each item: the options, their trade-offs, the sources, and a lean that is only a lean. The
-numbering matches the NG6a0 brief.
+Recorded from the user's answers. Items 2 (roles) stays open in part, see the next section.
 
-### 1. Admin API base path
+### 1. Base path: `/admin/v1`
 
-Fixed points: the manifest callback is `/admin/github/registration/callback` (a browser redirect,
-not an API call; its URL is generated per flow, but the constant exists); the template owns
-`/crud/vN`, `/audit` and `/mock`; webhooks are `/webhooks/...`; NFR-0001 says every resource is
-under an explicit `/vN` prefix with no unversioned alias.
+**User decision (G-api, 2026-11-03):** the admin API is mounted under `/admin/v1/...`. The
+reasons: an ingress can expose `/webhooks` publicly and `/admin` internally, and the manifest
+callback `/admin/github/registration/callback` already lives under `/admin`. The template's
+`/crud/vN`, `/audit` and `/mock` mounts are untouched. **Note for NG6g:** NFR-0001 says every
+resource is mounted under an explicit `/vN` prefix; `/admin/v1` carries the version as the
+second segment, so NG6g clarifies NFR-0001 to say "a `/vN` path segment immediately after the
+mount prefix, and no unversioned alias". The fixed `CALLBACK_PATH` is a browser redirect, not
+an API call, and stays unversioned.
 
-| Option | Example | For | Against |
-| --- | --- | --- | --- |
-| A. `/v1/...` | `/v1/tenants` | Literally NFR-0001; shortest | Collides conceptually with the template's `/crud/v1`; no path prefix to route or expose admin traffic apart from `/webhooks`; the callback `/admin/...` sits outside the versioned tree |
-| B. `/admin/v1/...` | `/admin/v1/tenants` | One `/admin` prefix: an ingress can expose `/webhooks` publicly and `/admin` only internally (a real EB-10/EB-5 concern); the callback already lives under `/admin/` | NFR-0001 must be read as "a `/vN` segment" or amended (NG6g can clarify the NFR); one more segment |
-| C. `/api/v1/...` | `/api/v1/tenants` | A common convention | The template already uses `/api/_crud` for something else; no gain over A or B |
+### 3. IdP mapping: Keycloak client roles
 
-Lean: **B**, for the ingress separation and because the callback is already under `/admin`,
-with NG6g amending NFR-0001's wording if the user accepts. Sources: NFR-0001 and
-ADR 0002; `app/main.py:212-242`; `github/manifest.py:48`; Kubernetes API conventions (versioned
-group paths); Google AIP-185 (major version in the path).
+**User decision (G-api, 2026-11-03):** roles come from the Keycloak client roles
+`resource_access.<OIDC_CLIENT_ID>.roles`, the template's existing `require_roles` path, not a
+configurable groups claim (the earlier lean was the groups claim; the user chose otherwise).
+Consequence, recorded for NFR-0014: the role source is Keycloak-shaped and not portable to an
+IdP that does not emit `resource_access`. An Entra or Okta deployment must go through a Keycloak
+broker (EB-1 already expects an IdP broker) or a protocol mapper that writes the same claim
+shape. The `Principal` builder keeps the claim path in one function so a second source can be
+added later without touching routes. NFR-0014 stays accurate: nothing but `sub` is assumed
+present, and a token without `resource_access` yields a principal with no roles.
 
-### 2. Roles
+### 4. Tenant scoping: per-tenant names, as Keycloak client roles
 
-- **A. Four roles: `admin`, `operator`, `auditor`, `viewer`.** `viewer` reads the operational
-  data except audit; `auditor` reads everything including audit and the export and mutates
-  nothing; `operator` does operations (requeue a delivery, trigger a reconcile, rotate a
-  credential) and reads like a viewer; `admin` does configuration (registration, tenant
-  enable/disable, role mappings if stored) and everything else. Separation of duties: the person
-  who operates is not the person who audits, and an auditor cannot change what they audit.
-- **B. Three roles: `admin`, `editor`, `viewer`.** Fewer to learn and to map; the audit log is
-  readable by `admin` only, so an auditor who must not change anything cannot exist.
-- **C. The template's personas** (`security`, `detective`, ...). Free, but they are
-  example names with no meaning for this domain.
+**User decision (G-api, 2026-11-03):** the per-tenant naming `trustbridge:<host>:<org>:<role>`.
+Decision 3 makes the carrier a Keycloak **client role**, not a group, so the name applies to
+the role. The two decisions fit together as follows; no genuine conflict arises.
 
-Permissions (matrix for A; rows are the endpoint groups in "Endpoints"): `viewer`: read
-endpoints except audit. `auditor`: viewer plus audit list and export. `operator`: viewer plus
-requeue, reconcile, rotate, registration start. `admin`: operator plus registration upload,
-tenant disable/enable, mapping management. Roles are not hierarchical in the token: a user
-needing two roles is in two groups, which keeps each grant explicit and auditable.
+- **Role names.** In the client named by `OIDC_CLIENT_ID` the roles are:
+  - instance scope: `trustbridge:<role>`, for example `trustbridge:admin`;
+  - tenant scope: `trustbridge:<host>:<org>:<role>`, for example
+    `trustbridge:github.com:acme:operator`, where `<host>` is the `GITHUB_HOSTS` name (config
+    validation rejects a host name containing `:`), `<org>` is the organisation login
+    (GitHub logins contain no `:`) and `<role>` is one of the four role names.
+  - The parser splits on `:` into exactly two or four parts after requiring the `trustbridge`
+    prefix; anything else is ignored. Matching is case-insensitive for host and org (GitHub
+    logins are case-insensitive) and exact for the role.
+- **How the pair resolves to a tenant.** The principal's tenant grants are resolved against
+  `tenants.host` and `tenants.org` through `tb_list_tenants()` (0031); a role naming an org with
+  no tenant grants nothing. The org login can be renamed on GitHub; `_sync` updates
+  `tenants.org` from the installation event, after which the old role name no longer matches and
+  the Keycloak admin renames the role. The tenant row's `org_id` is the durable id; names carry
+  the login (the accepted weakness of the user's choice, mitigated by the rename being visible
+  and failing closed).
+- **How a Keycloak admin assigns it.** Per tenant, the admin creates the client roles in the
+  `OIDC_CLIENT_ID` client (a client role must exist before it is assigned; trustbridge does not
+  create them). The convenient pattern is a Keycloak **group per tenant and role**, for example
+  `tenants/github.com/acme/operators`, with the matching client role under that group's *Role
+  mapping* tab (Keycloak groups accept client role mappings); users are added to the group.
+  Keycloak's role mappers put a user's effective client roles, including those inherited from
+  groups, into `resource_access.<client>.roles` (Keycloak server admin guide, "Role mappings" and
+  "Groups"). Direct user role mappings and composite roles work equally. A deployment that
+  wants one bundle can define a composite client role per tenant.
+- **Token size.** With *Full scope allowed* (the default) every client role of the user is
+  emitted. With many tenants this grows the token; Keycloak's remedy is to turn *Full scope
+  allowed* off for the client and scope-map the roles; or the user belongs only to the groups
+  they need. A user with access to hundreds of tenants should hold instance scope instead.
+- **To verify at implementation (NG6b):** that Keycloak accepts `:` in client role names (the
+  template's `realm-export.json` roles use plain names). If it does not, the separator becomes
+  a configurable character (`RBAC_ROLE_SEPARATOR`, default `:`) and the format is otherwise
+  unchanged. The ADR treats this as a verification, not a conflict.
+- **Dev realm.** The devcontainer's realm export (`.devcontainer/stack/keycloak/`) defines the
+  template's five roles only. Adding the trustbridge roles and users there is a
+  `.devcontainer/` change that only the user can rebuild; tests use `MODE=mock` tokens, which
+  carry the same claim shape, until then.
 
-Lean: **A**, for separation of duties (EB-2, EB-4: an audit log is weaker if the audited can
-also read it exclusively). Sources: EB-2; Kubernetes RBAC good practices; NIST SP 800-53 AC-5
-(separation of duties); NFR-0011.
+### 5. Rate limits
 
-### 3. IdP groups to roles
+**User decision (G-api, 2026-11-03):** keyed on the authenticated principal (`sub`) after
+authentication and on the source address before it. Defaults, all settings
+(`ADMIN_RATE_LIMIT_*`): **600/minute per principal for reads, 60/minute per principal for
+mutations, 30/minute per source address for unauthenticated or rejected requests, about
+6/minute per principal for exports**. Fixed window; 429 Problem Details with `Retry-After`
+(whole seconds left in the window, at least 1); **fail open** when Valkey errors or exceeds the
+limiter's budget, with a metric. It reuses NG3's Valkey limiter with the key prefix
+`tb:rl:admin:`; because that limiter lives in `trustbridge.webhooks`, reusing it moves its
+counter and fail-open core up a layer, which NG6 does inside its write set (open issue below).
+The numbers are starting points to measure with the UI.
 
-- **A. Keycloak client roles**: keep `resource_access.<client>.roles`, the template's
-  `require_roles` path. Zero new code; but NFR-0014 states that shape is Keycloak-specific, and
-  EB-1 calls for SAML through an IdP broker, where the broker normalises groups, not
-  Keycloak client roles, depending on how it is set up.
-- **B. A configurable groups claim plus a mapping setting**: `RBAC_GROUPS_CLAIM` (default
-  `groups`) and a mapping (`RBAC_GROUP_MAPPING`, or a naming convention, see item 4) from group
-  to role and scope. Works with any IdP that can emit a groups claim (Keycloak's group
-  membership mapper, Entra, Okta); costs a mapper in the IdP, a normaliser (Keycloak emits a
-  leading `/` unless "full group path" is off) and a bounded token size when a user has many
-  groups. The client-role path can be offered as a second source behind the same mapper.
-- **C. Both**, A as the default source and B opt-in.
+### 6. OpenAPI v1
 
-Lean: **B**, with A kept as a fallback source in the same `Principal` builder (so a Keycloak-
-only deployment needs no mapper change), because EB-2 says "roles mapped from IdP groups" and
-NFR-0014 forbids assuming the Keycloak shape. Sources: EB-1, EB-2, NFR-0014, ADR 0003;
-Keycloak server administration guide (group membership mapper, client scope);
-OIDC Core claims.
+**User decision (G-api, 2026-11-03):**
 
-### 4. How users are tied to tenants
+- **Pagination: cursor.** `limit` (default 50, maximum 200) and an opaque `cursor`; the
+  response is `{ "items": [...], "next_cursor": "..." | null }`. No total count by default.
+- **Spec: served and snapshotted.** Served at `/admin/v1/openapi.json`, **authenticated** (any
+  role), generated from the admin router only (FastAPI `get_openapi` with that router's
+  routes, so the template's example routes and its CRUD stay out), plus a committed snapshot
+  (`docs/openapi/admin-v1.json`) with a **drift test** that fails when the generated spec
+  differs from the snapshot. The snapshot is attached to each release.
 
-- **A. Per-tenant group names**: instance roles are the group `trustbridge:<role>`; a tenant
-  role is `trustbridge:<host>:<org>:<role>`, with `<host>` the `GITHUB_HOSTS` name and `<org>`
-  the organisation login. The IdP is the only source of truth (EB-2), no extra state, and the
-  mapping is visible in the IdP. Costs: a group per tenant and role (many groups for many
-  tenants, and a larger token); an org login can be renamed on GitHub, which breaks the group
-  until an admin renames it (the tenant row keeps the durable `org_id`, but the group name
-  carries the login, which EB-1 warns against for people, less so for an org); admins of the
-  IdP, not of trustbridge, decide who sees a tenant.
-- **A'. The same with the numeric org id** in the name (`trustbridge:<host>:<org_id>:<role>`):
-  rename-proof, but nobody remembers an id.
-- **B. A database mapping table** `tenant_members(tenant_id, subject_type, subject, role)`
-  where the subject is a group or a `sub`, managed through the API by `admin` (audited,
-  self-service, a role is granted per tenant without touching the IdP). Costs: a second source
-  of truth next to the IdP, a bootstrap (an instance-scope admin group from the IdP must exist
-  to create the first mapping), more endpoints and an RLS-covered table (an extra tenant-owned
-  table, 0031), and drift when someone leaves the IdP group but stays in the table (a group
-  subject mitigates it; a `sub` subject does not).
-- **C. Hybrid:** instance roles from IdP groups, tenant roles from the table.
-
-Lean: **A**, because it keeps the IdP the single source of truth for who may do what and needs
-no new state; move to B or C if the group count or the rename problem bites. Sources: EB-1,
-EB-2; Kubernetes RBAC good practices; GitHub App best practices (installation = tenant, ids not
-handles); Keycloak documentation.
-
-### 5. Rate-limit defaults
-
-The policy is the API's own (0028). The mechanism is NG3's Valkey fixed-window limiter, reused
-for a different key prefix (`tb:rl:admin:`); it fails open on a Valkey outage like the webhook
-route. Because that limiter lives in `trustbridge.webhooks`, reusing it means moving its
-counter and fail-open core up a layer (a NG6 refactor inside its own write set).
-
-- **A. Proposed:** keyed on the authenticated principal (`sub`) after authentication, on the
-  source address before it (so a failed-token flood is bounded too);
-  **600 requests/minute per principal** for reads and a separate, lower bucket of
-  **60/minute per principal** for mutating calls and **30/minute per source address** for
-  unauthenticated or rejected requests; fixed window; 429 Problem Details with `Retry-After`
-  (whole seconds left in the window, at least 1) and the IETF `RateLimit-*` headers on all
-  responses as an option; exports have their own small bucket (for example 6/minute) because
-  they are long reads. All are settings (`ADMIN_RATE_LIMIT_*`).
-- **B. The template's slowapi-style values** (`10/minute` for the token endpoint, `20/minute`
-  for bulk actions, per route and client address): tuned for a template's destructive routes,
-  too low for a UI that loads several lists per screen behind a BFF where many users share
-  one source address, and per-address keys would throttle all users behind the BFF together.
-- **C. No per-principal limit in the app**, rely on the ingress: consistent with 0028's
-  rejected option for webhooks (the user chose the application limiter).
-
-Lean: **A**, on the principal rather than the address, because the BFF funnels many users
-through one address. The numbers are guesses to be measured with the UI; invariant 14 only
-fixes their behaviour. Sources: EB-11; RFC 6585 section 4 (429); RFC 9110 (`Retry-After`);
-IETF draft `ratelimit-headers`; 0028 "Abuse limits on the webhook route"; `app/rate_limit.py`.
-
-### 6. OpenAPI v1: pagination, how the spec is served, endpoints
-
-**Pagination.**
-
-- **A. Cursor** (keyset): `limit` (default 50, max 200) and an opaque `cursor`; the response is
-  `{ "items": [...], "next_cursor": "..." | null }`. Stable while rows are inserted (audit
-  and deliveries grow constantly), constant cost at depth, but no jump to page N and no
-  total count (an optional `total` may be offered for small collections).
-- **B. Offset**: `skip`/`limit` like the template's CRUD (ADR 0008). Simple, supports page
-  numbers in a UI table, matches the template's generic client code; unstable under inserts
-  (rows shift between pages) and O(n) at depth, which hurts the audit table.
-- **C. Cursor for audit and deliveries (growing, append-heavy), offset for small tables**
-  (hosts, tenants, adapters): two conventions in one API.
-
-Lean: **A** for every list, for one convention and a stable audit view; the UI loads "next
-page" rather than numbered pages. Sources: Google AIP-158 (pagination), Stripe and GitHub API
-pagination, Postgres keyset pagination; ADR 0008.
-
-**How the spec is served.**
-
-- **A. Served at `/admin/v1/openapi.json`** (or under the chosen base), generated from the
-  admin router only (not the template's `/crud` routes), and **also a committed snapshot**
-  (`docs/openapi/admin-v1.json`) that a CI test compares with the generated spec, so any change
-  is a reviewed diff. Serving needs any authenticated role, not public.
-- **B. Snapshot only**: nothing served at runtime, which is less surface and works for an
-  air-gapped install where the file ships with the release; the UI and clients are generated
-  from the file.
-- **C. Served only**, no snapshot: no drift test, no reviewed contract.
-
-The mounted sub-spec is built from the admin router (FastAPI `get_openapi` with that router's
-routes) so the template's example routes do not leak into the contract, and so the spec carries
-the Problem Details schema, the pagination envelope and the security scheme.
-
-Lean: **A** (served, authenticated, plus a CI-checked snapshot attached to each release), so
-there is a reviewed contract and a way for tools to read it in place. Sources: EB-11;
-FastAPI OpenAPI docs; OpenAPI 3.1; NFR-0002.
-
-**Endpoint list.** Base path per item 1; `{t}` is a tenant id. Roles per item 2.
+**Endpoint list.** Base `/admin/v1`; `{t}` is a tenant id. Roles are the names from "Decision
+needed: roles" (the four-role set).
 
 Read-only (NG6d):
 
@@ -276,11 +219,12 @@ Read-only (NG6d):
 | --- | --- | --- |
 | `GET /me` (the principal: `sub`, roles, tenants) | any | any |
 | `GET /hosts`, `GET /hosts/{host}` (state, reason, answering replica; 0030) | instance | viewer |
-| `GET /tenants`, `GET /tenants/{t}` (the effective state, the two state columns) | per grants | viewer |
+| `GET /tenants`, `GET /tenants/{t}` (effective state, both state columns) | per grants | viewer |
 | `GET /tenants/{t}/repositories` | tenant | viewer |
 | `GET /tenants/{t}/adapters` (name, configured yes/no, capabilities; never connection data) | tenant | viewer |
 | `GET /tenants/{t}/resources`, `/credentials` (state and timestamps, never a value), `/operations` | tenant | viewer |
 | `GET /deliveries`, `GET /deliveries/{host}/{id}` (status, attempts, error; body only for `operator`) | instance | viewer |
+| `GET /tenant-deletions`, `GET /tenant-deletions/{id}` (0034) | instance | viewer |
 | `GET /audit-events`, `GET /audit-events/{id}` | per grants | auditor |
 | `GET /audit-events/export` (NDJSON, 0032) | per grants | auditor |
 | `GET /openapi.json` | any | any |
@@ -292,55 +236,104 @@ Mutating (NG6e):
 | `POST /deliveries/{host}/{id}/requeue` | instance | operator |
 | `POST /tenants/{t}/reconcile` | tenant | operator |
 | `POST /tenants/{t}/credentials/{id}/rotate` | tenant | operator |
-| `POST /hosts/{host}/registration` (start the manifest flow; `CALLBACK_PATH` stays the browser callback), `POST /hosts/{host}/registration/manual` (upload App id, PEM, webhook secret, 0030) | instance | admin |
-| `POST /tenants/{t}/disable`, `POST /tenants/{t}/enable` (only if item 8 says yes) | instance | admin |
-| mapping endpoints (only if item 4 chooses a table) | tenant | admin |
+| `POST /hosts/{host}/registration` (start the manifest flow), `POST /hosts/{host}/registration/manual` (App id, PEM, webhook secret; 0030) | instance | admin |
+| `POST /tenants/{t}/disable`, `POST /tenants/{t}/enable` | instance | admin |
+| `POST /tenants/{t}/deletion` (0034; the tenant must be disabled), `POST /tenant-deletions/{id}/cancel` (before the first destructive step) | instance | admin |
+| `POST /tenant-deletions/{id}/skip-step` (only if 0034's decision 2 lean is accepted) | instance | admin |
 
-Not in v1 by design: any write of adapter connection data (decided), a policies endpoint
-(there is no policy table yet; the UI's "policies" screen needs one, which is a separate
-item and ADR), and tenant data deletion (item 9).
+Not in v1 by design: any write of adapter connection data (decided), a policies endpoint (no
+policy table exists yet; the UI's "policies" screen needs a separate item and ADR), and any
+role-mapping endpoint (roles live in Keycloak, decisions 3 and 4).
 
-### 7. Audit: transport, tamper evidence, authn failures
+### 7. Audit
 
-These three are decided on in [0032](0032-audit-log.md) "Decision needed" (authn failures,
-export transport, tamper evidence), with the same labelled leans: NDJSON pull plus the list
-endpoint; grants plus trigger and function-only purge, no hash chain; authn rejections
-logged but not stored, authorization denials stored. The user answers them there.
+**User decision (G-api, 2026-11-03):** recorded in [0032](0032-audit-log.md): NDJSON export plus
+the JSON list endpoint; append-only through grants, the trigger and purge only through the
+definer function; unauthenticated rejections to logs and metrics, `authz.denied` as rows; push
+to a SIEM is a follow-up.
 
-### 8. Tenant disable in NG6 or not
+### 8. Tenant disable
 
-No EB row requires it.
-
-- **A. Not in NG6.** Less surface; an operator who needs to stop a tenant suspends the
-  installation on GitHub (which `_sync` then mirrors) or removes its connection data
-  (operator-only already).
-- **B. In NG6** as designed under "Tenant disable": a column, a worker and reconciler check,
-  two endpoints, six or so invariants. A kill switch for an incident (a tenant with
-  compromised credentials) that does not depend on GitHub-side action or on touching the
-  secret store.
-
-Lean: **B**, because it is small, security-relevant and cheaper before the worker's tenant
-checks are widely spread than after. Sources: the NG34f note on `_sync`; EB-3; OWASP ASVS
-(account suspension) is not directly applicable (tenants are not accounts), so this is a
-judgement.
+**User decision (G-api, 2026-11-03):** in NG6, as designed under "Tenant disable" above.
 
 ### 9. EB-15 tenant data deletion
 
-- **A. In NG6**: `DELETE /tenants/{t}/data` requiring the tenant to be disabled first, purging
-  tenant rows. Open questions it drags in: platform-side resources and credentials (delete or
-  leave?), parked secret values, the audit rows (0032 interplay), GitHub-side
-  secrets and variables, and confirmation semantics for an irreversible call.
-- **B. A follow-up** after NG6: NG6 ships audit retention (0032) and the existing webhook body
-  retention only; deletion gets its own ADR once the platform-side semantics are settled.
+**User decision (G-api, 2026-11-03):** in NG6 (the user overrode the lean to defer it). The
+design is large enough for its own ADR: [0034](0034-tenant-data-deletion.md).
 
-Lean: **B**, because the hard part is the platform-side semantics, not the SQL, and an
-irreversible endpoint deserves its own review. Sources: EB-15; 0028 "Retention and trimming";
-0029 (adapter `delete` semantics).
+## Decision needed: roles
+
+The user decided to **start from the four roles** `admin`, `operator`, `auditor`, `viewer` and
+asked that the template's existing personas be examined and a proposal made for how they
+integrate. This section is that analysis; what remains for the user is whether to accept the
+proposal.
+
+### Where the template's personas are defined and used
+
+The template ships five roles, all Keycloak client roles of the `api` client:
+`viewer`, `editor`, `maintainer`, `security`, `detective`.
+
+- **Defined** in the devcontainer's Keycloak realm
+  (`.devcontainer/stack/keycloak/realm-export.json`, one test user per role), and as the list
+  `ALL_ROLES` in `tests/unit/conftest.py`.
+- **Used** in two places. The Hero example resource (`app/crud_1/heroes/heroes_v2.py:128-130`,
+  FR-0015): read needs `viewer`, `editor`, `maintainer` or `detective`; create and update need
+  `editor` or `maintainer`; delete needs `maintainer` alone. The `/audit` example route
+  (`app/controllers/audit.py`, FR-0016): `security` or `detective`, returning the caller's
+  subject and roles. E2E journeys exist per persona (`tests/e2e/<persona>/`).
+- **Documented** as personas of the example, not a model for real applications:
+  `app/README.md` (RBAC section) and NFR-0014 say only `sub` may be assumed and the
+  `resource_access` shape is Keycloak-specific. `require_roles` is the mechanism; the names are
+  example data.
+
+### Analysis
+
+| Template role | What it means in the template | Fit in trustbridge |
+| --- | --- | --- |
+| `viewer` | reads Heroes | Same idea as ours (read-only), but the name is shared, so a hero-demo `viewer` would silently gain access to tenant data if trustbridge used the bare name |
+| `editor` | creates and updates Heroes | Closest to `operator` in power, but the meaning is "edit records"; trustbridge's operator performs operations (requeue, reconcile, rotate), not record edits |
+| `maintainer` | all Hero writes, and delete of his own record (ADR 0011) | Closest to `admin`, but its delete is owner-scoped on example data; granting it admin on tenants would be a privilege jump |
+| `security` | reads `/audit` | Matches `auditor` in intent (audit read, no change) |
+| `detective` | reads `/audit` and Hero data, cannot write either | Matches `auditor` exactly (reads everything, mutates nothing) |
+
+### Proposal (the lean)
+
+1. **Keep the template personas as they are, for the template's own routes.** They define the
+   example Hero and `/audit` behaviour and their tests; nothing under `src/app/` changes, and
+   they keep working for anyone running the example.
+2. **Give trustbridge its own namespaced roles**, never reusing the template's bare names:
+   `trustbridge:admin`, `trustbridge:operator`, `trustbridge:auditor`, `trustbridge:viewer`
+   (and the tenant-scoped form of decision 4). This removes the `viewer` collision and means a
+   persona granted for the demo gives no access to trustbridge.
+3. **No aliasing.** `security` and `detective` are not treated as `auditor`, and `editor` and
+   `maintainer` are not treated as `operator` and `admin`. Aliasing would make granting a demo
+   role carry production privilege, and the meanings differ enough (table above) to make the
+   mapping misleading. A deployment that really wants a persona to act as a trustbridge role
+   assigns the trustbridge role to it in Keycloak, which is explicit and audited.
+4. **The role matrix** (cumulative by assignment, not by hierarchy: a user needing two roles
+   holds two): `viewer` reads operational data except audit; `auditor` adds audit list and
+   export and mutates nothing; `operator` adds requeue, reconcile, rotate and registration
+   start; `admin` adds registration upload, tenant disable/enable and deletion. Separation of
+   duties: the operator who changes things is not the auditor who reads the audit.
+5. **Production note.** The template's Hero and `/audit` example routes stay mounted in the
+   same app; whether a production deployment should disable them is a template question, not
+   decided here (open issue below).
+
+Options the user may prefer instead:
+
+- **Alias the personas** (`security` and `detective` to `auditor`, `editor` to `operator`,
+  `maintainer` to `admin`): the dev realm's existing users work out of the box, at the cost of
+  the privilege-carryover problem above.
+- **Reduce to the template's five** and drop the four-role set: fewest names, but the
+  template's names do not describe the operations here.
+
+Lean: the proposal above (own namespaced roles, no aliasing, personas untouched). Sources:
+EB-2; NFR-0011, NFR-0014; FR-0015, FR-0016; ADR 0011; Kubernetes RBAC good practices (least
+privilege, explicit grants); NIST SP 800-53 AC-5, AC-6.
 
 ## Invariants the implementation must test
 
-Each is one testable sentence; NG6b, NG6d and NG6e implement and test them. Items that depend
-on a Decision needed outcome say so.
+Each is one testable sentence; NG6b, NG6d and NG6e implement and test them. 
 
 **Authentication and authorization**
 
@@ -351,9 +344,11 @@ on a Decision needed outcome say so.
    `MODE=dev`.
 3. A valid token with no role, or a role that is not enough for the route, gets 403 problem
    details and an `authz.denied` audit event (0032) carrying its `sub`.
-4. Roles come only from the configured source (item 3) and a role claim a token carries that
-   is not in the mapping grants nothing; a token whose groups claim is absent or malformed
-   yields a principal with no roles, not an error.
+4. Roles come only from `resource_access.<OIDC_CLIENT_ID>.roles`; a role name that is not
+   `trustbridge:<role>` or `trustbridge:<host>:<org>:<role>` with a known role grants nothing
+   (a template persona such as `security` grants no trustbridge access), a role naming an org
+   with no tenant grants nothing, and a token without `resource_access` yields a principal
+   with no roles, not an error.
 5. A route with `{tenant_id}` answers 404, the same body as for an unknown tenant, to a
    principal with no grant on that tenant, and never reveals whether the tenant exists.
 6. The tenant context is set only after the role check passes, and a handler that is reached
@@ -371,12 +366,13 @@ on a Decision needed outcome say so.
    0004).
 10. Every list endpoint returns the pagination envelope, honours `limit` up to its maximum,
     rejects a larger or non-positive `limit` with 422, and a cursor resumes without repeating
-    or skipping a row when rows are inserted between pages (under the leaned option).
+    or skipping a row when rows are inserted between pages.
 11. The generated OpenAPI spec of the admin router equals the committed snapshot; a route
     change without a snapshot update fails CI; the spec contains no template route.
 12. Adding a route under v1 does not change an existing route's schema, and a breaking change
     exists only under a new version prefix (reviewed against the snapshot diff).
-13. No admin route is reachable at an unversioned path (NFR-0001).
+13. No admin route is reachable at an unversioned path; the router walk finds none outside
+    `/admin/v1` except the fixed registration callback.
 
 **Rate limits**
 
@@ -396,13 +392,14 @@ on a Decision needed outcome say so.
 18. The registration start endpoint returns no secret, and the manual registration endpoint
     accepts the PEM and webhook secret only over a request that the audit event records
     without them.
-19. If tenant disable is accepted (item 8): `_sync` and `tb_upsert_tenant` never change the
-    admin-disable columns, a disabled tenant starts no adapter operation, its webhooks are
-    stored and not handled until it is enabled, and `enable` makes them deliverable again;
-    enable and disable need the `admin` role at instance scope.
-20. If a mapping table is accepted (item 4): it is tenant-owned and RLS-covered, an `admin`
-    can grant only roles within their own tenant, and the last instance admin cannot be
-    removed through the API.
+19. `_sync` and `tb_upsert_tenant` never change the admin-disable columns, a disabled tenant
+    starts no adapter operation, its webhooks are stored and not handled until it is enabled,
+    `enable` makes them deliverable again, and enable and disable need the `admin` role at
+    instance scope; a tenant with a non-terminal deletion cannot be enabled.
+20. A renamed organisation (`tenants.org` updated by `_sync`) stops matching its old
+    tenant-scoped role names immediately and grants nothing until the role is renamed.
+21. Every mounted admin route is under `/admin/v1`, and no admin route exists at an unversioned
+    path or under the template's `/crud`, `/audit` or `/mock`.
 
 ## Open issues
 
@@ -418,8 +415,13 @@ on a Decision needed outcome say so.
 - **Spec path under a sub-mount.** If a sub-application is used instead of a router, handlers
   (Problem Details, the exception handlers, middleware) must be registered on it too; the
   router-based spec avoids this and is the plan.
-- **Group token size.** Many per-tenant groups can exceed header limits at the BFF or the
-  ingress; item 4's lean has this risk and the table option removes it.
+- **Role token size.** Many per-tenant client roles can exceed header limits at the BFF or
+  the ingress; "Full scope allowed" off and instance scope for wide access are the remedies
+  (user decision 4). A DB mapping table, rejected for now, would remove the risk.
+- **Template example routes in production.** The Hero CRUD and `/audit` stay mounted in the
+  same app; whether a production deployment disables them is a template-level question.
+- **Dev realm.** Adding the trustbridge roles and test users to the devcontainer realm export is
+  a `.devcontainer/` change that needs the user and a rebuild.
 - **CORS.** The API is called by the BFF server-side; no CORS is added for v1.
 - **Idempotency keys** for POSTs are not part of v1; requeue and enable/disable are idempotent
   by nature and rotate is serialised by the lease (0028).
@@ -438,8 +440,13 @@ on a Decision needed outcome say so.
 - Rate limits keyed on the principal depend on the BFF forwarding the user's token or a
   per-user identity; with a shared service token every user would share one bucket (the BFF
   plan must pass the user's token through, ADR 0026).
-- The role matrix and group conventions become an operator-facing contract; changing them is
-  a documented migration, which is why they are put to the user now.
+- The role matrix and the role-name convention become an operator-facing contract; changing
+  them is a documented migration.
+- Keycloak-shaped role claims (user decision 3) make the API not portable to an IdP that does
+  not emit `resource_access`, unless a broker or mapper writes it (NFR-0014 trade-off).
+- A role per tenant and role per user is administrative work in Keycloak and is not created by
+  trustbridge when a tenant is installed.
+- Tenant deletion (0034) is an irreversible admin action available from the API.
 
 ## Sources
 
