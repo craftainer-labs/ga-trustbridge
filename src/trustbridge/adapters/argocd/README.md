@@ -145,7 +145,7 @@ The fixtures encode these as best-effort shapes; check them against a real Argo 
   `app.kubernetes.io/managed-by: trustbridge`. An existing object of the generated name without it
   is never adopted (`ensure_*` raises a non-retryable `AdapterError`), and `delete` leaves it alone
   and reports UNCHANGED, as for an absent object. A POST `409` is a retryable error; the retry re-reads
-  the object and applies the same check. Names embed the whole tenant id; the label is the only
+  the object and applies the same check. A delete reads the object first and sends `preconditions.uid` with the DELETE; a `409` (the object was replaced) is UNCHANGED. Names embed the whole tenant id; the label is the only
   ownership marker (no tenant annotation).
 - `ensure_webhook` writes the token Secret and then the ConfigMap in two calls; if the second fails
   the retry completes it, but a webhook dropped from state before then leaves an orphan

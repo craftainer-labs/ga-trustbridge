@@ -307,10 +307,16 @@ class ArgoCDAdapter:
     async def _delete_managed(c: KubeClient, path: str) -> bool:
         """Delete the object only when we created it; absent or foreign is left alone (False)."""
         found = await c.call("GET", path, accept=NOT_FOUND)
-        if found.status_code == HTTP_NOT_FOUND or not _marked(json_object(found)):
+        if found.status_code == HTTP_NOT_FOUND:
             return False
-        gone = await c.call("DELETE", path, accept=NOT_FOUND)
-        return gone.status_code != HTTP_NOT_FOUND
+        existing = json_object(found)
+        if not _marked(existing):
+            return False
+        # The uid precondition makes a replaced object answer 409 instead of being deleted.
+        uid = (existing.get("metadata") or {}).get("uid")
+        options: JsonObj = {"preconditions": {"uid": uid}}
+        gone = await c.call("DELETE", path, json=options, accept=NOT_FOUND | CONFLICT)
+        return gone.is_success
 
     async def _remove_webhook(self, c: KubeClient, name: str) -> bool:
         removed = False

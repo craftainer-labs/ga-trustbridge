@@ -306,7 +306,8 @@
                 "resourceVersion": "101",
                 "labels": {
                   "app.kubernetes.io/managed-by": "trustbridge"
-                }
+                },
+                "uid": "uid-${project}"
               },
               "spec": {
                 "description": "images",
@@ -321,7 +322,12 @@
         {
           "request": {
             "method": "DELETE",
-            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}",
+            "json": {
+              "preconditions": {
+                "uid": "uid-${project}"
+              }
+            }
           },
           "response": {
             "status": 200,
@@ -391,6 +397,61 @@
                 ],
                 "destinations": []
               }
+            }
+          }
+        }
+      ]
+    },
+    "delete_replaced": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                },
+                "uid": "uid-${project}"
+              },
+              "spec": {
+                "description": "images",
+                "sourceRepos": [
+                  "https://github.com/acme/images"
+                ],
+                "destinations": []
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "DELETE",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}",
+            "json": {
+              "preconditions": {
+                "uid": "uid-${project}"
+              }
+            }
+          },
+          "response": {
+            "status": 409,
+            "json": {
+              "kind": "Status",
+              "apiVersion": "v1",
+              "status": "Failure",
+              "reason": "Conflict",
+              "code": 409,
+              "message": "Precondition failed: UID in precondition does not match UID in record"
             }
           }
         }

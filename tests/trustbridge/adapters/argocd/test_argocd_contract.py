@@ -429,6 +429,14 @@ async def test_delete_leaves_an_unmanaged_object_alone(file: str, prior: Resourc
     assert [r.method for r in replay.seen] == ["GET"]
 
 
+async def test_delete_of_a_replaced_object_is_unchanged() -> None:
+    """The DELETE carries the read uid; a 409 (the object was replaced) deletes nothing."""
+    replay, adapter = build("projects.json", "delete_replaced")
+    outcome = await adapter.delete(ResourceState(PROJECT, {"kind": "project", "name": PROJECT}))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UNCHANGED
+
+
 async def test_delete_rejects_an_unknown_resource_kind() -> None:
     """A state without a known kind is a non-retryable error and sends nothing."""
     with pytest.raises(AdapterError) as err:
@@ -505,6 +513,7 @@ async def test_an_unmanaged_secret_is_neither_adopted_nor_deleted() -> None:
         await adapter.ensure_credential(REPO_SCOPE, prior_for(REPO_SLOT))
     replay.assert_exhausted()
     assert not err.value.retryable
+    assert [r.method for r in replay.seen] == ["GET"]
     replay, adapter = build("credentials.json", "unmarked")
     outcome = await adapter.delete_credential(REPO_SCOPE, prior_for(REPO_SLOT))
     replay.assert_exhausted()
