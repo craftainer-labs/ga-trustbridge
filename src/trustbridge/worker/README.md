@@ -10,7 +10,7 @@ The runtime core of trustbridge, shared by the api, the worker and the reconcile
 | --- | --- |
 | `models.py` | Tables on the template's shared `Base`: `webhook_deliveries`, `scope_leases`, `tenants` (with `org`, `org_id`, `state`), `tenant_repositories`, `schema_compat`. The revisions `c3a5e7d91f42` and `5d1f3a7c9e24` in `alembic/versions/` are the schema of record. |
 | `deliveries.py` | `DeliveryStore` (Protocol), `PgDeliveryStore`, `InMemoryDeliveryStore` (mock mode and unit tests), the relay rules (`is_relayable`) and the retry backoff. |
-| `queue.py` | `StreamQueue`: `tb:events` (ids only), `tb:events:dead` (`{delivery_id, error}`), consumer group `tb-workers`, safe trimming, lag. redis-py `redis.asyncio` against Valkey (ADR 0013). |
+| `queue.py` | `StreamQueue`: `tb:events` (`{id, host}` keys only), `tb:events:dead` (`{host, delivery_id, error}`), consumer group `tb-workers`, safe trimming, lag. redis-py `redis.asyncio` against Valkey (ADR 0013). |
 | `relay.py` | Adds delivery ids from the outbox to the stream (tick, re-relay sweep, host-ready). |
 | `worker.py` | The consumer; dispatches through the GitHub core's `HandlerRegistry` (`EventContext`). |
 | `reconciler.py` | The reconciler process: relay tick, sweep, delivery reconciliation (`HookDeliveryClient`), retention, trimming. |

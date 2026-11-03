@@ -28,6 +28,7 @@ from tests.trustbridge.helpers import make_settings
 from trustbridge.adapters.interface import GitHubHost
 from trustbridge.worker import migrate
 from trustbridge.worker.deliveries import (
+    DeliveryKey,
     DeliveryRecord,
     NewDelivery,
     PgDeliveryStore,
@@ -87,7 +88,7 @@ def _new(ids: list[str], **kw: object) -> NewDelivery:
         host=str(kw.get("host", "github.com")),
         event="push",
         headers={"x-github-event": "push"},
-        body=b'{"a": 1}',
+        body=f'{{"a": "{delivery_id}"}}'.encode(),  # unique: the body hash is deduplicated too
         received_at=datetime.now(UTC),
     )
 
@@ -100,7 +101,8 @@ async def test_a_committed_row_is_visible_to_other_sessions_and_a_repeat_makes_n
     delivery = _new(ids)
     assert await store.insert(delivery) is True
     async with session_factory() as other:  # a different connection sees it: it is committed
-        assert (await other.get(WebhookDelivery, delivery.delivery_id)) is not None
+        pk = (delivery.host, delivery.delivery_id)
+        assert (await other.get(WebhookDelivery, pk)) is not None
     assert await store.insert(delivery) is False
     async with session_factory() as session:
         rows = (
@@ -109,9 +111,40 @@ async def test_a_committed_row_is_visible_to_other_sessions_and_a_repeat_makes_n
             )
         ).all()
     assert len(rows) == 1
-    got = await store.get(delivery.delivery_id)
+    got = await store.get(delivery.key)
     assert got is not None
-    assert (got.body, got.status, got.attempts) == (b'{"a": 1}', "pending", 0)
+    assert (got.body, got.status, got.attempts) == (delivery.body, "pending", 0)
+
+
+async def test_the_same_delivery_id_on_two_hosts_is_two_rows(ids: list[str]) -> None:
+    """The key is `(host, delivery_id)`: another host cannot suppress this host's delivery."""
+    store = PgDeliveryStore(session_factory)
+    first = _new(ids, host="it-host-a")
+    other = NewDelivery(
+        first.delivery_id, "it-host-b", "push", {}, b'{"other": true}', datetime.now(UTC)
+    )
+    assert await store.insert(first) is True
+    assert await store.insert(other) is True
+    assert (await store.get(first.key)) is not None
+    assert (await store.get(other.key)) is not None
+    assert await store.existing_keys([first.key, other.key]) == {first.key, other.key}
+
+
+async def test_a_replayed_body_under_a_new_delivery_id_is_a_duplicate(ids: list[str]) -> None:
+    """`X-GitHub-Delivery` is unsigned: the same signed body under a new id stores nothing."""
+    store = PgDeliveryStore(session_factory)
+    host = f"it-{uuid.uuid4().hex[:8]}"
+    first = _new(ids, host=host)
+    replay = NewDelivery(f"it-{uuid.uuid4()}", host, "push", {}, first.body, datetime.now(UTC))
+    ids.append(replay.delivery_id)
+    assert await store.insert(first) is True
+    assert await store.insert(replay) is False
+    assert await store.get(replay.key) is None
+    assert await store.insert(first) is False  # the same id is still a duplicate
+    elsewhere = NewDelivery(
+        replay.delivery_id, f"{host}-2", "push", {}, first.body, datetime.now(UTC)
+    )
+    assert await store.insert(elsewhere) is True  # another host may carry the same bytes
 
 
 async def test_concurrent_inserts_of_one_id_create_one_row(ids: list[str]) -> None:  # inv. 1
@@ -143,7 +176,7 @@ async def test_sql_relay_rules_match_the_in_memory_rules(ids: list[str]) -> None
         "dead": {"status": "dead"},
     }
     host = f"it-{uuid.uuid4().hex[:8]}"
-    records: dict[str, DeliveryRecord] = {}
+    records: dict[DeliveryKey, DeliveryRecord] = {}
     for name, extra in scenarios.items():
         delivery = _new(ids, host=host)
         await store.insert(delivery)
@@ -154,9 +187,9 @@ async def test_sql_relay_rules_match_the_in_memory_rules(ids: list[str]) -> None
                 .where(WebhookDelivery.delivery_id == delivery.delivery_id)
                 .values(**values)
             )
-        record = await store.get(delivery.delivery_id)
+        record = await store.get(delivery.key)
         assert record is not None
-        records[delivery.delivery_id] = record
+        records[delivery.key] = record
         scenarios[name]["id"] = delivery.delivery_id
     for mode, before in (("tick", None), ("resweep", past + timedelta(minutes=1)), ("host", None)):
         wanted = {
@@ -176,19 +209,20 @@ async def test_the_sql_store_runs_the_whole_delivery_lifecycle(ids: list[str]) -
     ok, failing, dead = _new(ids), _new(ids), _new(ids)
     for delivery in (ok, failing, dead):
         assert await store.insert(delivery)
-    assert await store.existing_ids([]) == set()
-    assert await store.existing_ids([ok.delivery_id, "it-missing"]) == {ok.delivery_id}
+    assert await store.existing_keys([]) == set()
+    missing = DeliveryKey(ok.host, "it-missing")
+    assert await store.existing_keys([ok.key, missing]) == {ok.key}
 
     await store.mark_relayed([], now)  # nothing to stamp
-    await store.mark_relayed([ok.delivery_id, failing.delivery_id], now)
-    await store.mark_processed(ok.delivery_id, now)
-    assert await store.record_failure(failing.delivery_id, "boom", now, later) == 1
-    assert await store.record_failure(failing.delivery_id, "boom", now, later) == 2
-    assert await store.record_failure(ok.delivery_id, "late", now, later) == 0  # not pending
-    await store.defer(failing.delivery_id, later)
-    await store.mark_dead(dead.delivery_id, "poison", now)
+    await store.mark_relayed([ok.key, failing.key], now)
+    await store.mark_processed(ok.key, now)
+    assert await store.record_failure(failing.key, "boom", now, later) == 1
+    assert await store.record_failure(failing.key, "boom", now, later) == 2
+    assert await store.record_failure(ok.key, "late", now, later) == 0  # not pending
+    await store.defer(failing.key, later)
+    await store.mark_dead(dead.key, "poison", now)
 
-    row_ok, row_failing, row_dead = [await store.get(d.delivery_id) for d in (ok, failing, dead)]
+    row_ok, row_failing, row_dead = [await store.get(d.key) for d in (ok, failing, dead)]
     assert row_ok is not None
     assert row_failing is not None
     assert row_dead is not None
@@ -200,16 +234,16 @@ async def test_the_sql_store_runs_the_whole_delivery_lifecycle(ids: list[str]) -
     )
     assert (row_dead.status, row_dead.last_error) == ("dead", "poison")
 
-    assert await store.requeue(dead.delivery_id) is True
-    assert await store.requeue(dead.delivery_id) is False  # no longer dead
-    assert await store.requeue("it-missing") is False
-    await store.mark_dead(dead.delivery_id, "again", now)
+    assert await store.requeue(dead.key) is True
+    assert await store.requeue(dead.key) is False  # no longer dead
+    assert await store.requeue(missing) is False
+    await store.mark_dead(dead.key, "again", now)
     far = now + timedelta(days=400)
     purged = await store.purge_bodies(far, far)
     assert purged >= 2  # the processed and the dead row lost their bodies
-    assert await store.requeue(dead.delivery_id) is False  # the body is gone
+    assert await store.requeue(dead.key) is False  # the body is gone
     assert await store.delete_expired(far) >= 2
-    assert await store.get(ok.delivery_id) is None
+    assert await store.get(ok.key) is None
     assert isinstance(await store.list_relayable(now, mode="resweep"), list)  # no age bound
 
 
@@ -283,7 +317,7 @@ async def test_fencing_is_checked_in_the_same_statement_as_the_write(
         assert await guarded_execute(session, lease_b, bump) == 1
     await store.release(lease_a)  # stale release: no effect on holder b
     assert await store.renew(lease_b, 30)
-    got = await PgDeliveryStore(session_factory).get(target.delivery_id)
+    got = await PgDeliveryStore(session_factory).get(target.key)
     assert got is not None
     assert got.attempts == 2  # exactly the two valid writes
 

@@ -19,7 +19,7 @@ from trustbridge.webhooks.limiter import (
     WebhookLimiter,
     WindowCounter,
 )
-from trustbridge.worker.deliveries import InMemoryDeliveryStore, NewDelivery
+from trustbridge.worker.deliveries import DeliveryKey, InMemoryDeliveryStore, NewDelivery
 from trustbridge.worker.queue import StreamQueue
 from trustbridge.worker.relay import Relay
 
@@ -117,13 +117,24 @@ async def test_2xx_only_after_the_row_is_committed_and_a_repeat_makes_no_second_
     assert first.status_code == 202
     assert first.json() == {"status": "accepted"}
     assert seen_at_insert == [1]
-    row = tb.store.rows["d-1"]
+    row = tb.store.rows[DeliveryKey("ok", "d-1")]
     assert (row.host, row.event, row.body, row.status) == ("ok", "installation", BODY, "pending")
     assert "x-hub-signature-256" not in row.headers  # only allow-listed headers are stored
     again = await tb.post()
     assert again.status_code == 202
     assert again.json() == {"status": "duplicate"}
     assert len(tb.store.rows) == 1
+
+
+async def test_a_replayed_body_under_a_new_delivery_id_is_a_duplicate(tb: Setup) -> None:
+    """`X-GitHub-Delivery` is unsigned: the same signed body under a new id stores nothing."""
+    assert (await tb.post(delivery="d-1")).json() == {"status": "accepted"}
+    replay = await tb.post(delivery="d-2")
+    assert replay.status_code == 202
+    assert replay.json() == {"status": "duplicate"}
+    assert list(tb.store.rows) == [DeliveryKey("ok", "d-1")]
+    other = await tb.post("bad", delivery="d-2", signed_with="other")  # another host: own window
+    assert other.json() == {"status": "accepted"}
 
 
 async def test_failed_commit_is_never_a_2xx(tb: Setup) -> None:  # inv. 1
@@ -139,8 +150,9 @@ async def test_failed_commit_is_never_a_2xx(tb: Setup) -> None:  # inv. 1
 async def test_relay_adds_only_the_delivery_id_after_the_response(tb: Setup) -> None:
     """Relay adds only the delivery id after the response."""
     await tb.post()
-    assert tb.valkey.entries("tb:events")[0][1] == {"id": "d-1"}  # the id, never the body
-    assert tb.store.rows["d-1"].last_relayed_at is not None
+    # the key, never the body
+    assert tb.valkey.entries("tb:events")[0][1] == {"id": "d-1", "host": "ok"}
+    assert tb.store.rows[DeliveryKey("ok", "d-1")].last_relayed_at is not None
 
 
 async def test_valkey_outage_does_not_block_ingest(tb: Setup) -> None:  # 0028 "request path"
@@ -149,8 +161,9 @@ async def test_valkey_outage_does_not_block_ingest(tb: Setup) -> None:  # 0028 "
     tb.app.state.trustbridge.limiter.counter = ValkeyWindowCounter(as_redis(tb.valkey))
     response = await tb.post()
     assert response.status_code == 202  # limiter failed open, relay failed quietly
-    assert "d-1" in tb.store.rows
-    assert tb.store.rows["d-1"].last_relayed_at is None  # the reconciler relays it later
+    assert DeliveryKey("ok", "d-1") in tb.store.rows
+    # the reconciler relays it later
+    assert tb.store.rows[DeliveryKey("ok", "d-1")].last_relayed_at is None
 
 
 async def test_signature_is_checked_with_compare_digest_before_anything_is_stored(
@@ -176,7 +189,7 @@ async def test_non_json_body_with_a_valid_signature_is_stored_unparsed(tb: Setup
     """Non json body with a valid signature is stored unparsed."""
     junk = b"\xff not json"
     assert (await tb.post(body=junk)).status_code == 202
-    assert tb.store.rows["d-1"].body == junk
+    assert tb.store.rows[DeliveryKey("ok", "d-1")].body == junk
 
 
 async def test_malformed_delivery_headers_are_400(tb: Setup) -> None:
@@ -295,7 +308,7 @@ async def test_unavailable_host_is_verified_stored_and_answered_2xx(tb: Setup) -
     assert tb.monitor.status("bad").state.value == "unavailable"
     response = await tb.post("bad", signed_with="other")
     assert response.status_code == 202
-    assert tb.store.rows["d-1"].host == "bad"
+    assert tb.store.rows[DeliveryKey("bad", "d-1")].host == "bad"
     assert (await tb.post("bad", delivery="d-2", signed_with="wrong")).status_code == 401
 
 

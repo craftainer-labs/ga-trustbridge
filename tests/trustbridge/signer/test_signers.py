@@ -295,3 +295,12 @@ async def test_vault_import_of_an_existing_key_adds_a_version(tmp_path: Path) ->
     await signer.import_key(SecretStr(pem_of(make_key())))
     assert vault.imported is not None
     assert str(vault.imported["path"]).endswith("/import_version")
+
+
+async def test_file_signer_import_into_a_missing_directory_is_a_signer_error(
+    tmp_path: Path,
+) -> None:
+    """A missing parent directory is a `SignerError`, not a raw `OSError`."""
+    signer = FileSigner(tmp_path / "missing" / "new.pem")
+    with pytest.raises(SignerError, match="cannot write"):
+        await signer.import_key(SecretStr(pem_of(make_key())))

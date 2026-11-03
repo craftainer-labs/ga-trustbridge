@@ -25,6 +25,7 @@ from trustbridge.github.handlers import (
     register_core_handlers,
 )
 from trustbridge.github.hook_deliveries import GitHubHookDeliveries
+from trustbridge.github.installations import AppInstallationLookup
 from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.ports import InstallationResolver, InstallationStore, ReconcileScheduler
 from trustbridge.github.tokens import InstallationTokenProvider
@@ -85,7 +86,12 @@ def build_host_runtime(settings: TrustbridgeSettings, deps: RuntimeDeps) -> Host
     registry = HandlerRegistry()
     register_core_handlers(
         registry,
-        InstallationHandlers(deps.installations, deps.scheduler, tokens.invalidate),
+        InstallationHandlers(
+            deps.installations,
+            deps.scheduler,
+            AppInstallationLookup(monitor, signers, deps.api_factory),
+            tokens.invalidate,
+        ),
     )
     argocd = (
         ArgoCdDeploymentHandler(deps.state_source, DeploymentReporter(gateway))

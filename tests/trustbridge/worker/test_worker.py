@@ -8,7 +8,7 @@ from datetime import timedelta
 
 import pytest
 
-from tests.trustbridge.worker.harness import Harness, WorkerDied
+from tests.trustbridge.worker.harness import Harness, WorkerDied, key
 from trustbridge.github.handlers import EventContext
 from trustbridge.worker.lease import LeaseBusy
 
@@ -23,10 +23,10 @@ async def test_success_dispatches_the_event_context_and_marks_processed() -> Non
     h = await Harness({"push": handler}).start()
     await h.add("d1")
     assert await h.worker.run_once() == 1
-    row = await h.store.get("d1")
+    row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts) == ("processed", 0)
-    assert seen[0].payload == {"installation": {"id": 7}}
+    assert seen[0].payload == {"installation": {"id": 7}, "delivery": "d1"}
     assert (seen[0].host, seen[0].event, seen[0].delivery_id) == ("ok", "push", "d1")
     assert seen[0].action is None
     assert (await h.valkey.xpending("tb:events", "tb-workers"))["pending"] == 0
@@ -37,7 +37,7 @@ async def test_an_event_without_a_handler_is_processed_as_a_no_op() -> None:
     h = await Harness({}).start()
     await h.add("d1", event="ping")
     await h.worker.run_once()
-    assert (await h.store.get("d1")).status == "processed"  # type: ignore[union-attr]
+    assert (await h.store.get(key("d1"))).status == "processed"  # type: ignore[union-attr]
 
 
 async def test_the_failure_counter_increases_only_on_handler_failures_with_backoff() -> None:  # 3
@@ -51,7 +51,7 @@ async def test_the_failure_counter_increases_only_on_handler_failures_with_backo
     h = await Harness({"push": handler}).start()
     await h.add("d1")
     await h.worker.run_once()
-    first = await h.store.get("d1")
+    first = await h.store.get(key("d1"))
     assert first is not None
     assert (first.status, first.attempts) == ("pending", 1)
     assert first.last_error == "RuntimeError: boom"
@@ -60,13 +60,13 @@ async def test_the_failure_counter_increases_only_on_handler_failures_with_backo
     h.advance(5)
     assert await h.relay.tick() == 1  # due: the retry re-add
     await h.worker.run_once()
-    second = await h.store.get("d1")
+    second = await h.store.get(key("d1"))
     assert second is not None
     assert second.attempts == 2
     h.advance(10)  # the second backoff is 10 s
     assert await h.relay.tick() == 1
     await h.worker.run_once()
-    final = await h.store.get("d1")
+    final = await h.store.get(key("d1"))
     assert final is not None
     assert (final.status, final.attempts) == ("processed", 2)
 
@@ -83,13 +83,13 @@ async def test_exhausting_the_attempts_dead_letters_with_no_body() -> None:  # i
         await h.worker.run_once()
         h.advance(900)
         await h.relay.tick()
-    row = await h.store.get("d1")
+    row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts) == ("dead", 3)
     assert row.body is not None  # readable from Postgres until its dead retention elapses
     dead = h.valkey.entries("tb:events:dead")
     assert [fields for _, fields in dead] == [
-        {"delivery_id": "d1", "error": "RuntimeError: always"}
+        {"host": "ok", "delivery_id": "d1", "error": "RuntimeError: always"}
     ]
     assert await h.relay.tick() == 0  # a dead row is never relayed again
 
@@ -98,12 +98,12 @@ async def test_relay_duplicates_and_re_relays_never_increase_the_counter() -> No
     """Relay duplicates and re relays never increase the counter."""
     h = await Harness({}).start()
     await h.add("d1")
-    await h.queue.add("d1")  # a relay duplicate
+    await h.queue.add(key("d1"))  # a relay duplicate
     h.advance(1)
     assert await h.relay.resweep(0) == 1  # and a re-relay sweep
     while await h.worker.run_once():
         pass
-    row = await h.store.get("d1")
+    row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts) == ("processed", 0)
 
@@ -117,7 +117,7 @@ async def test_a_busy_lease_defers_without_counting() -> None:  # inv. 3
     h = await Harness({"push": handler}).start()
     await h.add("d1")
     await h.worker.run_once()
-    row = await h.store.get("d1")
+    row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts) == ("pending", 0)
     assert row.next_attempt_at is not None
@@ -137,7 +137,7 @@ async def test_a_host_that_is_not_ready_is_neither_handled_counted_nor_dead_lett
         await h.relay.resweep(0)
         await h.worker.run_once()
         h.advance(120)
-    row = await h.store.get("d1")
+    row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts) == ("pending", 0)
     assert called == []
@@ -161,7 +161,7 @@ async def test_a_host_becoming_ready_re_adds_its_waiting_rows_without_the_period
     await h.hosts.recheck()  # the recheck: bad -> ready fires the on_ready hook
     await h.worker.run_once()
     assert called == ["d2", "d1"]
-    assert (await h.store.get("d1")).status == "processed"  # type: ignore[union-attr]
+    assert (await h.store.get(key("d1"))).status == "processed"  # type: ignore[union-attr]
 
 
 async def test_a_worker_that_keeps_dying_dead_letters_by_stream_delivery_count() -> None:  # inv. 4
@@ -181,14 +181,14 @@ async def test_a_worker_that_keeps_dying_dead_letters_by_stream_delivery_count()
         h.advance(61)  # past the claim idle time
     assert await h.queue.delivery_count(original) == 3
     # a relay duplicate / retry re-add is a new entry: it is not a delivery of the original
-    duplicate = await h.queue.add("d1")
+    duplicate = await h.queue.add(key("d1"))
     assert [e.entry_id for e in await h.queue.read("other", count=10, block_ms=0)] == [duplicate]
     assert await h.queue.delivery_count(duplicate) == 1
     assert await h.queue.delivery_count(original) == 3
     await h.queue.ack(duplicate)
     await h.worker.run_once()  # claims the original a 4th time (> MAX): dead letter, no handling
     assert len(calls) == 3
-    row = await h.store.get("d1")
+    row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts) == ("dead", 0)  # no failure was ever recorded
     assert [f["delivery_id"] for _, f in h.valkey.entries("tb:events:dead")] == ["d1"]
@@ -209,28 +209,29 @@ async def test_requeue_makes_exactly_that_row_deliverable_with_a_reset_counter()
         await h.worker.run_once()
         h.advance(900)
         await h.relay.tick()
-    assert {(await h.store.get(i)).status for i in ("d1", "d2")} == {"dead"}  # type: ignore[union-attr]
+    rows = [await h.store.get(key(i)) for i in ("d1", "d2")]
+    assert {r.status for r in rows if r is not None} == {"dead"}
     mode["fail"] = False
-    assert await h.store.requeue("d1") is True
-    row = await h.store.get("d1")
+    assert await h.store.requeue(key("d1")) is True
+    row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts, row.last_error) == ("pending", 0, None)
-    assert (await h.store.get("d2")).status == "dead"  # type: ignore[union-attr]
+    assert (await h.store.get(key("d2"))).status == "dead"  # type: ignore[union-attr]
     assert await h.relay.tick() == 1
     await h.worker.run_once()
-    assert (await h.store.get("d1")).status == "processed"  # type: ignore[union-attr]
-    assert await h.store.requeue("d1") is False  # only a dead row can be requeued
-    assert await h.store.requeue("missing") is False
+    assert (await h.store.get(key("d1"))).status == "processed"  # type: ignore[union-attr]
+    assert await h.store.requeue(key("d1")) is False  # only a dead row can be requeued
+    assert await h.store.requeue(key("missing")) is False
 
 
 async def test_requeue_refuses_a_row_whose_body_was_purged() -> None:  # inv. 7
     """Requeue refuses a row whose body was purged."""
     h = await Harness({}).start()
     await h.add("d1")
-    await h.store.mark_dead("d1", "x", h.clock())
+    await h.store.mark_dead(key("d1"), "x", h.clock())
     h.advance(31 * 86400)
     assert await h.store.purge_bodies(h.clock(), h.clock()) == 1
-    assert await h.store.requeue("d1") is False
+    assert await h.store.requeue(key("d1")) is False
 
 
 async def test_infrastructure_errors_re_add_the_entry_without_counting() -> None:
@@ -252,7 +253,7 @@ async def test_infrastructure_errors_re_add_the_entry_without_counting() -> None
 
     h.store.get = flaky_get  # type: ignore[method-assign]
     await h.worker.run_once()
-    row = await real_get("d1")
+    row = await real_get(key("d1"))
     assert row is not None
     assert row.attempts == 0
     assert len(h.valkey.entries("tb:events")) == 2  # re-added as a fresh entry
@@ -291,9 +292,9 @@ async def test_an_unusable_body_is_a_counted_handler_failure(
     h = await Harness({"push": handler}).start()
     await h.add("d1", body=body if body is not None else b"{}")
     if body is None:  # the retention job purged the body of a row that is still pending
-        h.store.rows["d1"] = replace(h.store.rows["d1"], body=None)
+        h.store.rows[key("d1")] = replace(h.store.rows[key("d1")], body=None)
     await h.worker.run_once()
-    row = await h.store.get("d1")
+    row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts) == ("pending", 1)
     assert row.last_error is not None

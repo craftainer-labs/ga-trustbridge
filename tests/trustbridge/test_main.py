@@ -27,6 +27,7 @@ from tests.trustbridge.helpers import SIGNERS, as_redis, host, make_settings, si
 from trustbridge.github.availability import HostState
 from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.main import Overrides, install
+from trustbridge.worker.deliveries import DeliveryKey
 from trustbridge.worker.schema import REQUIRED_SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -108,7 +109,7 @@ async def test_the_webhook_route_works_through_the_wrapped_app_with_valkey_down(
                 },
             )
         assert response.status_code == 202
-        assert (await app.state.trustbridge.store.get("abc-1")) is not None
+        assert (await app.state.trustbridge.store.get(DeliveryKey("ok", "abc-1"))) is not None
 
 
 async def test_the_lifespan_can_be_entered_repeatedly_registering_each_check_once(

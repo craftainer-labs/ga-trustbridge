@@ -1,4 +1,4 @@
-"""The relay: adds delivery ids (only) from the outbox to the stream (ADR 0028 item 2).
+"""The relay: adds delivery keys (host and id only) from the outbox to the stream (ADR 0028 item 2).
 
 Used three ways: best-effort from the ingress after the response (`relay_one`), by the
 reconciler's periodic tick (never relayed or due retries) and re-relay sweep (everything
@@ -10,7 +10,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-from trustbridge.worker.deliveries import DeliveryStore, RelayMode
+from trustbridge.worker.deliveries import DeliveryKey, DeliveryStore, RelayMode
 from trustbridge.worker.queue import StreamQueue
 
 logger = logging.getLogger(__name__)
@@ -39,21 +39,21 @@ class Relay:
         self._batch = batch_size
         self._clock = clock
 
-    async def relay_ids(self, delivery_ids: list[str]) -> int:
-        """Add ids to the stream and record the relay; a stream failure stops the batch."""
-        relayed: list[str] = []
+    async def relay_keys(self, keys: list[DeliveryKey]) -> int:
+        """Add keys to the stream and record the relay; a stream failure stops the batch."""
+        relayed: list[DeliveryKey] = []
         try:
-            for delivery_id in delivery_ids:
-                await self._queue.add(delivery_id)
-                relayed.append(delivery_id)
+            for key in keys:
+                await self._queue.add(key)
+                relayed.append(key)
         finally:
             await self._store.mark_relayed(relayed, self._clock())
         return len(relayed)
 
-    async def relay_one(self, delivery_id: str) -> None:
+    async def relay_one(self, key: DeliveryKey) -> None:
         """Best-effort relay after the ingress response; never raises."""
         try:
-            await self.relay_ids([delivery_id])
+            await self.relay_keys([key])
         except Exception:
             logger.warning("best-effort relay failed; the reconciler will relay it", exc_info=True)
 
@@ -66,14 +66,14 @@ class Relay:
         selection could re-select rows. Rows beyond the cap are picked up on the next call.
         """
         now = self._clock()
-        ids = await self._store.list_relayable(
+        keys = await self._store.list_relayable(
             now,
             mode=mode,
             host=host,
             resweep_before=now - timedelta(seconds=min_age_seconds),
             limit=self._batch,
         )
-        return await self.relay_ids(ids) if ids else 0
+        return await self.relay_keys(keys) if keys else 0
 
     async def tick(self) -> int:
         """Relay rows never relayed and delayed retries that are now due."""

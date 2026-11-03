@@ -14,8 +14,9 @@ import logging
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
+from trustbridge.github.installations import InstallationInfo
 from trustbridge.github.ports import InstallationStore, ReconcileScheduler
 
 _log = logging.getLogger(__name__)
@@ -58,18 +59,34 @@ class HandlerRegistry:
         return len(handlers)
 
 
+class InstallationLookup(Protocol):
+    """Reads an installation's current state from GitHub (`installations.AppInstallationLookup`)."""
+
+    async def fetch(self, host: str, installation_id: int) -> InstallationInfo | None:
+        """The installation's state, or None when it no longer exists."""
+        ...
+
+
 class InstallationHandlers:
-    """Keeps tenants and their repositories in step with installation events."""
+    """Keeps tenants and their repositories in step with installation events.
+
+    GitHub does not order webhook deliveries (see `installations.py` for the documentation
+    checked), so `installation` `created`, `deleted`, `suspend` and `unsuspend` are only
+    triggers: the state to apply is read from the API at handling time. A retried `created`
+    after a later `deleted` therefore finds the installation gone and resurrects nothing.
+    """
 
     def __init__(
         self,
         store: InstallationStore,
         scheduler: ReconcileScheduler,
+        lookup: InstallationLookup,
         on_installation_changed: Callable[[str, int], None] | None = None,
     ) -> None:
         """`on_installation_changed(host, installation_id)` drops cached installation tokens."""
         self._store = store
         self._scheduler = scheduler
+        self._lookup = lookup
         self._changed = on_installation_changed
 
     @staticmethod
@@ -86,33 +103,40 @@ class InstallationHandlers:
         """Handle `installation`: created, deleted, suspend, unsuspend, new_permissions_accepted."""
         installation_id, login, account_id = self._installation(ctx.payload)
         action = ctx.action
-        if action == "created":
-            tenant_id = await self._store.upsert_installation(
-                ctx.host, installation_id, login, account_id
-            )
-            await self._store.apply_repository_changes(
-                tenant_id, self._repos(ctx.payload.get("repositories")), []
-            )
-            await self._scheduler.schedule(tenant_id)
-            return
-        state = {"deleted": "deleted", "suspend": "suspended", "unsuspend": "active"}.get(
-            action or ""
-        )
-        if state is not None:
-            known = await self._store.set_installation_state(ctx.host, installation_id, state)
-            if self._changed is not None:
-                self._changed(ctx.host, installation_id)
-            if known is not None and state == "active":
-                await self._scheduler.schedule(known)
+        if action in {"created", "deleted", "suspend", "unsuspend"}:
+            await self._sync(ctx, installation_id, login, account_id)
             return
         if action == "new_permissions_accepted":
-            if self._changed is not None:
-                self._changed(ctx.host, installation_id)
+            self._notify(ctx.host, installation_id)
             found = await self._store.tenant_id_for(ctx.host, installation_id)
             if found is not None:
                 await self._scheduler.schedule(found)
             return
         _log.info("ignoring installation action %s", action)
+
+    async def _sync(self, ctx: EventContext, installation_id: int, login: str, acct: int) -> None:
+        """Apply the installation's state as GitHub reports it now, whatever the event was."""
+        info = await self._lookup.fetch(ctx.host, installation_id)
+        if info is None:  # gone: never create or re-activate a tenant for it
+            await self._store.set_installation_state(ctx.host, installation_id, "deleted")
+            self._notify(ctx.host, installation_id)
+            return
+        tenant_id = await self._store.upsert_installation(
+            ctx.host, installation_id, info.login or login, info.account_id or acct
+        )
+        if info.suspended:
+            await self._store.set_installation_state(ctx.host, installation_id, "suspended")
+        if ctx.action == "created":
+            await self._store.apply_repository_changes(
+                tenant_id, self._repos(ctx.payload.get("repositories")), []
+            )
+        self._notify(ctx.host, installation_id)
+        if not info.suspended:
+            await self._scheduler.schedule(tenant_id)
+
+    def _notify(self, host: str, installation_id: int) -> None:
+        if self._changed is not None:
+            self._changed(host, installation_id)
 
     async def on_installation_repositories(self, ctx: EventContext) -> None:
         """Handle `installation_repositories`: repositories added to or removed from the install."""

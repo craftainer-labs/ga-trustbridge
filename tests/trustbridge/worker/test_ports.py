@@ -1,5 +1,6 @@
 """The ports over NG3's components: tenants, parked values, connection data, reconcile requests."""
 
+import asyncio
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -8,7 +9,7 @@ from pydantic import SecretStr
 
 from tests.trustbridge.fakes import FakeRedis
 from tests.trustbridge.helpers import as_redis, host
-from trustbridge.adapters.interface import IssuedSecret
+from trustbridge.adapters.interface import IssuedSecret, Tenant
 from trustbridge.worker.ports import (
     PRIVILEGED_KEY,
     ConnectionData,
@@ -17,7 +18,7 @@ from trustbridge.worker.ports import (
     ReconcileRequests,
     UnknownTenantError,
 )
-from trustbridge.worker.secrets import MemorySecrets
+from trustbridge.worker.secrets import MemorySecrets, SecretUnavailable
 
 
 def _tenants() -> MemoryTenants:
@@ -109,3 +110,36 @@ async def test_reconcile_requests_go_to_valkey_or_stay_local() -> None:
     local = ReconcileRequests()
     await local.schedule(tenant_id)
     assert local.local == {str(tenant_id)}
+
+
+async def test_connection_data_put_during_an_outage_fails_and_never_overwrites() -> None:
+    """An unavailable store is not "absent": `put` raises and the stored blob survives."""
+    secrets = MemorySecrets()
+    connections = ConnectionData(secrets)
+    tenant_id = uuid4()
+    await connections.put(tenant_id, "jfrog", {"url": SecretStr("https://j.example")})
+    before = dict(secrets.values)
+    secrets.down = True
+    with pytest.raises(SecretUnavailable):
+        await connections.put(tenant_id, "jfrog", {"x": SecretStr("1")})
+    secrets.down = False
+    assert secrets.values == before
+
+
+async def test_connection_data_concurrent_puts_do_not_lose_updates() -> None:
+    """Concurrent puts to one key are serialised; the lock is dropped when idle."""
+
+    class SlowSecrets(MemorySecrets):
+        async def read(self, ref: str) -> SecretStr:
+            await asyncio.sleep(0.01)
+            return await super().read(ref)
+
+    connections = ConnectionData(SlowSecrets())
+    tenant_id = uuid4()
+    await asyncio.gather(
+        *(connections.put(tenant_id, "jfrog", {f"k{i}": SecretStr(str(i))}) for i in range(5))
+    )
+    tenant = Tenant(id=tenant_id, github_host=host().to_host(), org="acme")
+    config = await connections.config_for(tenant, "jfrog")
+    assert sorted(config.connection) == [f"k{i}" for i in range(5)]
+    assert len(connections._locks) == 0

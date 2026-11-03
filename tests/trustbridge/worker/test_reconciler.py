@@ -6,7 +6,8 @@ from datetime import timedelta
 
 from tests.trustbridge.fakes import FakeHookClient
 from tests.trustbridge.helpers import host
-from tests.trustbridge.worker.harness import Harness
+from tests.trustbridge.worker.harness import Harness, key
+from trustbridge.worker.deliveries import DeliveryKey
 from trustbridge.worker.models import NIL_TENANT
 from trustbridge.worker.reconciler import (
     DeliveryReconciler,
@@ -47,8 +48,8 @@ async def test_a_stored_row_in_any_state_blocks_redelivery() -> None:  # inv. 8
     h = await Harness({}).start()
     for guid in ("g-pending", "g-processed", "g-dead"):
         await h.add(guid)
-    await h.store.mark_processed("g-processed", h.clock())
-    await h.store.mark_dead("g-dead", "x", h.clock())
+    await h.store.mark_processed(key("g-processed"), h.clock())
+    await h.store.mark_dead(key("g-dead"), "x", h.clock())
     client = FakeHookClient(
         [_hd(i, g, 500, h) for i, g in enumerate(("g-pending", "g-processed", "g-dead"))]
     )
@@ -75,17 +76,17 @@ async def test_a_row_stored_between_listing_and_redelivery_is_not_redelivered() 
     """A row stored between listing and redelivery is not redelivered."""
     h = await Harness({}).start()
     client = FakeHookClient([_hd(1, "g-race", 502, h)])
-    real = h.store.existing_ids
+    real = h.store.existing_keys
     calls = {"n": 0}
 
-    async def existing(delivery_ids: Sequence[str]) -> set[str]:
+    async def existing(keys: Sequence[DeliveryKey]) -> set[DeliveryKey]:
         calls["n"] += 1
         if calls["n"] == 1:
             return set()  # the batch check ran before the ingress stored it
         await h.add("g-race", relay=False)  # ... which then happens
-        return await real(delivery_ids)
+        return await real(keys)
 
-    h.store.existing_ids = existing  # type: ignore[method-assign]
+    h.store.existing_keys = existing  # type: ignore[method-assign]
     assert await _reconciler(h, client).reconcile_host(h.settings.github_hosts[0]) == 0
     assert client.redelivered == []
 
@@ -138,12 +139,12 @@ async def test_retention_purges_bodies_then_expired_ids_and_keeps_dead_bodies_lo
     h = await Harness({}).start()  # 7 d processed, 30 d dead, 30 d ids (the defaults)
     for delivery_id in ("processed", "dead", "pending"):
         await h.add(delivery_id)
-    await h.store.mark_processed("processed", h.clock())
-    await h.store.mark_dead("dead", "x", h.clock())
+    await h.store.mark_processed(key("processed"), h.clock())
+    await h.store.mark_dead(key("dead"), "x", h.clock())
     recon = _recon(h, None)
     h.advance(8 * 86400)
     await recon.retention()
-    processed, dead, pending = [await h.store.get(i) for i in ("processed", "dead", "pending")]
+    processed, dead, pending = [await h.store.get(key(i)) for i in ("processed", "dead", "pending")]
     assert processed is not None
     assert processed.body is None  # purged, but the row remains to dedupe a late redelivery
     assert dead is not None
@@ -152,20 +153,20 @@ async def test_retention_purges_bodies_then_expired_ids_and_keeps_dead_bodies_lo
     assert pending.body is not None  # a pending row is never touched
     h.advance(23 * 86400)  # 31 days after dead-lettering
     await recon.retention()
-    assert await h.store.get("processed") is None
-    assert await h.store.get("dead") is None
-    assert (await h.store.get("pending")) is not None
+    assert await h.store.get(key("processed")) is None
+    assert await h.store.get(key("dead")) is None
+    assert (await h.store.get(key("pending"))) is not None
 
 
 async def test_retention_is_a_singleton_duty() -> None:
     """Retention is a singleton duty."""
     h = await Harness({}).start()
     await h.add("d1")
-    await h.store.mark_processed("d1", h.clock())
+    await h.store.mark_processed(key("d1"), h.clock())
     h.advance(8 * 86400)
     async with h.leases.hold(NIL_TENANT, "_core", "retention"):
         await _recon(h, None).retention()
-    assert (await h.store.get("d1")).body is not None  # type: ignore[union-attr]
+    assert (await h.store.get(key("d1"))).body is not None  # type: ignore[union-attr]
 
 
 async def test_run_executes_each_job_and_stops_on_the_event() -> None:

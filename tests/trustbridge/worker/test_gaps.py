@@ -11,10 +11,10 @@ from redis.exceptions import ResponseError
 import app.db as app_db
 from tests.trustbridge.fakes import FakeHookClient, FakeHostChecker, FakeRedis
 from tests.trustbridge.helpers import as_redis, make_settings
-from tests.trustbridge.worker.harness import Harness
+from tests.trustbridge.worker.harness import Harness, key
 from tests.trustbridge.worker.test_reconciler import _hd, _recon, _reconciler
 from trustbridge.worker import metrics, migrate, runtime
-from trustbridge.worker.deliveries import InMemoryDeliveryStore, NewDelivery
+from trustbridge.worker.deliveries import DeliveryKey, InMemoryDeliveryStore, NewDelivery
 from trustbridge.worker.lease import InMemoryLeaseStore, LeaseLost, LeaseManager
 from trustbridge.worker.queue import StreamEntry, StreamQueue, _entries
 from trustbridge.worker.reconciler import periodic
@@ -25,9 +25,16 @@ TENANT = uuid.uuid4()
 
 def test_stream_replies_are_normalised_from_either_protocol_shape() -> None:
     """RESP3 dicts, empty fields and entries without an `id` are all handled."""
-    resp3 = {"tb:events": [[("1-0", {"id": "a"}), ("2-0", {})], ("3-0", {"other": "x"})]}
-    assert _entries(resp3) == [StreamEntry("1-0", "a")]
-    assert _entries([["tb:events", [(b"4-0", {b"id": b"b"})]]]) == [StreamEntry("4-0", "b")]
+    resp3 = {
+        "tb:events": [
+            [("1-0", {"id": "a", "host": "ok"}), ("2-0", {})],
+            ("3-0", {"other": "x"}),
+            ("5-0", {"id": "no-host"}),
+        ]
+    }
+    assert _entries(resp3) == [StreamEntry("1-0", key("a"))]
+    raw = [["tb:events", [(b"4-0", {b"id": b"b", b"host": b"ok"})]]]
+    assert _entries(raw) == [StreamEntry("4-0", key("b"))]
     assert _entries(None) == []
 
 
@@ -120,10 +127,21 @@ async def test_relaying_with_a_dead_stream_marks_nothing() -> None:
     await h.store.insert(NewDelivery("d1", "ok", "push", {}, b"{}", h.clock()))
     h.valkey.down = True
     with pytest.raises(ConnectionError):
-        await h.relay.relay_ids(["d1"])
-    row = await h.store.get("d1")
+        await h.relay.relay_keys([key("d1")])
+    row = await h.store.get(key("d1"))
     assert row is not None
     assert row.last_relayed_at is None
+
+
+async def test_the_memory_store_deduplicates_keys_and_bodies_per_host() -> None:
+    """The same `(host, id)` or the same body on one host is a duplicate; other hosts are not."""
+    store = InMemoryDeliveryStore()
+    now = datetime.now(UTC)
+    assert await store.insert(NewDelivery("d1", "h", "push", {}, b"a", now)) is True
+    assert await store.insert(NewDelivery("d1", "h", "push", {}, b"b", now)) is False
+    assert await store.insert(NewDelivery("d2", "h", "push", {}, b"a", now)) is False  # replay
+    assert await store.insert(NewDelivery("d1", "h2", "push", {}, b"a", now)) is True
+    assert sorted(store.rows) == [DeliveryKey("h", "d1"), DeliveryKey("h2", "d1")]
 
 
 async def test_the_memory_store_ignores_unknown_ids_and_settled_rows() -> None:
@@ -131,10 +149,11 @@ async def test_the_memory_store_ignores_unknown_ids_and_settled_rows() -> None:
     store = InMemoryDeliveryStore()
     now = datetime.now(UTC)
     await store.insert(NewDelivery("d1", "h", "push", {}, b"{}", now))
-    await store.mark_relayed(["missing", "d1"], now)
-    await store.mark_dead("d1", "x", now)
-    await store.mark_processed("d1", now)
-    row = await store.get("d1")
+    other = DeliveryKey("h", "d1")
+    await store.mark_relayed([DeliveryKey("h", "missing"), other], now)
+    await store.mark_dead(other, "x", now)
+    await store.mark_processed(other, now)
+    row = await store.get(other)
     assert row is not None
     assert (row.status, row.last_relayed_at) == ("dead", now)
 
@@ -165,7 +184,7 @@ async def test_the_worker_loop_backs_off_after_a_stream_error_and_survives_a_fai
 
     h.worker._process = broken  # type: ignore[method-assign]
     h.valkey.down = True  # the re-add fails too
-    await h.worker.process(StreamEntry("1-0", "d1"), from_pending=False)
+    await h.worker.process(StreamEntry("1-0", key("d1")), from_pending=False)
 
 
 async def test_the_keepalive_survives_a_failing_renew_and_cancellation_is_not_swallowed() -> None:

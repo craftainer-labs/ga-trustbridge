@@ -6,7 +6,7 @@ import pytest
 
 from tests.trustbridge.fakes import FakeRedis
 from tests.trustbridge.helpers import as_redis
-from tests.trustbridge.worker.harness import Harness
+from tests.trustbridge.worker.harness import Harness, key
 from trustbridge.worker import metrics
 from trustbridge.worker.queue import StreamQueue
 from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
@@ -17,10 +17,10 @@ async def test_the_resweep_after_stream_loss_re_adds_every_live_row() -> None:  
     h = await Harness({}).start()
     for delivery_id in ("d1", "d2", "d3", "d4", "d5"):
         await h.add(delivery_id, relay=False)
-    await h.relay.relay_ids(["d1", "d2", "d3", "d5"])  # d4 was never relayed
-    await h.store.mark_processed("d2", h.clock())
-    await h.store.defer("d3", h.clock() + timedelta(hours=1))
-    await h.store.mark_dead("d5", "x", h.clock())
+    await h.relay.relay_keys([key("d1"), key("d2"), key("d3"), key("d5")])  # d4 was never relayed
+    await h.store.mark_processed(key("d2"), h.clock())
+    await h.store.defer(key("d3"), h.clock() + timedelta(hours=1))
+    await h.store.mark_dead(key("d5"), "x", h.clock())
     await h.valkey.flushall()  # restart without persistence / flush / failover
     await h.queue.ensure_group()
     h.advance(1)
@@ -36,7 +36,7 @@ async def test_a_delayed_retry_waits_for_its_time_and_is_then_re_added_once_by_t
     h = await Harness({}).start()
     await h.add("d1")
     soon = h.clock() + timedelta(seconds=30)
-    await h.store.record_failure("d1", "e", h.clock(), soon)
+    await h.store.record_failure(key("d1"), "e", h.clock(), soon)
     assert await h.relay.tick() == 0
     h.advance(30)
     assert await h.relay.tick() == 1
@@ -49,7 +49,7 @@ async def _filled(n: int) -> tuple[FakeRedis, StreamQueue]:
     await queue.ensure_group()
     for i in range(n):
         valkey.advance(1)
-        await queue.add(f"d{i}")
+        await queue.add(key(f"d{i}"))
     return valkey, queue
 
 
@@ -103,9 +103,9 @@ async def test_dead_letter_stream_is_trimmed_by_age() -> None:
     """Dead letter stream is trimmed by age."""
     valkey = FakeRedis()
     queue = StreamQueue(as_redis(valkey))
-    await queue.dead_letter("old", "e")
+    await queue.dead_letter(key("old"), "e")
     valkey.advance(10_000)
-    await queue.dead_letter("new", "e")
+    await queue.dead_letter(key("new"), "e")
     assert await queue.trim_dead(valkey.now_ms - 5_000) == 1
     assert [f["delivery_id"] for _, f in valkey.entries("tb:events:dead")] == ["new"]
     assert await queue.trim_dead(0) == 0

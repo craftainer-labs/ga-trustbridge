@@ -17,6 +17,7 @@ from trustbridge.github.availability import HostMonitor, MonitorDeps
 from trustbridge.github.client import GitHubApi, GitHubRequester
 from trustbridge.github.gateway import GatewayDeps, TenantGateway
 from trustbridge.github.hosts import GitHubHostConfig
+from trustbridge.github.installations import InstallationInfo
 from trustbridge.github.tokens import InstallationTokenProvider
 
 
@@ -223,3 +224,25 @@ async def env(gh: ScriptedGitHub) -> Env:
     # 2027-01-15T09:00:00Z minus 30 minutes: tokens are fresh for the whole test.
     e.clock_now = 1_800_000_000.0
     return e
+
+
+class ScriptedLookup:
+    """`InstallationLookup` whose answer a test sets: present, suspended, gone or failing."""
+
+    def __init__(self, login: str = "acme", account_id: int = 5) -> None:
+        """Start with an active installation."""
+        self.login = login
+        self.account_id = account_id
+        self.gone = False
+        self.suspended = False
+        self.error: Exception | None = None
+        self.calls: list[tuple[str, int]] = []
+
+    async def fetch(self, host: str, installation_id: int) -> InstallationInfo | None:
+        """Return the scripted state (or raise the scripted error)."""
+        self.calls.append((host, installation_id))
+        if self.error is not None:
+            raise self.error
+        if self.gone:
+            return None
+        return InstallationInfo(self.login, self.account_id, self.suspended)

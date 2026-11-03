@@ -14,11 +14,12 @@ from tests.trustbridge.github.conftest import (
     FakeChecker,
     KeySigner,
     ScriptedGitHub,
+    ScriptedLookup,
     make_host_config,
 )
 from tests.trustbridge.signer.test_signers import make_key, pem_of
 from trustbridge.github.availability import HostMonitor, HostState, MonitorDeps
-from trustbridge.github.client import GitHubApi, GitHubRequester
+from trustbridge.github.client import GitHubApi, GitHubApiError, GitHubRequester
 from trustbridge.github.handlers import (
     EventContext,
     HandlerRegistry,
@@ -387,9 +388,11 @@ async def test_installation_lifecycle_events_drive_tenants_and_reconciles() -> N
     """created / suspend / unsuspend / new_permissions_accepted / deleted."""
     store, sched = Store(), Scheduler()
     dropped: list[tuple[str, int]] = []
+    lookup = ScriptedLookup()
     registry = HandlerRegistry()
     register_core_handlers(
-        registry, InstallationHandlers(store, sched, lambda h, i: dropped.append((h, i)))
+        registry,
+        InstallationHandlers(store, sched, lookup, lambda h, i: dropped.append((h, i))),
     )
     created = ctx(
         "installation",
@@ -405,6 +408,7 @@ async def test_installation_lifecycle_events_drive_tenants_and_reconciles() -> N
         ("unsuspend", "active"),
         ("deleted", "deleted"),
     ]:
+        lookup.suspended, lookup.gone = state == "suspended", state == "deleted"
         await registry.dispatch(ctx("installation", action, {"installation": INSTALLATION}))
         assert store.states[tenant] == state
     assert sched.scheduled == [tenant, tenant]  # created and unsuspend
@@ -412,13 +416,55 @@ async def test_installation_lifecycle_events_drive_tenants_and_reconciles() -> N
         ctx("installation", "new_permissions_accepted", {"installation": INSTALLATION})
     )
     assert sched.scheduled[-1] == tenant
-    assert len(dropped) == 4
+    assert len(dropped) == 5  # created, three state changes, new permissions
+
+
+async def test_a_retried_created_after_deleted_does_not_resurrect_the_installation() -> None:
+    """Deliveries are unordered: the API, not the event, decides the state that is applied."""
+    store, sched, lookup = Store(), Scheduler(), ScriptedLookup()
+    handlers = InstallationHandlers(store, sched, lookup)
+    created = ctx("installation", "created", {"installation": INSTALLATION})
+    await handlers.on_installation(created)
+    tenant = store.tenants[("github.com", 4242)]
+    lookup.gone = True  # the app was uninstalled
+    await handlers.on_installation(ctx("installation", "deleted", {"installation": INSTALLATION}))
+    assert store.states[tenant] == "deleted"
+    await handlers.on_installation(created)  # the first delivery is retried and arrives late
+    assert store.states[tenant] == "deleted"
+    assert sched.scheduled == [tenant]  # only the first, genuine created
+    unknown = {"id": 999, "account": {"login": "ghost", "id": 9}}
+    await handlers.on_installation(ctx("installation", "created", {"installation": unknown}))
+    assert ("github.com", 999) not in store.tenants  # a gone installation creates no tenant
+
+
+async def test_a_stale_deleted_after_a_reinstall_leaves_the_installation_active() -> None:
+    """A late `deleted` for an installation that exists again is applied as `active`."""
+    store, sched, lookup = Store(), Scheduler(), ScriptedLookup()
+    handlers = InstallationHandlers(store, sched, lookup)
+    await handlers.on_installation(ctx("installation", "created", {"installation": INSTALLATION}))
+    tenant = store.tenants[("github.com", 4242)]
+    await handlers.on_installation(ctx("installation", "deleted", {"installation": INSTALLATION}))
+    assert store.states[tenant] == "active"
+    assert lookup.calls == [("github.com", 4242)] * 2
+
+
+async def test_a_failing_installation_lookup_changes_nothing_and_is_retried() -> None:
+    """A GitHub error propagates (the worker counts a failure and retries the delivery)."""
+    store, sched, lookup = Store(), Scheduler(), ScriptedLookup()
+    handlers = InstallationHandlers(store, sched, lookup)
+    lookup.error = GitHubApiError(502, "GET /app/installations/4242")
+    with pytest.raises(GitHubApiError):
+        await handlers.on_installation(
+            ctx("installation", "created", {"installation": INSTALLATION})
+        )
+    assert store.tenants == {}
+    assert sched.scheduled == []
 
 
 async def test_repository_selection_and_repository_events() -> None:
     """installation_repositories add/remove; repository renames and deletions use the numeric id."""
     store, sched = Store(), Scheduler()
-    handlers = InstallationHandlers(store, sched)
+    handlers = InstallationHandlers(store, sched, ScriptedLookup())
     await handlers.on_installation(ctx("installation", "created", {"installation": INSTALLATION}))
     tenant = store.tenants[("github.com", 4242)]
     await handlers.on_installation_repositories(
@@ -478,7 +524,7 @@ async def test_unknown_events_and_installations_are_ignored() -> None:
     """The registry returns 0 for an event nobody handles; unknown installations are skipped."""
     registry = HandlerRegistry()
     assert await registry.dispatch(ctx("star", None, {})) == 0
-    handlers = InstallationHandlers(Store(), Scheduler())
+    handlers = InstallationHandlers(Store(), Scheduler(), ScriptedLookup())
     await handlers.on_installation_repositories(
         ctx("installation_repositories", "added", {"installation": INSTALLATION})
     )

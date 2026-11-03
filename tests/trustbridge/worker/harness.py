@@ -9,11 +9,16 @@ from tests.trustbridge.helpers import as_redis, host, make_monitor, make_setting
 from trustbridge.github.handlers import Handler, HandlerRegistry
 from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.settings import TrustbridgeSettings
-from trustbridge.worker.deliveries import InMemoryDeliveryStore, NewDelivery
+from trustbridge.worker.deliveries import DeliveryKey, InMemoryDeliveryStore, NewDelivery
 from trustbridge.worker.lease import InMemoryLeaseStore, LeaseManager
 from trustbridge.worker.queue import StreamQueue
 from trustbridge.worker.relay import Relay
 from trustbridge.worker.worker import Worker, WorkerDeps
+
+
+def key(delivery_id: str, host_name: str = "ok") -> DeliveryKey:
+    """The outbox key of a delivery added with `Harness.add` (default host `ok`)."""
+    return DeliveryKey(host_name, delivery_id)
 
 
 class WorkerDied(BaseException):
@@ -93,7 +98,9 @@ class Harness:
         body: bytes | None = None,
     ) -> None:
         """Store a delivery (as ingress would) and relay it."""
-        payload = body if body is not None else json.dumps({"installation": {"id": 7}}).encode()
+        # unique per delivery: a body already accepted for the host is a duplicate
+        default = {"installation": {"id": 7}, "delivery": delivery_id}
+        payload = body if body is not None else json.dumps(default).encode()
         await self.store.insert(
             NewDelivery(delivery_id, host_name, event, {}, payload, self.clock())
         )

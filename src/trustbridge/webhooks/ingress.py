@@ -12,7 +12,9 @@ Order, with the invariant each step serves:
 4. the signature is verified in constant time against that secret before anything is parsed
    or stored (2); a mismatch re-reads the secret once (rotation) before answering 401;
 5. the delivery is committed to `webhook_deliveries` (1); only then is 2xx (202) returned. A
-   repeated delivery id returns 2xx without a second row. An `unavailable` host goes through
+   repeated `(host, delivery id)`, or a body whose SHA-256 was already accepted for the host
+   (`X-GitHub-Delivery` is not signed, so a captured body could be replayed under a new id),
+   returns 2xx `duplicate` without a second row. An `unavailable` host goes through
    the same path (29): its rows wait in the outbox.
 
 Valkey is never required here: the limiter fails open and the stream relay runs after the
@@ -189,12 +191,11 @@ async def receive_webhook(host: str, request: Request, background: BackgroundTas
     await _authentic(runtime, host, secret, request, body)
     delivery_id, event, headers = _metadata(request)
     try:
-        created = await runtime.store.insert(
-            NewDelivery(delivery_id, host, event, headers, body, runtime.clock())
-        )
+        delivery = NewDelivery(delivery_id, host, event, headers, body, runtime.clock())
+        created = await runtime.store.insert(delivery)
     except Exception as exc:
         logger.exception("could not store a webhook delivery")
         raise HTTPException(status_code=503, detail="could not store the delivery") from exc
     if created and runtime.relay is not None:
-        background.add_task(runtime.relay.relay_one, delivery_id)
+        background.add_task(runtime.relay.relay_one, delivery.key)
     return JSONResponse({"status": "accepted" if created else "duplicate"}, status_code=202)

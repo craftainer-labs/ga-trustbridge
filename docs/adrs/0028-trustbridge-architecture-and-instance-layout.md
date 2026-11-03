@@ -322,6 +322,13 @@ Table names are the contract between this ADR, 0029 and the later ADRs
    the dead-letter stream is trimmed by age. Postgres, not the stream, is
    the source of truth. The settings and their defaults are in the
    decision record, item 9.
+   Deduplication keys are `(host, X-GitHub-Delivery)` (GitHub's delivery
+   GUID is unique per host, not globally) and `(host, SHA-256 of the raw
+   body)`. The second exists because `X-GitHub-Delivery` is not covered by
+   the HMAC signature: a captured signed body could be replayed under a new
+   delivery id. Both are unique indexes on the row, so a replay inside the
+   retention window is answered 2xx `duplicate` and stores nothing; a
+   redelivery that reuses its delivery id behaves as before. (NG34f.)
 6. **Installation tokens**: minted with the signer-backed App JWT
    (ADR 0030), cached in process until about 5 minutes before the
    1-hour expiry, and **down-scoped** per repository and permission set

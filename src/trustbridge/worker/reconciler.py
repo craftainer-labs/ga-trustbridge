@@ -22,7 +22,7 @@ from typing import Protocol
 from trustbridge.github.availability import HostMonitor
 from trustbridge.settings import GitHubHostConfig, TrustbridgeSettings
 from trustbridge.worker import metrics
-from trustbridge.worker.deliveries import DeliveryStore
+from trustbridge.worker.deliveries import DeliveryKey, DeliveryStore
 from trustbridge.worker.lease import LeaseBusy, LeaseManager
 from trustbridge.worker.models import NIL_TENANT
 from trustbridge.worker.queue import StreamQueue
@@ -86,12 +86,13 @@ class DeliveryReconciler:
         failed = [d for d in latest.values() if not HTTP_OK_LOW <= d.status_code < HTTP_OK_HIGH]
         if not failed:
             return 0
-        stored = await self._store.existing_ids([d.guid for d in failed])
+        stored = await self._store.existing_keys([DeliveryKey(host.name, d.guid) for d in failed])
         redelivered = 0
         for item in failed:
-            if item.guid in stored or redelivered >= self._max:
+            key = DeliveryKey(host.name, item.guid)
+            if key in stored or redelivered >= self._max:
                 continue
-            if await self._store.existing_ids([item.guid]):  # re-check just before the call
+            if await self._store.existing_keys([key]):  # re-check just before the call
                 continue
             await self._client.redeliver(host, item.id)
             redelivered += 1

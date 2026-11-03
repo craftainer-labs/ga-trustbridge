@@ -216,3 +216,43 @@ async def test_environment_protection_is_read_from_protection_rules(env: Env) ->
     assert await inspector.is_protected(env.tenant, 10, "prod") is True
     assert await inspector.is_protected(env.tenant, 10, "open") is False
     assert await inspector.is_protected(env.tenant, 10, "gone") is False
+
+
+def _invalidating_mint(env: Env, times: int) -> None:
+    """Script the token endpoint to invalidate the installation during its first `times` mints."""
+    path = f"/app/installations/{env.installation_id}/access_tokens"
+
+    def mint(request: httpx2.Request) -> httpx2.Response:
+        del request
+        env.mint_count += 1
+        if env.mint_count <= times:
+            env.tokens.invalidate("github.com", env.installation_id)
+        return httpx2.Response(
+            201, json={"token": f"ghs_{env.mint_count}", "expires_at": "2027-01-15T09:00:00Z"}
+        )
+
+    env.gh.on("POST", path, mint)
+
+
+async def test_an_invalidation_during_a_mint_discards_the_stale_token(env: Env) -> None:
+    """The token minted across an invalidation is not cached; a fresh one is minted and cached."""
+    _invalidating_mint(env, times=1)
+    token = await env.tokens.token("github.com", 4242)
+    assert token == "ghs_2"  # the stale ghs_1 was never returned or cached
+    assert await env.tokens.token("github.com", 4242) == "ghs_2"
+    assert env.mint_count == 2
+
+
+async def test_a_second_invalidation_during_the_retry_leaves_the_token_uncached(env: Env) -> None:
+    """If the retry is also overtaken by an invalidation, nothing is cached."""
+    _invalidating_mint(env, times=2)
+    assert await env.tokens.token("github.com", 4242) == "ghs_2"
+    assert await env.tokens.token("github.com", 4242) == "ghs_3"  # minted again: not cached
+    assert env.mint_count == 3
+
+
+async def test_mint_locks_are_dropped_when_idle(env: Env) -> None:
+    """The per-key locks do not accumulate."""
+    for repo in range(20):
+        await env.tokens.token("github.com", 4242, repository_ids=[repo])
+    assert len(env.tokens._locks) == 0

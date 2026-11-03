@@ -90,10 +90,10 @@ class Worker:
             await self._process(entry, from_pending=from_pending)
         except Exception:
             logger.exception(
-                "processing infrastructure error", extra={"delivery_id": entry.delivery_id}
+                "processing infrastructure error", extra={"host": entry.key.host, "delivery_id": entry.key.delivery_id},
             )
             try:
-                await self._d.queue.add(entry.delivery_id)
+                await self._d.queue.add(entry.key)
                 await self._d.queue.ack(entry.entry_id)
             except Exception:
                 logger.exception("could not re-add the entry; it stays pending")
@@ -101,7 +101,7 @@ class Worker:
     async def _process(self, entry: StreamEntry, *, from_pending: bool) -> None:
         """The decision tree for one stream entry."""
         queue, store = self._d.queue, self._d.store
-        row = await store.get(entry.delivery_id)
+        row = await store.get(entry.key)
         if row is None or row.status != PENDING:
             await queue.ack(entry.entry_id)
             return
@@ -120,14 +120,14 @@ class Worker:
         try:
             await self._handle(row)
         except LeaseBusy:
-            await store.defer(row.delivery_id, now + timedelta(seconds=self._s.busy_retry_seconds))
+            await store.defer(row.key, now + timedelta(seconds=self._s.busy_retry_seconds))
             await queue.ack(entry.entry_id)
         except Exception as exc:
             log_failure(logger, "delivery handler failed", exc)
             error = f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
             await self._failed(row, entry, error)
         else:
-            await store.mark_processed(row.delivery_id, self._d.clock())
+            await store.mark_processed(row.key, self._d.clock())
             await queue.ack(entry.entry_id)
 
     async def _failed(self, row: DeliveryRecord, entry: StreamEntry, error: str) -> None:
@@ -140,19 +140,19 @@ class Worker:
             self._s.retry_backoff_base_seconds,
             self._s.retry_backoff_max_seconds,
         )
-        await self._d.store.record_failure(row.delivery_id, error, self._d.clock(), when)
+        await self._d.store.record_failure(row.key, error, self._d.clock(), when)
         if attempts >= self._s.max_delivery_attempts:
             await self._dead(row, entry, error)
         else:
             await self._d.queue.ack(entry.entry_id)
 
     async def _dead(self, row: DeliveryRecord, entry: StreamEntry, error: str) -> None:
-        """Mark dead in Postgres, add `{delivery_id, error}` to the dead letter, acknowledge."""
-        await self._d.store.mark_dead(row.delivery_id, error, self._d.clock())
-        await self._d.queue.dead_letter(row.delivery_id, error)
+        """Mark dead in Postgres, add `{host, delivery_id, error}` to the dead letter, ack."""
+        await self._d.store.mark_dead(row.key, error, self._d.clock())
+        await self._d.queue.dead_letter(row.key, error)
         await self._d.queue.ack(entry.entry_id)
         metrics.deliveries_dead.add(1)
-        logger.error("delivery dead-lettered", extra={"delivery_id": row.delivery_id})
+        logger.error("delivery dead-lettered", extra={"host": row.host, "delivery_id": row.delivery_id})
 
     async def _handle(self, row: DeliveryRecord) -> None:
         """Parse the stored body and dispatch it to the handlers registered for the event."""

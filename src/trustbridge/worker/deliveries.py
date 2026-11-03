@@ -6,12 +6,13 @@ answer 2xx only after the row is durable. The in-memory store backs `MODE=mock` 
 tests; the Postgres store is covered by the integration tests.
 """
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Literal, Protocol
+from typing import Literal, NamedTuple, Protocol
 
-from sqlalchemy import ColumnElement, and_, delete, or_, select, update
+from sqlalchemy import ColumnElement, and_, delete, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -21,6 +22,13 @@ RelayMode = Literal["tick", "resweep", "host"]
 PENDING = "pending"
 PROCESSED = "processed"
 DEAD = "dead"
+
+
+class DeliveryKey(NamedTuple):
+    """The identity of a delivery: GitHub's delivery id is unique per host, not globally."""
+
+    host: str
+    delivery_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +41,16 @@ class NewDelivery:
     headers: dict[str, str]
     body: bytes
     received_at: datetime
+
+    @property
+    def key(self) -> DeliveryKey:
+        """The `(host, delivery_id)` identity."""
+        return DeliveryKey(self.host, self.delivery_id)
+
+    @property
+    def body_sha256(self) -> str:
+        """Hex SHA-256 of the raw signed body: the replay-dedupe identity (per host)."""
+        return hashlib.sha256(self.body).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,47 +70,57 @@ class DeliveryRecord:
     processed_at: datetime | None = None
     dead_at: datetime | None = None
     last_error: str | None = None
+    body_sha256: str | None = None
+
+    @property
+    def key(self) -> DeliveryKey:
+        """The `(host, delivery_id)` identity."""
+        return DeliveryKey(self.host, self.delivery_id)
 
 
 class DeliveryStore(Protocol):
     """Persistence of the outbox; every method commits before it returns."""
 
     async def insert(self, delivery: NewDelivery) -> bool:
-        """Store a delivery; False (and no second row) if its id already exists."""
+        """Store a delivery; False (and no second row) if its `(host, id)` or body hash exists.
+
+        `X-GitHub-Delivery` is not covered by the HMAC signature, so the same signed body
+        replayed under a fresh delivery id is also a duplicate (per host, for the row's life).
+        """
         ...
 
-    async def get(self, delivery_id: str) -> DeliveryRecord | None:
-        """The row for `delivery_id`, or None."""
+    async def get(self, key: DeliveryKey) -> DeliveryRecord | None:
+        """The row for `key`, or None."""
         ...
 
-    async def existing_ids(self, delivery_ids: Sequence[str]) -> set[str]:
-        """The subset of `delivery_ids` that has a stored row."""
+    async def existing_keys(self, keys: Sequence[DeliveryKey]) -> set[DeliveryKey]:
+        """The subset of `keys` that has a stored row."""
         ...
 
-    async def mark_processed(self, delivery_id: str, now: datetime) -> None:
+    async def mark_processed(self, key: DeliveryKey, now: datetime) -> None:
         """Mark a pending row processed."""
         ...
 
     async def record_failure(
-        self, delivery_id: str, error: str, now: datetime, next_attempt_at: datetime
+        self, key: DeliveryKey, error: str, now: datetime, next_attempt_at: datetime
     ) -> int:
         """Count one handler failure and schedule the retry; returns the new counter."""
         ...
 
-    async def defer(self, delivery_id: str, until: datetime) -> None:
+    async def defer(self, key: DeliveryKey, until: datetime) -> None:
         """Delay a row without counting a failure (busy lease)."""
         ...
 
-    async def mark_dead(self, delivery_id: str, error: str, now: datetime) -> None:
+    async def mark_dead(self, key: DeliveryKey, error: str, now: datetime) -> None:
         """Move a row to `dead`."""
         ...
 
-    async def requeue(self, delivery_id: str) -> bool:
+    async def requeue(self, key: DeliveryKey) -> bool:
         """Make a dead row deliverable again with its counter reset; False if it cannot be."""
         ...
 
-    async def mark_relayed(self, delivery_ids: Sequence[str], now: datetime) -> None:
-        """Record that these ids were added to the stream."""
+    async def mark_relayed(self, keys: Sequence[DeliveryKey], now: datetime) -> None:
+        """Record that these deliveries were added to the stream."""
         ...
 
     async def list_relayable(
@@ -103,8 +131,8 @@ class DeliveryStore(Protocol):
         resweep_before: datetime | None = None,
         host: str | None = None,
         limit: int = 200,
-    ) -> list[str]:
-        """Ids of pending rows to add to the stream (see `is_relayable` for the rules)."""
+    ) -> list[DeliveryKey]:
+        """Keys of pending rows to add to the stream (see `is_relayable` for the rules)."""
         ...
 
     async def purge_bodies(self, processed_before: datetime, dead_before: datetime) -> int:
@@ -154,67 +182,71 @@ def is_relayable(
 class InMemoryDeliveryStore:
     """Process-local store for `MODE=mock` and unit tests."""
 
-    rows: dict[str, DeliveryRecord] = field(default_factory=dict)
+    rows: dict[DeliveryKey, DeliveryRecord] = field(default_factory=dict)
 
     async def insert(self, delivery: NewDelivery) -> bool:
-        """Store a delivery unless its id exists."""
-        if delivery.delivery_id in self.rows:
+        """Store a delivery unless its `(host, id)` or its body hash exists on that host."""
+        digest = delivery.body_sha256
+        if delivery.key in self.rows or any(
+            r.host == delivery.host and r.body_sha256 == digest for r in self.rows.values()
+        ):
             return False
-        self.rows[delivery.delivery_id] = DeliveryRecord(
+        self.rows[delivery.key] = DeliveryRecord(
             delivery_id=delivery.delivery_id,
             host=delivery.host,
             event=delivery.event,
             headers=dict(delivery.headers),
             body=delivery.body,
             received_at=delivery.received_at,
+            body_sha256=digest,
         )
         return True
 
-    async def get(self, delivery_id: str) -> DeliveryRecord | None:
-        """The row for `delivery_id`."""
-        return self.rows.get(delivery_id)
+    async def get(self, key: DeliveryKey) -> DeliveryRecord | None:
+        """The row for `key`."""
+        return self.rows.get(key)
 
-    async def existing_ids(self, delivery_ids: Sequence[str]) -> set[str]:
-        """Stored ids among `delivery_ids`."""
-        return {i for i in delivery_ids if i in self.rows}
+    async def existing_keys(self, keys: Sequence[DeliveryKey]) -> set[DeliveryKey]:
+        """Stored keys among `keys`."""
+        return {k for k in keys if k in self.rows}
 
-    def _set(self, delivery_id: str, **changes: object) -> None:
+    def _set(self, key: DeliveryKey, **changes: object) -> None:
         """Replace fields of a row."""
-        self.rows[delivery_id] = replace(self.rows[delivery_id], **changes)  # type: ignore[arg-type]
+        self.rows[key] = replace(self.rows[key], **changes)  # type: ignore[arg-type]
 
-    async def mark_processed(self, delivery_id: str, now: datetime) -> None:
+    async def mark_processed(self, key: DeliveryKey, now: datetime) -> None:
         """Mark processed."""
-        if self.rows[delivery_id].status == PENDING:
-            self._set(delivery_id, status=PROCESSED, processed_at=now, next_attempt_at=None)
+        if self.rows[key].status == PENDING:
+            self._set(key, status=PROCESSED, processed_at=now, next_attempt_at=None)
 
     async def record_failure(
-        self, delivery_id: str, error: str, now: datetime, next_attempt_at: datetime
+        self, key: DeliveryKey, error: str, now: datetime, next_attempt_at: datetime
     ) -> int:
         """Count a failure."""
-        row = self.rows[delivery_id]
+        row = self.rows[key]
         self._set(
-            delivery_id,
+            key,
             attempts=row.attempts + 1,
             last_error=error,
             next_attempt_at=next_attempt_at,
         )
         return row.attempts + 1
 
-    async def defer(self, delivery_id: str, until: datetime) -> None:
+    async def defer(self, key: DeliveryKey, until: datetime) -> None:
         """Delay without counting."""
-        self._set(delivery_id, next_attempt_at=until)
+        self._set(key, next_attempt_at=until)
 
-    async def mark_dead(self, delivery_id: str, error: str, now: datetime) -> None:
+    async def mark_dead(self, key: DeliveryKey, error: str, now: datetime) -> None:
         """Move to dead."""
-        self._set(delivery_id, status=DEAD, dead_at=now, last_error=error, next_attempt_at=None)
+        self._set(key, status=DEAD, dead_at=now, last_error=error, next_attempt_at=None)
 
-    async def requeue(self, delivery_id: str) -> bool:
+    async def requeue(self, key: DeliveryKey) -> bool:
         """Requeue a dead row whose body is still stored."""
-        row = self.rows.get(delivery_id)
+        row = self.rows.get(key)
         if row is None or row.status != DEAD or row.body is None:
             return False
         self._set(
-            delivery_id,
+            key,
             status=PENDING,
             attempts=0,
             dead_at=None,
@@ -224,11 +256,11 @@ class InMemoryDeliveryStore:
         )
         return True
 
-    async def mark_relayed(self, delivery_ids: Sequence[str], now: datetime) -> None:
+    async def mark_relayed(self, keys: Sequence[DeliveryKey], now: datetime) -> None:
         """Record relays."""
-        for delivery_id in delivery_ids:
-            if delivery_id in self.rows:
-                self._set(delivery_id, last_relayed_at=now)
+        for key in keys:
+            if key in self.rows:
+                self._set(key, last_relayed_at=now)
 
     async def list_relayable(
         self,
@@ -238,11 +270,11 @@ class InMemoryDeliveryStore:
         resweep_before: datetime | None = None,
         host: str | None = None,
         limit: int = 200,
-    ) -> list[str]:
-        """Relayable ids in arrival order."""
-        ordered = sorted(self.rows.values(), key=lambda r: (r.received_at, r.delivery_id))
+    ) -> list[DeliveryKey]:
+        """Relayable keys in arrival order."""
+        ordered = sorted(self.rows.values(), key=lambda r: (r.received_at, r.host, r.delivery_id))
         found = [
-            r.delivery_id
+            r.key
             for r in ordered
             if is_relayable(r, now, mode=mode, resweep_before=resweep_before, host=host)
         ]
@@ -257,20 +289,32 @@ class InMemoryDeliveryStore:
             if (
                 row.status == PROCESSED and (row.processed_at or row.received_at) < processed_before
             ) or (row.status == DEAD and (row.dead_at or row.received_at) < dead_before):
-                self._set(row.delivery_id, body=None)
+                self._set(row.key, body=None)
                 purged += 1
         return purged
 
     async def delete_expired(self, before: datetime) -> int:
         """Delete old finished rows whose body is already purged."""
         old = [
-            r.delivery_id
+            r.key
             for r in self.rows.values()
             if r.status != PENDING and r.received_at < before and r.body is None
         ]
-        for delivery_id in old:
-            del self.rows[delivery_id]
+        for key in old:
+            del self.rows[key]
         return len(old)
+
+
+def _is(key: DeliveryKey) -> ColumnElement[bool]:
+    """The predicate selecting the row of `key`."""
+    return and_(WebhookDelivery.host == key.host, WebhookDelivery.delivery_id == key.delivery_id)
+
+
+def _in_keys(keys: Sequence[DeliveryKey]) -> ColumnElement[bool]:
+    """The predicate selecting the rows of any of `keys`."""
+    return tuple_(WebhookDelivery.host, WebhookDelivery.delivery_id).in_(
+        [(k.host, k.delivery_id) for k in keys]
+    )
 
 
 def _record(row: WebhookDelivery) -> DeliveryRecord:
@@ -289,6 +333,7 @@ def _record(row: WebhookDelivery) -> DeliveryRecord:
         processed_at=row.processed_at,
         dead_at=row.dead_at,
         last_error=row.last_error,
+        body_sha256=row.body_sha256,
     )
 
 
@@ -300,7 +345,7 @@ class PgDeliveryStore:
         self._sf = session_factory
 
     async def insert(self, delivery: NewDelivery) -> bool:
-        """`INSERT .. ON CONFLICT DO NOTHING`; True when a row was created."""
+        """`INSERT .. ON CONFLICT DO NOTHING` (any unique key); True when a row was created."""
         stmt = (
             pg_insert(WebhookDelivery)
             .values(
@@ -310,28 +355,27 @@ class PgDeliveryStore:
                 headers=delivery.headers,
                 body=delivery.body,
                 received_at=delivery.received_at,
+                body_sha256=delivery.body_sha256,
             )
-            .on_conflict_do_nothing(index_elements=["delivery_id"])
+            .on_conflict_do_nothing()  # the primary key or the (host, body_sha256) index
             .returning(WebhookDelivery.delivery_id)
         )
         async with self._sf() as session, session.begin():
             return (await session.execute(stmt)).first() is not None
 
-    async def get(self, delivery_id: str) -> DeliveryRecord | None:
+    async def get(self, key: DeliveryKey) -> DeliveryRecord | None:
         """Load a row."""
         async with self._sf() as session:
-            row = await session.get(WebhookDelivery, delivery_id)
+            row = (await session.scalars(select(WebhookDelivery).where(_is(key)))).one_or_none()
             return None if row is None else _record(row)
 
-    async def existing_ids(self, delivery_ids: Sequence[str]) -> set[str]:
-        """Stored ids among `delivery_ids`."""
-        if not delivery_ids:
+    async def existing_keys(self, keys: Sequence[DeliveryKey]) -> set[DeliveryKey]:
+        """Stored keys among `keys`."""
+        if not keys:
             return set()
-        stmt = select(WebhookDelivery.delivery_id).where(
-            WebhookDelivery.delivery_id.in_(list(delivery_ids))
-        )
+        stmt = select(WebhookDelivery.host, WebhookDelivery.delivery_id).where(_in_keys(keys))
         async with self._sf() as session:
-            return set((await session.scalars(stmt)).all())
+            return {DeliveryKey(h, i) for h, i in (await session.execute(stmt)).all()}
 
     async def _exec(self, stmt: object) -> int:
         """Run a write statement in its own transaction; returns the row count."""
@@ -339,21 +383,21 @@ class PgDeliveryStore:
             result = await session.execute(stmt)  # type: ignore[call-overload]
             return int(result.rowcount)
 
-    async def mark_processed(self, delivery_id: str, now: datetime) -> None:
+    async def mark_processed(self, key: DeliveryKey, now: datetime) -> None:
         """Mark processed."""
         await self._exec(
             update(WebhookDelivery)
-            .where(WebhookDelivery.delivery_id == delivery_id, WebhookDelivery.status == PENDING)
+            .where(_is(key), WebhookDelivery.status == PENDING)
             .values(status=PROCESSED, processed_at=now, next_attempt_at=None)
         )
 
     async def record_failure(
-        self, delivery_id: str, error: str, now: datetime, next_attempt_at: datetime
+        self, key: DeliveryKey, error: str, now: datetime, next_attempt_at: datetime
     ) -> int:
         """Count a failure; returns the new counter."""
         stmt = (
             update(WebhookDelivery)
-            .where(WebhookDelivery.delivery_id == delivery_id, WebhookDelivery.status == PENDING)
+            .where(_is(key), WebhookDelivery.status == PENDING)
             .values(
                 attempts=WebhookDelivery.attempts + 1,
                 last_error=error,
@@ -365,28 +409,28 @@ class PgDeliveryStore:
             value = (await session.execute(stmt)).scalar_one_or_none()
         return int(value or 0)
 
-    async def defer(self, delivery_id: str, until: datetime) -> None:
+    async def defer(self, key: DeliveryKey, until: datetime) -> None:
         """Delay without counting."""
         await self._exec(
             update(WebhookDelivery)
-            .where(WebhookDelivery.delivery_id == delivery_id, WebhookDelivery.status == PENDING)
+            .where(_is(key), WebhookDelivery.status == PENDING)
             .values(next_attempt_at=until)
         )
 
-    async def mark_dead(self, delivery_id: str, error: str, now: datetime) -> None:
+    async def mark_dead(self, key: DeliveryKey, error: str, now: datetime) -> None:
         """Move a pending row to dead."""
         await self._exec(
             update(WebhookDelivery)
-            .where(WebhookDelivery.delivery_id == delivery_id, WebhookDelivery.status == PENDING)
+            .where(_is(key), WebhookDelivery.status == PENDING)
             .values(status=DEAD, dead_at=now, last_error=error, next_attempt_at=None)
         )
 
-    async def requeue(self, delivery_id: str) -> bool:
+    async def requeue(self, key: DeliveryKey) -> bool:
         """Requeue a dead row whose body still exists, resetting its counter."""
         count = await self._exec(
             update(WebhookDelivery)
             .where(
-                WebhookDelivery.delivery_id == delivery_id,
+                _is(key),
                 WebhookDelivery.status == DEAD,
                 WebhookDelivery.body.is_not(None),
             )
@@ -401,12 +445,12 @@ class PgDeliveryStore:
         )
         return count == 1
 
-    async def mark_relayed(self, delivery_ids: Sequence[str], now: datetime) -> None:
+    async def mark_relayed(self, keys: Sequence[DeliveryKey], now: datetime) -> None:
         """Record relays."""
-        if delivery_ids:
+        if keys:
             await self._exec(
                 update(WebhookDelivery)
-                .where(WebhookDelivery.delivery_id.in_(list(delivery_ids)))
+                .where(_in_keys(keys))
                 .values(last_relayed_at=now)
             )
 
@@ -418,7 +462,7 @@ class PgDeliveryStore:
         resweep_before: datetime | None = None,
         host: str | None = None,
         limit: int = 200,
-    ) -> list[str]:
+    ) -> list[DeliveryKey]:
         """The SQL form of `is_relayable`."""
         t = WebhookDelivery
         due = or_(t.next_attempt_at.is_(None), t.next_attempt_at <= now)
@@ -438,13 +482,13 @@ class PgDeliveryStore:
                 ),
             )
         stmt = (
-            select(t.delivery_id)
+            select(t.host, t.delivery_id)
             .where(t.status == PENDING, cond)
-            .order_by(t.received_at, t.delivery_id)
+            .order_by(t.received_at, t.host, t.delivery_id)
             .limit(limit)
         )
         async with self._sf() as session:
-            return list((await session.scalars(stmt)).all())
+            return [DeliveryKey(h, i) for h, i in (await session.execute(stmt)).all()]
 
     async def purge_bodies(self, processed_before: datetime, dead_before: datetime) -> int:
         """Null expired bodies; the rows stay to deduplicate a late redelivery."""
