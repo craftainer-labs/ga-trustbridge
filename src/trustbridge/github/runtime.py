@@ -25,8 +25,8 @@ from trustbridge.github.handlers import (
     register_core_handlers,
 )
 from trustbridge.github.hook_deliveries import GitHubHookDeliveries
-from trustbridge.github.installations import AppInstallationLookup
 from trustbridge.github.hosts import GitHubHostConfig
+from trustbridge.github.installations import AppInstallationLookup
 from trustbridge.github.ports import InstallationResolver, InstallationStore, ReconcileScheduler
 from trustbridge.github.tokens import InstallationTokenProvider
 from trustbridge.settings import TrustbridgeSettings

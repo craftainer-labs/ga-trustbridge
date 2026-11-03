@@ -6,10 +6,13 @@ from typing import Any
 import pytest
 
 from tests.trustbridge.fakes import FakeHostChecker
+from tests.trustbridge.github.conftest import ScriptedGitHub
 from tests.trustbridge.helpers import make_settings
 from trustbridge.adapters.interface import Tenant
+from trustbridge.github.client import GitHubApi, GitHubRequester
 from trustbridge.github.deployments import ArgoTrigger, DeploymentReport
 from trustbridge.github.handlers import EventContext
+from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.runtime import RuntimeDeps, build_host_runtime
 from trustbridge.worker.ports import MemoryTenants
 from trustbridge.worker.ports import ReconcileRequests as Scheduler
@@ -41,8 +44,16 @@ async def test_the_runtime_wires_monitor_hook_client_and_the_core_handlers(
     async def on_ready(config: Any) -> None:  # noqa: ANN401
         readied.append(config.name)
 
+    gh = ScriptedGitHub()
+    # the state the created event is applied from
+    gh.route("GET", "/app/installations/7", body={"account": {"login": "acme", "id": 1}})
+
+    def factory(host: GitHubHostConfig) -> GitHubRequester:
+        return GitHubApi(host, async_transport=gh.transport())
+
     runtime = build_host_runtime(
-        settings, _deps(tenants, checker=FakeHostChecker(), on_ready=on_ready)
+        settings,
+        _deps(tenants, checker=FakeHostChecker(), on_ready=on_ready, api_factory=factory),
     )
     await runtime.monitor.check_all()
     assert readied == ["github.com"]

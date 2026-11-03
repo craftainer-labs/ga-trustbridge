@@ -238,7 +238,7 @@ async def test_an_invalidation_during_a_mint_discards_the_stale_token(env: Env) 
     """The token minted across an invalidation is not cached; a fresh one is minted and cached."""
     _invalidating_mint(env, times=1)
     token = await env.tokens.token("github.com", 4242)
-    assert token == "ghs_2"  # the stale ghs_1 was never returned or cached
+    assert token == "ghs_2"  # noqa: S105 -- the stale ghs_1 was never returned or cached
     assert await env.tokens.token("github.com", 4242) == "ghs_2"
     assert env.mint_count == 2
 

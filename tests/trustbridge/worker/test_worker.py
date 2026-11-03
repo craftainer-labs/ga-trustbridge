@@ -10,6 +10,7 @@ import pytest
 
 from tests.trustbridge.worker.harness import Harness, WorkerDied, key
 from trustbridge.github.handlers import EventContext
+from trustbridge.worker.deliveries import DeliveryKey
 from trustbridge.worker.lease import LeaseBusy
 
 
@@ -137,7 +138,7 @@ async def test_a_host_that_is_not_ready_is_neither_handled_counted_nor_dead_lett
         await h.relay.resweep(0)
         await h.worker.run_once()
         h.advance(120)
-    row = await h.store.get(key("d1"))
+    row = await h.store.get(key("d1", "bad"))
     assert row is not None
     assert (row.status, row.attempts) == ("pending", 0)
     assert called == []
@@ -161,7 +162,9 @@ async def test_a_host_becoming_ready_re_adds_its_waiting_rows_without_the_period
     await h.hosts.recheck()  # the recheck: bad -> ready fires the on_ready hook
     await h.worker.run_once()
     assert called == ["d2", "d1"]
-    assert (await h.store.get(key("d1"))).status == "processed"  # type: ignore[union-attr]
+    ready = await h.store.get(key("d1", "bad"))
+    assert ready is not None
+    assert ready.status == "processed"
 
 
 async def test_a_worker_that_keeps_dying_dead_letters_by_stream_delivery_count() -> None:  # inv. 4
@@ -245,11 +248,11 @@ async def test_infrastructure_errors_re_add_the_entry_without_counting() -> None
     real_get = h.store.get
     boom = {"on": True}
 
-    async def flaky_get(delivery_id: str):  # type: ignore[no-untyped-def]  # noqa: ANN202
+    async def flaky_get(row_key: DeliveryKey):  # type: ignore[no-untyped-def]  # noqa: ANN202
         if boom["on"]:
             boom["on"] = False
             raise ConnectionError("postgres down")
-        return await real_get(delivery_id)
+        return await real_get(row_key)
 
     h.store.get = flaky_get  # type: ignore[method-assign]
     await h.worker.run_once()

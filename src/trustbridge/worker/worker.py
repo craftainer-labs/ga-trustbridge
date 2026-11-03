@@ -90,7 +90,8 @@ class Worker:
             await self._process(entry, from_pending=from_pending)
         except Exception:
             logger.exception(
-                "processing infrastructure error", extra={"host": entry.key.host, "delivery_id": entry.key.delivery_id},
+                "processing infrastructure error",
+                extra={"host": entry.key.host, "delivery_id": entry.key.delivery_id},
             )
             try:
                 await self._d.queue.add(entry.key)
@@ -152,7 +153,9 @@ class Worker:
         await self._d.queue.dead_letter(row.key, error)
         await self._d.queue.ack(entry.entry_id)
         metrics.deliveries_dead.add(1)
-        logger.error("delivery dead-lettered", extra={"host": row.host, "delivery_id": row.delivery_id})
+        logger.error(
+            "delivery dead-lettered", extra={"host": row.host, "delivery_id": row.delivery_id}
+        )
 
     async def _handle(self, row: DeliveryRecord) -> None:
         """Parse the stored body and dispatch it to the handlers registered for the event."""

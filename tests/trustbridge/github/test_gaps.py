@@ -244,7 +244,7 @@ async def test_installation_events_notify_the_callback_and_ignore_other_actions(
 
 async def test_repository_events_cover_unknown_tenants_and_metadata_changes() -> None:
     """No installation or an unknown tenant is ignored; metadata edits schedule a reconcile."""
-    handlers, tenants, scheduler, _ = _handlers(with_callback=False)
+    handlers, tenants, scheduler, _, _ = _handlers(with_callback=False)
     repo = {"id": 5, "full_name": "acme/web"}
     await handlers.on_repository(_ctx("repository", "renamed", {"repository": repo}))
     await handlers.on_repository(

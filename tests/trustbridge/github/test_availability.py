@@ -255,7 +255,7 @@ async def test_a_ready_host_is_probed_again_when_its_registration_changes() -> N
     assert checker.app_calls == 2
     assert mon.status("github.com").state is HostState.READY
     assert mon.config("github.com").app_id == 88
-    assert mon.config("github.com").webhook_secret_ref == "ref/webhook-2"
+    assert mon.config("github.com").webhook_secret_ref == "ref/webhook-2"  # noqa: S105 -- a ref
 
 
 async def test_a_ready_host_whose_new_registration_fails_the_probe_becomes_unavailable() -> None:
@@ -292,7 +292,7 @@ async def test_an_unreadable_signer_key_id_does_not_break_the_recheck() -> None:
     """A signer whose key id cannot be read is fingerprinted without it; the probe reports."""
 
     class Unreadable(KeySigner):
-        @property  # type: ignore[override]
+        @property
         def key_id(self) -> str:
             raise RuntimeError("key file missing")
 

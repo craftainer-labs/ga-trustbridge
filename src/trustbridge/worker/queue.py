@@ -1,9 +1,9 @@
 """The Valkey stream client (redis-py `redis.asyncio`, ADR 0013 and 0028 "Queue client").
 
-The stream `tb:events` carries delivery keys (`host` and `id`) only; Postgres is the source of truth. The
-dead-letter stream `tb:events:dead` carries `{host, delivery_id, error}` and no body. Everything
-here is the shared Redis protocol subset Valkey implements, kept behind this class so a
-client switch stays contained.
+The stream `tb:events` carries delivery keys (`host` and `id`) only; Postgres is the source of
+truth. The dead-letter stream `tb:events:dead` carries `{host, delivery_id, error}` and no body.
+Everything here is the shared Redis protocol subset Valkey implements, kept behind this class so
+a client switch stays contained.
 
 Trimming (invariant 6) removes only entries strictly below the smallest of every group's
 oldest pending entry and last-delivered id, so nothing unread or unacknowledged is lost,
