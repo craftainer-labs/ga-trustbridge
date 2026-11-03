@@ -561,6 +561,9 @@ class JFrogAdapter:
         for token in tokens:
             description = str(token.get("description") or "")
             if description.startswith(name) if prefix else description == name:
+                if not isinstance(token.get("token_id"), str):
+                    msg = "JFrog returned a token listing entry without token_id"
+                    raise AdapterError(False, msg)
                 found.append(token)
         return found
 

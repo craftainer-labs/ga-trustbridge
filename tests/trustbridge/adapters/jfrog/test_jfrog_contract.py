@@ -800,6 +800,18 @@ async def test_a_token_response_without_a_token_is_rejected() -> None:
     assert not err.value.retryable
 
 
+async def test_a_token_listing_entry_without_token_id_is_rejected() -> None:
+    """A matching entry with no `token_id` is a non-retryable `AdapterError`, not a KeyError."""
+    listing = {
+        "request": {"method": "GET", "path": "/access/api/v1/tokens"},
+        "response": {"status": 200, "json": {"tokens": [{"description": CONTEXT["cred_push"]}]}},
+    }
+    adapter = JFrogAdapter(config(), transport=Replay([listing]).transport(), clock=lambda: NOW)
+    with pytest.raises(AdapterError) as err:
+        await adapter.list_credentials(TENANT)
+    assert not err.value.retryable
+
+
 async def test_the_mapping_list_may_be_an_object_holding_the_array() -> None:
     """The listing shape is unconfirmed, so both an array and an object are accepted."""
     replay, adapter = build("credentials.json", "list_object_shape")
