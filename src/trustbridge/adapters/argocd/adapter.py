@@ -229,9 +229,7 @@ class ArgoCDAdapter:
         return Applied(Change(state), ResourceState(url, ref))
 
     @staticmethod
-    async def _existing(
-        c: KubeClient, path: str, what: str, *, managed: bool = False
-    ) -> JsonObj:
+    async def _existing(c: KubeClient, path: str, what: str, *, managed: bool = False) -> JsonObj:
         """GET an object that must exist; with `managed`, it must also be one we created."""
         found = await c.call("GET", path, accept=NOT_FOUND)
         if found.status_code == HTTP_NOT_FOUND:
