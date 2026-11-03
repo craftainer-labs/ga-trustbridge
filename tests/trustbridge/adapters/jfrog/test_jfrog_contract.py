@@ -821,14 +821,16 @@ async def test_a_malformed_token_listing_is_an_adapter_error(tokens: object) -> 
     assert not err.value.retryable
 
 
-async def test_malformed_entries_that_do_not_match_are_ignored() -> None:
+@pytest.mark.parametrize(
+    "body",
+    [{"tokens": [None, "x", {"token_id": 1}, {"description": "ci-token"}]}, {}],
+    ids=["unrelated-odd-entries", "no-tokens-key"],
+)
+async def test_unmatched_or_absent_token_entries_are_ignored(body: dict[str, object]) -> None:
     """The listing spans the whole instance; an unrelated odd entry must not block a tenant."""
     listing = {
         "request": {"method": "GET", "path": "/access/api/v1/tokens"},
-        "response": {
-            "status": 200,
-            "json": {"tokens": [None, "x", {"token_id": 1}, {"description": "ci-token"}]},
-        },
+        "response": {"status": 200, "json": body},
     }
     mappings = {
         "request": {
