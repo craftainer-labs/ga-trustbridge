@@ -364,9 +364,7 @@ async def test_ensure_credential_regrants_on_drift(scenario: str) -> None:
     assert outcome.credential is None
 
 
-@pytest.mark.parametrize(
-    "scenario", ["reissue_inactive", "reissue_expired", "reissue_already_gone"]
-)
+@pytest.mark.parametrize("scenario", ["reissue_inactive", "reissue_expired"])
 async def test_ensure_credential_reissues_an_unusable_token(scenario: str) -> None:
     """A deactivated or expired OAT is deleted (it counts toward the limit) and replaced."""
     replay, adapter = build("credentials.json", scenario)
@@ -383,6 +381,14 @@ async def test_ensure_credential_replaces_an_undelivered_token_whose_secret_is_l
     replay.assert_exhausted()
     assert outcome.change.state is ChangeState.UPDATED
     assert isinstance(outcome.credential, IssuedSecret)
+
+
+async def test_ensure_credential_tolerates_a_token_deleted_meanwhile() -> None:
+    """A 404 on the DELETE of a stale OAT (someone else removed it) does not stop the re-issue."""
+    replay, adapter = build("credentials.json", "reissue_already_gone")
+    outcome = await adapter.ensure_credential(PULL, CredentialState(PULL_SLOT))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UPDATED
 
 
 async def test_ensure_credential_without_a_current_slot_fails() -> None:

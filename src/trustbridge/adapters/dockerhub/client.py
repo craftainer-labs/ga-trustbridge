@@ -83,8 +83,8 @@ class DockerHubClient:
         json: JsonObj | None = None,
         params: dict[str, str] | None = None,
         accept: frozenset[int] = frozenset(),
-        bearer: str | None = None,
     ) -> httpx.Response:
+        bearer = self._bearer
         headers = {"Authorization": f"Bearer {bearer}"} if bearer is not None else {}
         try:
             response = await self._http.request(
@@ -119,9 +119,7 @@ class DockerHubClient:
         """Send a request; return on 2xx or a status in `accept`, otherwise raise `AdapterError`."""
         if self._bearer is None:
             self._bearer = await self._login()
-        return await self._send(
-            method, path, json=json, params=params, accept=accept, bearer=self._bearer
-        )
+        return await self._send(method, path, json=json, params=params, accept=accept)
 
 
 def json_object(response: httpx.Response) -> JsonObj:
