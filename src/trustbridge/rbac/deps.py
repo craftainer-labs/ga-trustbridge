@@ -98,8 +98,11 @@ def _deny(request: Request, principal: Principal, role: Role) -> HTTPException:
     return HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient role")
 
 
-def _tenant_not_found() -> HTTPException:
-    """One body for an unknown tenant and a tenant the caller has no grant on."""
+def _tenant_not_found(request: Request, principal: Principal) -> HTTPException:
+    """One body for an unknown tenant and a tenant the caller has no grant on (logged, not told)."""
+    logger.warning(
+        "Tenant not found or not granted for %s: sub=%r", request.url.path, principal.sub
+    )
     return HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
 
 
@@ -126,10 +129,12 @@ def require_role(
                 raise _deny(request, principal, role)
             yield Authorized(principal)
             return
-        tenant = await _find_tenant(request.path_params.get(tenant_param), runtime)
+        if tenant_param not in request.path_params:
+            raise RuntimeError(f"route has no path parameter {tenant_param!r}")
+        tenant = await _find_tenant(request.path_params[tenant_param], runtime)
         held = tenant_roles(principal, tenant) if tenant is not None else frozenset()
         if tenant is None or not held:
-            raise _tenant_not_found()
+            raise _tenant_not_found(request, principal)
         if role not in held:
             raise _deny(request, principal, role)
         with runtime.access.tenant_context(tenant.id):
@@ -143,6 +148,8 @@ async def _find_tenant(raw: object, runtime: RbacRuntime) -> TenantRef | None:
     try:
         tenant_id = UUID(str(raw))
     except ValueError:
+        return None
+    if str(raw).lower() != str(tenant_id):  # one spelling per tenant: no braces, urn: or bare hex
         return None
     for tenant in await runtime.access.list_tenants():
         if tenant.id == tenant_id:

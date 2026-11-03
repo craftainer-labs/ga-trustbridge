@@ -235,3 +235,33 @@ def test_context_exits_when_the_handler_raises() -> None:
     client = _client(app, "trustbridge:viewer", raise_errors=False)
     assert client.get(f"/t/{ACME.id}/boom").status_code == 500
     assert access.events[-1] == "exit"
+
+
+def test_non_canonical_tenant_id_spellings_are_404() -> None:
+    """One URL spelling per tenant: hex without hyphens and `urn:uuid:` forms are not found."""
+    client = _client(_app(FakeAccess([ACME])), "trustbridge:viewer")
+    for raw in (ACME.id.hex, f"urn:uuid:{ACME.id}", f"{{{ACME.id}}}"):
+        _problem(client.get(f"/t/{raw}/operator"), 404)
+    assert client.get(f"/t/{str(ACME.id).upper()}/operator").status_code == 200
+
+
+def test_not_found_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """A 404 leaves a server-side trace (the 403 path already did)."""
+    client = _client(_app(FakeAccess([ACME])), "junk")
+    with caplog.at_level("WARNING", logger="trustbridge.rbac.deps"):
+        _problem(client.get(f"/t/{ACME.id}/operator"), 404)
+    assert "Tenant not found or not granted" in caplog.text
+
+
+def test_missing_tenant_param_is_a_server_error_not_a_404() -> None:
+    """A route naming a path parameter it does not have is a configuration bug."""
+    app = _app(FakeAccess([ACME]))
+
+    @app.get("/typo")
+    async def typo(
+        _: Annotated[Authorized, Depends(require_role(Role.VIEWER, tenant_param="nope"))],
+    ) -> None:
+        return None
+
+    client = _client(app, "trustbridge:viewer", raise_errors=False)
+    assert client.get("/typo").status_code == 500
