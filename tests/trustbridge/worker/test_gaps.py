@@ -32,10 +32,12 @@ def test_stream_replies_are_normalised_from_either_protocol_shape() -> None:
             ("5-0", {"id": "no-host"}),
         ]
     }
-    assert _entries(resp3) == [StreamEntry("1-0", key("a"))]
+    orphans: list[str] = []
+    assert _entries(resp3, orphans) == [StreamEntry("1-0", key("a"))]
+    assert orphans == ["3-0", "5-0"]  # no `id` / no `host`: old format, to be acked
     raw = [["tb:events", [(b"4-0", {b"id": b"b", b"host": b"ok"})]]]
-    assert _entries(raw) == [StreamEntry("4-0", key("b"))]
-    assert _entries(None) == []
+    assert _entries(raw, []) == [StreamEntry("4-0", key("b"))]
+    assert _entries(None, []) == []
 
 
 class _NoGroupRedis(FakeRedis):
@@ -141,7 +143,17 @@ async def test_the_memory_store_deduplicates_keys_and_bodies_per_host() -> None:
     assert await store.insert(NewDelivery("d1", "h", "push", {}, b"b", now)) is False
     assert await store.insert(NewDelivery("d2", "h", "push", {}, b"a", now)) is False  # replay
     assert await store.insert(NewDelivery("d1", "h2", "push", {}, b"a", now)) is True
-    assert sorted(store.rows) == [DeliveryKey("h", "d1"), DeliveryKey("h2", "d1")]
+    assert sorted(store.rows) == [
+        DeliveryKey("h", "d1"),
+        DeliveryKey("h", "d2"),
+        DeliveryKey("h2", "d1"),
+    ]
+    marker = store.rows[DeliveryKey("h", "d2")]  # the replay keeps a terminal row, hash NULL
+    assert (marker.status, marker.body, marker.body_sha256) == ("processed", None, None)
+    assert marker.last_error == "duplicate body of delivery d1"
+    assert await store.existing_keys([marker.key]) == {marker.key}  # the reconciler skips it
+    assert await store.insert(NewDelivery("d2", "h", "push", {}, b"zzz", now)) is False
+    assert await store.insert(NewDelivery("d3", "h", "push", {}, b"a", now)) is False
 
 
 async def test_the_memory_store_ignores_unknown_ids_and_settled_rows() -> None:

@@ -330,12 +330,12 @@ class Store:
         self.names: dict[tuple[UUID, int], str] = {}
 
     async def upsert_installation(
-        self, host: str, installation_id: int, org: str, org_id: int
+        self, host: str, installation_id: int, org: str, org_id: int, *, suspended: bool = False
     ) -> UUID:
         """Create the tenant."""
         del org, org_id
         tenant = self.tenants.setdefault((host, installation_id), uuid4())
-        self.states[tenant] = "active"
+        self.states[tenant] = "suspended" if suspended else "active"
         return tenant
 
     async def tenant_id_for(self, host: str, installation_id: int) -> UUID | None:

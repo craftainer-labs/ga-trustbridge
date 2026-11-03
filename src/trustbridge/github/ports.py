@@ -59,9 +59,12 @@ class InstallationStore(Protocol):
     """Tenant bookkeeping driven by installation lifecycle events (NG3's tenants table)."""
 
     async def upsert_installation(
-        self, host: str, installation_id: int, org: str, org_id: int
+        self, host: str, installation_id: int, org: str, org_id: int, *, suspended: bool = False
     ) -> UUID:
-        """Create or update the tenant for `(host, installation_id)` and return its id."""
+        """Create or update the tenant for `(host, installation_id)` and return its id.
+
+        The state is written in the same statement: `suspended` or else `active`.
+        """
         ...
 
     async def tenant_id_for(self, host: str, installation_id: int) -> UUID | None:

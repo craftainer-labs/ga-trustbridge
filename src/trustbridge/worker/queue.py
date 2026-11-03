@@ -46,8 +46,11 @@ def _id_key(entry_id: str) -> tuple[int, int]:
     return int(ms), int(seq or 0)
 
 
-def _entries(raw: Any) -> list[StreamEntry]:  # noqa: ANN401 -- redis-py reply shapes
-    """Normalise the reply of XREADGROUP (RESP2 list or RESP3 dict) / XAUTOCLAIM items."""
+def _entries(raw: Any, orphans: list[str]) -> list[StreamEntry]:  # noqa: ANN401 -- redis-py reply shapes
+    """Normalise the reply of XREADGROUP (RESP2 list or RESP3 dict) / XAUTOCLAIM items.
+
+    Ids of entries without a `host` (the old `{id}`-only format) are appended to `orphans`.
+    """
     items: list[tuple[Any, Any]] = []
     if isinstance(raw, dict):
         for stream_entries in raw.values():
@@ -63,6 +66,8 @@ def _entries(raw: Any) -> list[StreamEntry]:  # noqa: ANN401 -- redis-py reply s
         mapping = {_text(k): _text(v) for k, v in fields.items()}
         if "id" in mapping and "host" in mapping:
             found.append(StreamEntry(_text(entry_id), DeliveryKey(mapping["host"], mapping["id"])))
+        else:
+            orphans.append(_text(entry_id))
     return found
 
 
@@ -100,7 +105,7 @@ class StreamQueue:
         raw = await self._r.xreadgroup(
             self.group, consumer, {self.stream: ">"}, count=count, block=block_ms
         )
-        return _entries(raw)
+        return await self._usable(raw)
 
     async def claim_stale(
         self, consumer: str, *, min_idle_ms: int, count: int
@@ -115,7 +120,16 @@ class StreamQueue:
             count=count,
         )
         items = raw[1] if len(raw) > 1 else []
-        return _entries([(self.stream, items)])
+        return await self._usable([(self.stream, items)])
+
+    async def _usable(self, raw: Any) -> list[StreamEntry]:  # noqa: ANN401 -- redis-py reply shapes
+        """The well-formed entries of a reply; old-format ones are acked so they leave the PEL."""
+        orphans: list[str] = []
+        found = _entries(raw, orphans)
+        for entry_id in orphans:
+            logger.warning("acking stream entry %s without a host (old format)", entry_id)
+            await self.ack(entry_id)
+        return found
 
     async def delivery_count(self, entry_id: str) -> int:
         """How many times the stream has delivered `entry_id` (1 for a fresh read)."""

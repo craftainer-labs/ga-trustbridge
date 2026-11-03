@@ -38,6 +38,15 @@ def public_key_fingerprint(public_pem: bytes) -> str:
     return "sha256:" + hashlib.sha256(der).hexdigest()
 
 
+def _fsync_dir(directory: Path) -> None:
+    """Flush a directory entry (the rename) to disk."""
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class FileSigner:
     """Signs with a private key read from a PEM file whose permissions are checked.
 
@@ -107,7 +116,10 @@ class FileSigner:
                 raise
             with handle:
                 handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
             tmp.replace(self._path)
+            _fsync_dir(self._path.parent)
         except OSError as exc:
             tmp.unlink(missing_ok=True)
             msg = f"cannot write the signer key file {self._path}"

@@ -7,6 +7,7 @@ tests; the Postgres store is covered by the integration tests.
 """
 
 import hashlib
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -14,14 +15,18 @@ from typing import Literal, NamedTuple, Protocol
 
 from sqlalchemy import ColumnElement, and_, delete, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.worker.models import WebhookDelivery
+
+_log = logging.getLogger(__name__)
 
 RelayMode = Literal["tick", "resweep", "host"]
 PENDING = "pending"
 PROCESSED = "processed"
 DEAD = "dead"
+DUPLICATE_BODY = "duplicate body of delivery"  # `last_error` of a terminal replay-marker row
 
 
 class DeliveryKey(NamedTuple):
@@ -82,10 +87,13 @@ class DeliveryStore(Protocol):
     """Persistence of the outbox; every method commits before it returns."""
 
     async def insert(self, delivery: NewDelivery) -> bool:
-        """Store a delivery; False (and no second row) if its `(host, id)` or body hash exists.
+        """Store a delivery; False if its `(host, id)` or body hash already exists.
 
         `X-GitHub-Delivery` is not covered by the HMAC signature, so the same signed body
         replayed under a fresh delivery id is also a duplicate (per host, for the row's life).
+        A replayed body still gets a row for its own id, already `processed`, with no body and
+        `body_sha256` NULL (NULLs never conflict) and `last_error` naming the first delivery,
+        so the reconciler sees the GUID as received and never asks for it again.
         """
         ...
 
@@ -187,9 +195,31 @@ class InMemoryDeliveryStore:
     async def insert(self, delivery: NewDelivery) -> bool:
         """Store a delivery unless its `(host, id)` or its body hash exists on that host."""
         digest = delivery.body_sha256
-        if delivery.key in self.rows or any(
-            r.host == delivery.host and r.body_sha256 == digest for r in self.rows.values()
-        ):
+        if delivery.key in self.rows:
+            return False
+        first = next(
+            (r for r in self.rows.values() if r.host == delivery.host and r.body_sha256 == digest),
+            None,
+        )
+        if first is not None:
+            _log.warning(
+                "replayed webhook body on %s: delivery %s repeats delivery %s",
+                delivery.host,
+                delivery.delivery_id,
+                first.delivery_id,
+            )
+            self.rows[delivery.key] = DeliveryRecord(
+                delivery_id=delivery.delivery_id,
+                host=delivery.host,
+                event=delivery.event,
+                headers=dict(delivery.headers),
+                body=None,
+                received_at=delivery.received_at,
+                status=PROCESSED,
+                processed_at=delivery.received_at,
+                last_error=f"{DUPLICATE_BODY} {first.delivery_id}",
+                body_sha256=None,
+            )
             return False
         self.rows[delivery.key] = DeliveryRecord(
             delivery_id=delivery.delivery_id,
@@ -345,23 +375,67 @@ class PgDeliveryStore:
         self._sf = session_factory
 
     async def insert(self, delivery: NewDelivery) -> bool:
-        """`INSERT .. ON CONFLICT DO NOTHING` (any unique key); True when a row was created."""
+        """Insert `(host, id)`; True when a new row is created, False for a redelivery or replay.
+
+        The same id is a redelivery (`ON CONFLICT (host, delivery_id) DO NOTHING`). A body
+        already stored under another id is a replay: it is logged with the first id and gets a
+        terminal marker row instead. Two concurrent first inserts of one body race on the
+        `(host, body_sha256)` index; the loser retries once and takes the replay path.
+        """
+        for _ in range(2):
+            try:
+                async with self._sf() as session, session.begin():
+                    return await self._insert_once(session, delivery)
+            except IntegrityError:
+                continue  # lost the body-hash race: the first row exists now
+        async with self._sf() as session, session.begin():
+            return await self._insert_once(session, delivery)
+
+    @staticmethod
+    async def _insert_once(session: AsyncSession, delivery: NewDelivery) -> bool:
+        digest = delivery.body_sha256
+        first = (
+            await session.scalars(
+                select(WebhookDelivery.delivery_id).where(
+                    WebhookDelivery.host == delivery.host, WebhookDelivery.body_sha256 == digest
+                )
+            )
+        ).first()
+        base = {
+            "delivery_id": delivery.delivery_id,
+            "host": delivery.host,
+            "event": delivery.event,
+            "headers": delivery.headers,
+            "received_at": delivery.received_at,
+        }
+        if first is not None and first != delivery.delivery_id:
+            _log.warning(
+                "replayed webhook body on %s: delivery %s repeats delivery %s",
+                delivery.host,
+                delivery.delivery_id,
+                first,
+            )
+            marker = (
+                pg_insert(WebhookDelivery)
+                .values(
+                    **base,
+                    body=None,
+                    status=PROCESSED,
+                    processed_at=delivery.received_at,
+                    last_error=f"{DUPLICATE_BODY} {first}",
+                    body_sha256=None,
+                )
+                .on_conflict_do_nothing(index_elements=["host", "delivery_id"])
+            )
+            await session.execute(marker)
+            return False
         stmt = (
             pg_insert(WebhookDelivery)
-            .values(
-                delivery_id=delivery.delivery_id,
-                host=delivery.host,
-                event=delivery.event,
-                headers=delivery.headers,
-                body=delivery.body,
-                received_at=delivery.received_at,
-                body_sha256=delivery.body_sha256,
-            )
-            .on_conflict_do_nothing()  # the primary key or the (host, body_sha256) index
+            .values(**base, body=delivery.body, body_sha256=digest)
+            .on_conflict_do_nothing(index_elements=["host", "delivery_id"])
             .returning(WebhookDelivery.delivery_id)
         )
-        async with self._sf() as session, session.begin():
-            return (await session.execute(stmt)).first() is not None
+        return (await session.execute(stmt)).first() is not None
 
     async def get(self, key: DeliveryKey) -> DeliveryRecord | None:
         """Load a row."""

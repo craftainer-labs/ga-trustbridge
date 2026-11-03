@@ -139,7 +139,11 @@ async def test_a_replayed_body_under_a_new_delivery_id_is_a_duplicate(ids: list[
     ids.append(replay.delivery_id)
     assert await store.insert(first) is True
     assert await store.insert(replay) is False
-    assert await store.get(replay.key) is None
+    marker = await store.get(replay.key)  # a terminal marker, so the reconciler skips the GUID
+    assert marker is not None
+    assert (marker.status, marker.body, marker.body_sha256) == ("processed", None, None)
+    assert marker.last_error == f"duplicate body of delivery {first.delivery_id}"
+    assert await store.existing_keys([replay.key]) == {replay.key}
     assert await store.insert(first) is False  # the same id is still a duplicate
     elsewhere = NewDelivery(
         replay.delivery_id, f"{host}-2", "push", {}, first.body, datetime.now(UTC)

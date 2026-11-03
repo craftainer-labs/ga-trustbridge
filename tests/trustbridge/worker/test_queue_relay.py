@@ -139,3 +139,16 @@ async def test_lag_is_none_when_the_server_does_not_report_it() -> None:
     """Lag is none when the server does not report it."""
     queue = StreamQueue(as_redis(FakeRedis()))
     assert await queue.lag() is None
+
+
+async def test_an_old_format_entry_without_a_host_is_acked_not_left_pending(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An entry written as `{id}` only is acked with a warning, so it cannot block trimming."""
+    valkey, queue = await _filled(1)
+    await valkey.xadd("tb:events", {"id": "legacy"})
+    entries = await queue.read("c", count=10, block_ms=0)
+    assert [e.key.delivery_id for e in entries] == ["d0"]
+    assert "without a host" in caplog.text
+    pending = await valkey.xpending("tb:events", "tb-workers")
+    assert pending["pending"] == 1  # only the well-formed entry is still pending

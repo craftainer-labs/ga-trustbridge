@@ -288,6 +288,35 @@ async def test_a_ready_host_is_probed_again_when_its_signer_key_changes() -> Non
     assert mon.status("github.com").state is HostState.READY
 
 
+async def test_a_key_rotated_during_the_probe_is_probed_again() -> None:
+    """The fingerprint is taken before the probe, so a change meanwhile re-probes next time."""
+    signer = KeySigner()
+
+    class Rotating(FakeChecker):
+        async def get_app_id(self, host: GitHubHostConfig, jwt: str) -> int:
+            signer.key_id = "rotated-mid-probe"
+            return await super().get_app_id(host, jwt)
+
+    checker = Rotating(app_id=77)
+    mon = HostMonitor([make_host_config()], {"main": signer}, MonitorDeps(checker=checker))
+    await mon.check_all()
+    assert checker.app_calls == 1
+    await mon.recheck()
+    assert checker.app_calls == 2
+    await mon.recheck()
+    assert checker.app_calls == 2  # settled: the new key id is what was probed
+
+
+async def test_a_failed_probe_is_not_recorded_as_probed() -> None:
+    """Only a passed probe records the fingerprint; the host stays unavailable and is retried."""
+    checker = FakeChecker(app_id=1)  # GitHub reports another App id than configured
+    mon = HostMonitor([make_host_config()], {"main": KeySigner()}, MonitorDeps(checker=checker))
+    await mon.check_all()
+    assert mon.status("github.com").state is HostState.UNAVAILABLE
+    await mon.recheck()
+    assert checker.app_calls == 2
+
+
 async def test_an_unreadable_signer_key_id_does_not_break_the_recheck() -> None:
     """A signer whose key id cannot be read is fingerprinted without it; the probe reports."""
 

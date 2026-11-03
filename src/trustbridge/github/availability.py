@@ -227,16 +227,19 @@ class HostMonitor:
             n
             for n, s in self._status.items()
             if s.state is not HostState.READY
-            or self._fingerprint(effective_config(self._base[n], registrations))
+            or await self._fingerprint(effective_config(self._base[n], registrations))
             != self._probed.get(n)
         ]
         await self._check(pending, registrations)
 
-    def _fingerprint(self, cfg: GitHubHostConfig) -> Fingerprint:
-        """The effective config plus the signer's key id, which a rotation changes."""
+    async def _fingerprint(self, cfg: GitHubHostConfig) -> Fingerprint:
+        """The effective config plus the signer's key id, which a rotation changes.
+
+        `key_id` may read the key file, so it runs off the event loop.
+        """
         signer = self._signers.get(cfg.signer)
         try:
-            key_id = None if signer is None else signer.key_id
+            key_id = None if signer is None else await asyncio.to_thread(lambda: signer.key_id)
         except Exception:
             key_id = None  # an unreadable key surfaces in the probe, not here
         return cfg, key_id
@@ -262,10 +265,12 @@ class HostMonitor:
         for name in names:
             cfg = effective_config(self._base[name], registrations)
             self._config[name] = cfg
-            self._probed[name] = self._fingerprint(cfg)
+            fingerprint = await self._fingerprint(cfg)  # taken before the probe it describes
             before = self._status[name]
             after = await self._check_host(cfg)
             self._status[name] = after
+            if after.state is HostState.READY:
+                self._probed[name] = fingerprint  # only a passed probe; a change meanwhile re-probes
             if after.state is HostState.READY and before.state is not HostState.READY:
                 await self._notify_ready(cfg)
 

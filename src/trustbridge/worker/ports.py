@@ -75,15 +75,16 @@ class SqlTenants:
         self._hosts = hosts
 
     async def upsert_installation(
-        self, host: str, installation_id: int, org: str, org_id: int
+        self, host: str, installation_id: int, org: str, org_id: int, *, suspended: bool = False
     ) -> UUID:
-        """Create or update (and re-activate) the tenant of `(host, installation_id)`."""
+        """Create or update the tenant of `(host, installation_id)` as `suspended` or `active`."""
+        state = "suspended" if suspended else "active"
         insert = pg_insert(TenantRow).values(
-            host=host, installation_id=installation_id, org=org, org_id=org_id, state="active"
+            host=host, installation_id=installation_id, org=org, org_id=org_id, state=state
         )
         upsert = insert.on_conflict_do_update(
             constraint="uq_tenants_host_inst",
-            set_={"org": org, "org_id": org_id, "state": "active"},
+            set_={"org": org, "org_id": org_id, "state": state},
         ).returning(TenantRow.id)
         async with self._sf() as session, session.begin():
             tenant_id: UUID = (await session.execute(upsert)).scalar_one()
@@ -177,16 +178,16 @@ class MemoryTenants:
         self.repositories: dict[UUID, dict[int, str]] = {}
 
     async def upsert_installation(
-        self, host: str, installation_id: int, org: str, org_id: int
+        self, host: str, installation_id: int, org: str, org_id: int, *, suspended: bool = False
     ) -> UUID:
-        """Create or update (and re-activate) the tenant."""
+        """Create or update the tenant as `suspended` or `active`."""
         tenant_id = self._by_key.setdefault((host, installation_id), uuid4())
         self._rows[tenant_id] = {
             "host": host,
             "installation_id": installation_id,
             "org": org,
             "org_id": org_id,
-            "state": "active",
+            "state": "suspended" if suspended else "active",
         }
         return tenant_id
 

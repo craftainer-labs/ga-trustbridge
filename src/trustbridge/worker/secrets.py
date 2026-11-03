@@ -26,7 +26,9 @@ class SecretNotFound(SecretUnavailable):
     """A `store:` secret that is definitely absent (the store answered; nothing is there).
 
     A subclass of `SecretUnavailable`, so callers that treat both alike keep working; callers
-    that must tell "absent" from "store down" (read-modify-write) catch this one only.
+    that must tell "absent" from "store down" (read-modify-write) catch this one only. Every
+    backend must raise this for an absent ref: a plain `SecretUnavailable` is treated as an
+    outage and fails closed.
     """
 
 

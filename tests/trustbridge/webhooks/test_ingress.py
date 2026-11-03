@@ -132,7 +132,9 @@ async def test_a_replayed_body_under_a_new_delivery_id_is_a_duplicate(tb: Setup)
     replay = await tb.post(delivery="d-2")
     assert replay.status_code == 202
     assert replay.json() == {"status": "duplicate"}
-    assert list(tb.store.rows) == [DeliveryKey("ok", "d-1")]
+    assert list(tb.store.rows) == [DeliveryKey("ok", "d-1"), DeliveryKey("ok", "d-2")]
+    marker = tb.store.rows[DeliveryKey("ok", "d-2")]  # terminal: the reconciler sees it received
+    assert (marker.status, marker.body, marker.body_sha256) == ("processed", None, None)
     other = await tb.post("bad", delivery="d-2", signed_with="other")  # another host: own window
     assert other.json() == {"status": "accepted"}
 

@@ -122,10 +122,12 @@ class InstallationHandlers:
             self._notify(ctx.host, installation_id)
             return
         tenant_id = await self._store.upsert_installation(
-            ctx.host, installation_id, info.login or login, info.account_id or acct
+            ctx.host,
+            installation_id,
+            info.login or login,
+            info.account_id or acct,
+            suspended=info.suspended,
         )
-        if info.suspended:
-            await self._store.set_installation_state(ctx.host, installation_id, "suspended")
         if ctx.action == "created":
             await self._store.apply_repository_changes(
                 tenant_id, self._repos(ctx.payload.get("repositories")), []
