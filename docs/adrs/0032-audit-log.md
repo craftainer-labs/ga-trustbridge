@@ -45,7 +45,8 @@ One table, `audit_events`, one row per event, written by trustbridge code only:
 | --- | --- |
 | `id` | UUID, the event's public identifier |
 | `seq` | `bigint GENERATED ALWAYS AS IDENTITY`; the export cursor (see "Export") |
-| `occurred_at` | `timestamptz`, set by the database (`now()`), never by the caller |
+| `occurred_at` | `timestamptz`, set by the database (`now()`, the transaction start), never by the caller |
+| `recorded_at` | `timestamptz DEFAULT clock_timestamp()`, the insert time; the export's lag filter uses it |
 | `tenant_id` | nullable UUID; no foreign key, so events outlive a tenant row |
 | `actor_type` | `user` or `system` |
 | `actor_sub`, `actor_iss` | for `user`: the token's `sub` and `iss`, the durable id. Never email, handle or display name (EB-1). For `system`: a fixed name (`worker`, `reconciler`, `github-webhook`, `migrate`) and `actor_iss` null |
@@ -62,7 +63,11 @@ One table, `audit_events`, one row per event, written by trustbridge code only:
 
 - Every mutating admin API call, success, failure and denial, with before/after.
 - Every authorization denial of an authenticated principal (`authz.denied`: role missing,
-  tenant not granted).
+  tenant not granted, including a request answered 404 for a tenant the principal has no
+  grant on). A denial is written in its own transaction with **a null `tenant_id`** (no
+  tenant context exists at that point and the insert policy permits a null tenant), and the
+  requested tenant id in `resource_id` with `resource_type = tenant`; only instance-scoped
+  auditors see denials.
 - Credential events: issue, rotate begin and finish, revoke, abandoned operation, orphan
   deleted by the sweep, and each OIDC trust created or removed. Metadata only; never a value.
 - Configuration events: tenant state changes by installation events (`_sync`), host
@@ -106,7 +111,10 @@ Three layers, from the database outward:
    trigger.
 
 RLS (0031) is enabled and forced on `audit_events` from creation (a new table, so no previous
-release touches it). Its policies: `INSERT` with `tenant_id` equal to the context tenant or
+release touches it; 0031 lists it as a seventh RLS table). Its policies: an `owner_all` policy
+for `trustbridge_owner` (the definer functions `tb_audit_purge` and `tb_audit_list` run as the
+owner and need it, and the append-only trigger still gates the owner's changes), and for the
+app role `INSERT` with `tenant_id` equal to the context tenant or
 null; `SELECT` of rows whose `tenant_id` equals the context tenant. Reading events with a null
 `tenant_id`, or across tenants (instance-scoped auditors), goes through
 `tb_audit_list(filters...)`, a `SECURITY DEFINER` function with the same shape and the same
@@ -114,9 +122,12 @@ caveat as 0031's functions; the API calls it only for an instance-scoped role.
 
 ### Read scope
 
-Reads are served by the admin API (0033). A tenant-scoped `auditor` or `admin` reads only that
-tenant's events; an instance-scoped `auditor` reads all events including those with a null
-tenant. An auditor's reads are themselves not audited per row, but an export request is
+Reads are served by the admin API (0033). Only the `auditor` role reads audit (0033: an `admin` or
+`operator` without `auditor` gets 403; separation of duties). A tenant-scoped `auditor` reads
+that tenant's events through the tenant-scoped routes `GET /admin/v1/tenants/{t}/audit-events`
+and `.../export`, which set the tenant context; an instance-scoped `auditor` reads across
+tenants, including events with a null tenant, through `GET /admin/v1/audit-events` and its
+export, which call `tb_audit_list`. An auditor's reads are themselves not audited per row, but an export request is
 (above). No role can write, edit or delete an event through the API; there is no such endpoint.
 
 ### Export
@@ -125,10 +136,13 @@ The transport is user decision 2 below. The export is:
 
 - **Ordered and resumable** by `seq`, one JSON object per event with the columns above.
 - **Lag-bounded.** Because identity values can commit out of order (a transaction with a lower
-  `seq` can become visible after one with a higher `seq`), an export returns only events
-  older than `AUDIT_EXPORT_LAG_SECONDS` (default 30), so a SIEM that resumes from the last
-  `seq` does not skip a late commit. This is a stated consistency model, not a guarantee of
-  real-time delivery.
+  `seq` can become visible after one with a higher `seq`), an export returns only events whose
+  `recorded_at` is older than `AUDIT_EXPORT_LAG_SECONDS` (default 30), so a SIEM that resumes
+  from the last `seq` does not skip a late commit. The guarantee holds only if no
+  audit-writing transaction stays open longer than the lag, so the admin API, the worker and
+  the deletion batches run with a `transaction_timeout` (or `statement_timeout` plus
+  `idle_in_transaction_session_timeout`) below the lag, and the lag is validated at startup
+  against that timeout. This is a stated consistency model, not real-time delivery.
 - **Filtered by scope** (the reader's tenants) and by a time or `seq` range.
 - Itself audited.
 
@@ -209,15 +223,20 @@ with the app role.
    mutating routes and fails for one with no emitter.
 9. A mutating call's event commits with its change, and a change that rolls back leaves no
    `success` event (it may leave a `failure` event in its own transaction).
-10. An `authz.denied` event carries the denied principal's `sub` and the missing role or
-    tenant, and an unauthenticated rejection creates a log line and metric but, no row.
+10. An `authz.denied` event, including one for a tenant answered 404, carries the denied
+    principal's `sub` and the missing role or the requested tenant id (in `resource_id`, with a
+    null `tenant_id`), and an unauthenticated rejection creates a log line and metric but, no row.
 
 **Scope and export**
 
-11. A tenant-scoped reader sees only its tenant's events (including through the export), never
-    events of another tenant or events with a null tenant; an instance-scoped reader sees all.
+11. A tenant-scoped `auditor` sees only its tenant's events through the tenant-scoped routes
+    (including the export), never events of another tenant or with a null tenant; an
+    instance-scoped `auditor` sees all; a principal with `admin` or `operator` but not
+    `auditor` gets 403 on every audit route.
 12. The export is ordered by `seq`, resumable from the last `seq` without gaps or repeats, and
-    returns no event newer than `AUDIT_EXPORT_LAG_SECONDS`.
+    returns no event whose `recorded_at` is newer than `AUDIT_EXPORT_LAG_SECONDS`, including
+    when a long-running transaction commits late (and a transaction longer than the lag is
+    aborted by the timeout).
 13. An export request writes its own event naming the reader and the range.
 14. No API route writes, updates or deletes an audit event.
 
@@ -233,7 +252,7 @@ with the app role.
 - **Volume.** A busy instance writes one row per mutating call and per credential event;
   partitioning `audit_events` by month (so a purge is a partition drop) is deferred until a
   size is measured. It needs an expand migration and a change to the purge function only.
-- **Clock.** `occurred_at` is the database clock; skew between replicas is irrelevant, but
+- **Clock.** `occurred_at` and `recorded_at` are the database clock; skew between replicas is irrelevant, but
   the SIEM correlation with log timestamps from pods is by `request_id`, not time.
 - **GitHub-originated actors.** A webhook-driven change records the GitHub sender's numeric
   id in `on_behalf_of`; mapping it to a person is the SIEM's or the customer's job.

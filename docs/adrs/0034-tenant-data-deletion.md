@@ -64,10 +64,12 @@ reconciler resumes a non-terminal deletion.
 
 A request is rejected (409 Problem Details) unless all hold:
 
-1. The tenant is **admin-disabled** (0033), so no new adapter operation or handler runs.
+1. The tenant is **admin-disabled** (0033), so no handler runs and no new adapter operation
+   starts other than this deletion's own delete and revoke operations (the one exception to the
+   disable gate, in 0031 and 0033).
 2. The request body **echoes the tenant's host, installation id and organisation login**
-   (a typed confirmation of an irreversible action) and carries a reason (recorded in the
-   audit).
+   (a typed confirmation of an irreversible action), which is checked and **not stored**, and
+   carries a reason (recorded in the audit).
 3. No other deletion for the tenant is non-terminal (a duplicate returns it instead).
 4. The caller has `admin` at instance scope. A tenant-scoped role cannot delete.
 
@@ -94,7 +96,8 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    `operator_owned`, for the operator to remove. (User decision 4: it keeps the API from gaining any write path to that store.)
 5. **Database.** In the tenant's context (0031), in batches and in the order
    `credential_operations`, `adapter_credentials`, `adapter_resources`, `scope_leases`,
-   `tenant_repositories`, then the `tenants` row last, each batch its own transaction and
+   `tenant_repositories`, then the `tenants` row last through `tb_delete_tenant` (0031; the app
+   role has no `DELETE` on `tenants`), each batch its own transaction and
    counted. Webhook bodies are cleared for deliveries recorded for the tenant: an expand
    migration adds a nullable `tenant_id` to `webhook_deliveries`, set by the worker when it
    resolves the delivery; deletion nulls `body` (keeping the row for deduplication, as the
@@ -112,8 +115,9 @@ singleton duty (EB-6). There is no cancel after the first destructive step; befo
 
 ### The audit trail of the deletion
 
-Events (0032) are written by the deletion itself: `tenant.deletion.requested` (who, reason, the
-echoed identifiers, `before` = the tenant's non-secret summary), one `tenant.deletion.step`
+Events (0032) are written by the deletion itself: `tenant.deletion.requested` (who, reason, and the tenant id,
+host and installation id; **no organisation login and no tenant content**, `before` is ids,
+states and counts only, so nothing identifying survives in the append-only trail), one `tenant.deletion.step`
 per completed step with counts, `tenant.deletion.skipped` per skipped category, and
 `tenant.deletion.completed`. They carry the tenant id, are inserted in the same transaction as
 the step they record, and **survive the deletion**: `audit_events` has no foreign key to the
@@ -203,7 +207,9 @@ adapter fakes.
 13. `audit_events` rows of other tenants and the host-scoped tables are unchanged by a
     deletion, and the deletion of tenant A never runs with another tenant's context (0031
     invariants 1, 2, 11).
-14. The audit purge removes the deletion's events only after retention, and the append-only
+14. No `tenant.deletion.*` event or `tenant_deletions` column contains the organisation login
+    or other tenant content, and the confirmation is verified without being stored; the audit
+    purge removes the deletion's events only after retention, and the append-only
     triggers still reject updates and deletes of those rows for the app role.
 
 **Failure policy**

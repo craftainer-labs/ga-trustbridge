@@ -107,7 +107,8 @@ and `admin_disable_reason`, all separate from `state`. `tb_upsert_tenant` and th
 `_sync` (0031) never write them. A tenant is **effective-active** only when `state = 'active'`
 and `admin_disabled_at IS NULL`. A disabled tenant: its webhooks are stored and acknowledged
 but their handlers are skipped (left unprocessed, like a delivery waiting for a host that is not
-ready, 0028 item 3, and re-relayed when it is enabled again); no new adapter operation starts;
+ready, 0028 item 3, and re-relayed when it is enabled again); no new adapter operation starts (except the adapter delete and revoke operations of a
+deletion in progress, 0034);
 in-flight operations finish or are abandoned by the normal rules; the admin API still reads it.
 It is reversible (`enable`), audited, and needs the `admin` role at instance scope. A tenant
 with a non-terminal deletion (0034) cannot be enabled.
@@ -222,8 +223,8 @@ Read-only (NG6d):
 | `GET /tenants/{t}/resources`, `/credentials` (state and timestamps, never a value), `/operations` | tenant | viewer |
 | `GET /deliveries`, `GET /deliveries/{host}/{id}` (status, attempts, error; body only for `operator`) | instance | viewer |
 | `GET /tenant-deletions`, `GET /tenant-deletions/{id}` (0034) | instance | viewer |
-| `GET /audit-events`, `GET /audit-events/{id}` | per grants | auditor |
-| `GET /audit-events/export` (NDJSON, 0032) | per grants | auditor |
+| `GET /tenants/{t}/audit-events`, `GET /tenants/{t}/audit-events/export` (NDJSON, 0032) | tenant | auditor |
+| `GET /audit-events`, `GET /audit-events/{id}`, `GET /audit-events/export` (all tenants and null-tenant events) | instance | auditor |
 | `GET /openapi.json` | any | any |
 
 Mutating (NG6e):
@@ -233,7 +234,8 @@ Mutating (NG6e):
 | `POST /deliveries/{host}/{id}/requeue` | instance | operator |
 | `POST /tenants/{t}/reconcile` | tenant | operator |
 | `POST /tenants/{t}/credentials/{id}/rotate` | tenant | operator |
-| `POST /hosts/{host}/registration` (start the manifest flow), `POST /hosts/{host}/registration/manual` (App id, PEM, webhook secret; 0030) | instance | admin |
+| `POST /hosts/{host}/registration` (start the manifest flow) | instance | operator |
+| `POST /hosts/{host}/registration/manual` (App id, PEM, webhook secret; 0030) | instance | admin |
 | `POST /tenants/{t}/disable`, `POST /tenants/{t}/enable` | instance | admin |
 | `POST /tenants/{t}/deletion` (0034; the tenant must be disabled), `POST /tenant-deletions/{id}/cancel` (before the first destructive step) | instance | admin |
 | `POST /tenant-deletions/{id}/skip-step` (0034, user decision 2) | instance | admin |
@@ -317,11 +319,15 @@ and are aliased as the user asked.
 tenant), user decision 4. Personas are bare names, so they can only grant instance scope. A
 principal's roles are the union of its namespaced roles and its aliased personas.
 
-**Matrix** (by assignment, not hierarchy: a user needing two roles holds two): `viewer` reads
-operational data except audit; `auditor` adds audit list and export and mutates nothing;
-`operator` adds requeue, reconcile, rotate and registration start; `admin` adds registration
-upload, tenant disable and enable, and tenant data deletion (0034). Separation of duties: the
-operator who changes things is not the auditor who reads the audit.
+**Matrix and "Min role".** The effective permissions form a ladder plus one branch: `viewer`
+reads operational data except audit; `operator` includes `viewer` and adds requeue, reconcile,
+rotate and registration start; `admin` includes `operator` and adds registration upload,
+tenant disable and enable, and tenant data deletion (0034); `auditor` includes `viewer` and
+adds audit list and export, and mutates nothing. "Min role" in the endpoint tables means that
+role or any role that includes it, so an `operator` reads without a separate `viewer` grant.
+**Audit is the exception to the ladder:** only `auditor` reads it, so an `admin` or `operator`
+gets 403 on audit unless they also hold `auditor`. Separation of duties: the person who
+changes things is not the person who reads the audit; a user needing both holds both.
 
 **Accepted consequence:** a template persona grant carries production privilege in
 trustbridge, for example a `maintainer` is an instance `admin` who can disable and delete
@@ -359,7 +365,8 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
    with no tenant grants nothing, and a token without `resource_access` yields a principal
    with no roles, not an error.
 5. A route with `{tenant_id}` answers 404, the same body as for an unknown tenant, to a
-   principal with no grant on that tenant, and never reveals whether the tenant exists.
+   principal with no grant on that tenant, never reveals whether the tenant exists, and writes
+   an `authz.denied` event with a null `tenant_id` and the requested id in `resource_id` (0032).
 6. The tenant context is set only after the role check passes, and a handler that is reached
    sees only its tenant's rows (0031 invariants 1 and 2, exercised through the API).
 7. An instance-scoped endpoint rejects a tenant-scoped grant, and a tenant-scoped grant on
@@ -402,7 +409,7 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
     accepts the PEM and webhook secret only over a request that the audit event records
     without them.
 19. `_sync` and `tb_upsert_tenant` never change the admin-disable columns, a disabled tenant
-    starts no adapter operation, its webhooks are stored and not handled until it is enabled,
+    starts no adapter operation other than a deletion's own delete and revoke operations (0034), its webhooks are stored and not handled until it is enabled,
     `enable` makes them deliverable again, and enable and disable need the `admin` role at
     instance scope; a tenant with a non-terminal deletion cannot be enabled.
 20. A renamed organisation (`tenants.org` updated by `_sync`) stops matching its old

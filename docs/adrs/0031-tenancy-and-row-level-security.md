@@ -106,7 +106,8 @@ CREATE POLICY tenant_isolation ON <table>
 ```
 
 `tenants` gets the same shape keyed on `id`, for `SELECT` and `UPDATE` only: the app role
-cannot `INSERT` or `DELETE` tenants directly. Every tenant-owned table also gets
+cannot `INSERT` or `DELETE` tenants directly (creation is `tb_upsert_tenant`, removal is
+`tb_delete_tenant`). Every tenant-owned table also gets
 `CREATE POLICY owner_all ... TO trustbridge_owner USING (true) WITH CHECK (true)`, because
 `FORCE ROW LEVEL SECURITY` subjects the owner too and the migrate Job and the functions below
 run as the owner. The app role gets table-level grants only as today; no `TRUNCATE`, no DDL.
@@ -115,9 +116,9 @@ run as the owner. The app role gets table-level grants only as today; no `TRUNCA
 so it is already subject to RLS. `FORCE` defends against an operator accidentally running the
 app as the owner. It is cheap and the owner policy above keeps the Job working.
 
-**`tenants` and resolution: three narrow functions.** Resolution and tenant creation happen
+**`tenants` and resolution: four narrow functions.** Resolution and tenant creation happen
 with no tenant in hand (Context 3). Rather than a `BYPASSRLS` role or a setting that any
-query can flip, three `SECURITY DEFINER` functions owned by `trustbridge_owner`, each with a
+query can flip, four `SECURITY DEFINER` functions owned by `trustbridge_owner`, each with a
 fixed `search_path = pg_catalog, public`, are the only unscoped paths to `tenants`, and the app
 role has `EXECUTE` on them and nothing else on that table outside its own row:
 
@@ -125,7 +126,8 @@ role has `EXECUTE` on them and nothing else on that table outside its own row:
 | --- | --- |
 | `tb_resolve_tenant(host, installation_id) -> uuid` | the tenant id of a pair, or `NULL` |
 | `tb_upsert_tenant(host, installation_id, org, org_id, state) -> uuid` | the `installation` event's create-or-update; never touches the admin-disable columns (0033, tenant disable) |
-| `tb_list_tenants() -> setof (id, host, installation_id, state)` | what `iterate_tenants` and an instance-scoped admin list read |
+| `tb_list_tenants() -> setof (id, host, installation_id, org, org_id, state, admin_disabled_at, deleting)` | what `iterate_tenants`, the admin API's tenant list and the RBAC tenant-grant resolution (0033) read; `deleting` is true while a non-terminal `tenant_deletions` row exists (0034) |
+| `tb_delete_tenant(tenant_id) -> void` | removes the `tenants` row as the last step of a deletion (0034); refuses unless the tenant is admin-disabled, has a non-terminal deletion in its database step and has no remaining tenant-keyed rows |
 
 A function is a deliberate, greppable, parameter-checked gap; the alternative (a setting such
 as `app.tenant_scope = 'all'` that a policy honours) lets any code path, including a bug, flip
@@ -153,14 +155,15 @@ another's context. Rules:
   tenants through the same context and removes the tenant's rows last.
 - A tenant that is `suspended`, admin-disabled (0033) or being deleted (0034) is still iterated by the lease and
   orphan sweeps (they release resources and finish in-flight operations) but starts no new
-  adapter operation.
+  adapter operation, except that a deletion's own adapter delete and revoke operations (0034)
+  run for a disabled tenant.
 
 ### Rollout: N-1 compatible in two releases
 
 | | Release N ("expand") | Release N+1 ("enforce") |
 | --- | --- | --- |
-| Code | `tenant_context`, the `after_begin` hook, every tenant-owned access inside a context, the three functions' callers, `iterate_tenants` | requires `REQUIRED_SCHEMA_VERSION = 2` |
-| Migration | creates `tb_current_tenant`, the three functions and the policies **while RLS is still disabled** on the tables (so the policies exist but filter nothing); grants `EXECUTE`; writes `schema_compat` 1 (`GREATEST`, no bump) | `ALTER TABLE ... ENABLE` and `FORCE ROW LEVEL SECURITY` on the six tables; bumps `schema_compat` to 2 |
+| Code | `tenant_context`, the `after_begin` hook, every tenant-owned access inside a context, the four functions' callers, `iterate_tenants` | requires `REQUIRED_SCHEMA_VERSION = 2` |
+| Migration | creates `tb_current_tenant`, the four functions and the policies **while RLS is still disabled** on the tables (so the policies exist but filter nothing); grants `EXECUTE`; writes `schema_compat` 1 (`GREATEST`, no bump) | `ALTER TABLE ... ENABLE` and `FORCE ROW LEVEL SECURITY` on the six tables; bumps `schema_compat` to 2 |
 | App role | not RLS-bound: queries behave as before | RLS-bound |
 | Why safe | N-1 code never sets the setting and, with RLS off, does not need to | N code (previous release) sets the hook and so works against the enforced schema; the `migration-compat` job runs release N's suites against it and proves that |
 
@@ -170,11 +173,19 @@ after the N+1 migration would see no rows. N+1 code requires `schema_compat` 2, 
 for the migration, and the release notes of N+1 state that N-1 must be fully rolled out of the
 fleet before the N+1 migrate Job runs. Skipping release N is not supported.
 
+### `audit_events` is a seventh RLS table
+
+[0032](0032-audit-log.md)'s `audit_events` is created with RLS enabled and forced, so the
+`owner_all` policy, the `FORCE` and owner-policy test (invariant 9), the role checks and the
+runtime check below all cover it too; "the six tables" in this ADR's text means the six
+tenant-owned tables, and each such check applies to `audit_events` as well. It needs no staged
+rollout because no previous release touches it.
+
 ### Role safety checks
 
 - Migrations in production refuse to run if `trustbridge_app` or `trustbridge_owner` is
   absent, or if `trustbridge_app` is a superuser, has `BYPASSRLS`, or owns any of the six
-  tables (these would silently defeat RLS).
+  tables or `audit_events` (these would silently defeat RLS).
 - The api, worker and reconciler check at startup, once the schema's `schema_compat` is 2 or
   more, that `current_user` is neither a superuser nor `BYPASSRLS`. If it is, the process
   reports not ready with the reason and, in production, exits after `SCHEMA_WAIT_SECONDS`, like
@@ -216,8 +227,8 @@ app role (not the owner, not a superuser).
 
 **Policies and functions**
 
-6. The app role cannot `INSERT` or `DELETE` a `tenants` row directly, can read and update only
-   its context's row, and can create or resolve a tenant only through the functions.
+6. The app role cannot `INSERT` or `DELETE` a `tenants` row directly (`tb_delete_tenant` refuses a tenant that is not disabled, not in a deletion's database step, or still has tenant-keyed rows), can read and update only
+   its context's row, and can create, resolve or remove a tenant only through the functions.
 7. `tb_upsert_tenant` never changes the admin-disable columns (0033) and `tb_resolve_tenant`
    returns `NULL` for an unknown pair.
 8. `webhook_deliveries` and `github_host_registrations` have RLS disabled and the app role reads
@@ -283,7 +294,7 @@ that `tb_upsert_tenant` never writes (invariant 7); tenant data deletion is in N
   context are meant to make visible.
 - The two-release rollout means RLS is not enforced until release N+1; between the two,
   isolation rests on the application's own filters, as it does today.
-- Three `SECURITY DEFINER` functions are new privileged surface. They are small, take no
+- Four `SECURITY DEFINER` functions are new privileged surface. They are small, take no
   free-form SQL and are covered by invariants 6, 7 and 10.
 - Tests for tenant-owned tables need a real Postgres and the app role; fakes cannot show RLS.
   The existing memory twins stay for unit tests and gain a context check of their own.
