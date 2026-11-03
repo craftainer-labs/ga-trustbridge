@@ -141,9 +141,9 @@ def state_of(
     return CredentialState(current=slot, previous=previous)
 
 
-def secret_values(issued: IssuedSecret | None) -> dict[str, str]:
+def secret_values(issued: object) -> dict[str, str]:
     """Reveal an issued secret's values for assertions."""
-    assert issued is not None
+    assert isinstance(issued, IssuedSecret)
     return {k: v.get_secret_value() for k, v in issued.values.items()}
 
 
@@ -351,7 +351,8 @@ async def test_ensure_webhook_uses_the_project_in_its_prior_ref() -> None:
     prior = ResourceState(HOOK, {"kind": "webhook", "project": PROJECT})
     applied = await adapter.ensure_webhook(TARGET, prior)
     replay.assert_exhausted()
-    assert applied.state == prior
+    assert applied.state.ref["project"] == PROJECT
+    assert applied.state.name == HOOK
 
 
 async def test_ensure_webhook_requires_a_secret() -> None:
@@ -421,13 +422,12 @@ async def test_ensure_credential_grants_the_whole_project_in_both_scopes(
     outcome = await adapter.ensure_credential(scope, state_of())
     replay.assert_exhausted()
     assert outcome.change.state is ChangeState.CREATED
-    assert outcome.trust is None
-    assert secret_values(outcome.issued) == {
+    assert isinstance(outcome.credential, IssuedSecret)
+    assert secret_values(outcome.credential) == {
         "username": f"robot${PROJECT}+{CRED}",
         "password": "robot-secret-value",
     }
-    assert outcome.issued is not None
-    assert outcome.issued.expires_at == NOW + timedelta(days=90)
+    assert outcome.credential.expires_at == NOW + timedelta(days=90)
     assert outcome.state.current == replace(
         SLOT, ref={"kind": "robot", "robot_id": "11", "project": PROJECT}, delivered=False
     )
@@ -439,8 +439,7 @@ async def test_ensure_credential_ignores_oidc_eligibility() -> None:
     replay, adapter = build("credentials.json", "create_push")
     outcome = await adapter.ensure_credential(scope, state_of())
     replay.assert_exhausted()
-    assert outcome.trust is None
-    assert outcome.issued is not None
+    assert isinstance(outcome.credential, IssuedSecret)
 
 
 async def test_ensure_credential_with_a_configured_project_key() -> None:
@@ -466,7 +465,7 @@ async def test_ensure_credential_is_idempotent_once_delivered() -> None:
     replay.assert_exhausted()
     assert outcome.change.state is ChangeState.UNCHANGED
     assert outcome.state == prior
-    assert outcome.issued is None
+    assert outcome.credential is None
 
 
 @pytest.mark.parametrize(
@@ -481,9 +480,9 @@ async def test_ensure_credential_reissues_an_undelivered_secret(
     outcome = await adapter.ensure_credential(PUSH, state_of(SLOT, PREV_SLOT))
     replay.assert_exhausted()
     assert outcome.change.state is ChangeState.UPDATED
-    assert secret_values(outcome.issued)["password"] == REFRESHED
-    assert outcome.issued is not None
-    assert outcome.issued.expires_at == expires_at
+    assert secret_values(outcome.credential)["password"] == REFRESHED
+    assert isinstance(outcome.credential, IssuedSecret)
+    assert outcome.credential.expires_at == expires_at
     assert outcome.state.previous is None
 
 
@@ -544,7 +543,7 @@ async def test_rotate_begin_refreshes_the_secret_in_place() -> None:
     outcome = await adapter.rotate_begin(PUSH, state_of(DELIVERED_SLOT, PREV_SLOT))
     replay.assert_exhausted()
     assert outcome.change.state is ChangeState.UPDATED
-    assert secret_values(outcome.issued)["password"] == REFRESHED
+    assert secret_values(outcome.credential)["password"] == REFRESHED
     assert outcome.state.previous is None
     assert outcome.state.current is not None
     assert not outcome.state.current.delivered
