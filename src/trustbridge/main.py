@@ -33,6 +33,7 @@ from trustbridge.github.availability import HostChecker
 from trustbridge.github.ports import SecretReader
 from trustbridge.github.webhook_secrets import WebhookSecretResolver
 from trustbridge.settings import TrustbridgeSettings, get_trustbridge_settings
+from trustbridge.tenancy import install_tenant_hook
 from trustbridge.webhooks.argocd import router as argocd_router
 from trustbridge.webhooks.ingress import ArgocdRuntime, WebhookRuntime
 from trustbridge.webhooks.ingress import router as webhook_router
@@ -80,6 +81,7 @@ def install(
             "trustbridge.main cannot wrap its lifespan (ADR 0028)"
         )
     chosen = overrides or Overrides()
+    install_tenant_hook()  # ADR 0031: set app.tenant_id per transaction (idempotent)
 
     @asynccontextmanager
     async def lifespan(inner: FastAPI) -> AsyncIterator[object]:
