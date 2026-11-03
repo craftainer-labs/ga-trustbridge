@@ -240,12 +240,23 @@ async def test_ensure_project_updates_a_drifted_description() -> None:
     assert applied.change.state is ChangeState.UPDATED
 
 
-async def test_ensure_project_tolerates_a_creation_race() -> None:
-    """A3: a 409 on POST means a parallel worker created it; the result is UNCHANGED."""
+async def test_a_project_creation_race_is_retried_not_adopted() -> None:
+    """A 409 on POST is retryable: the retry re-reads it and checks that it is ours."""
     replay, adapter = build("projects.json", "race")
-    applied = await adapter.ensure_project(TENANT, ProjectSpec("default", "images"), None)
+    with pytest.raises(AdapterError) as err:
+        await adapter.ensure_project(TENANT, ProjectSpec("default", "images"), None)
     replay.assert_exhausted()
-    assert applied.change.state is ChangeState.UNCHANGED
+    assert err.value.retryable
+
+
+async def test_ensure_project_refuses_an_unmanaged_project() -> None:
+    """A project of the generated name that trustbridge did not create is never adopted."""
+    replay, adapter = build("projects.json", "unmarked")
+    with pytest.raises(AdapterError) as err:
+        await adapter.ensure_project(TENANT, ProjectSpec("default", "images"), None)
+    replay.assert_exhausted()
+    assert not err.value.retryable
+    assert [r.method for r in replay.seen] == ["GET"]
 
 
 async def test_a_concurrent_project_change_is_retryable() -> None:
@@ -286,6 +297,16 @@ async def test_ensure_repository_needs_the_project() -> None:
     with pytest.raises(AdapterError) as err:
         await adapter.ensure_repository(PROJECT_REF, RepoSpec("images"), None)
     assert not err.value.retryable
+
+
+async def test_ensure_repository_refuses_an_unmanaged_project() -> None:
+    """The adapter does not edit an AppProject it did not create."""
+    replay, adapter = build("repositories.json", "unmarked")
+    with pytest.raises(AdapterError) as err:
+        await adapter.ensure_repository(PROJECT_REF, RepoSpec("images"), None)
+    replay.assert_exhausted()
+    assert not err.value.retryable
+    assert [r.method for r in replay.seen] == ["GET"]
 
 
 async def test_ensure_repository_conflict_is_retryable() -> None:
@@ -392,6 +413,22 @@ async def test_delete_removes_then_reports_absent_as_unchanged(
     assert again.change.state is ChangeState.UNCHANGED
 
 
+@pytest.mark.parametrize(
+    ("file", "prior"),
+    [
+        ("projects.json", ResourceState(PROJECT, {"kind": "project", "name": PROJECT})),
+        ("repositories.json", REPO_STATE),
+    ],
+)
+async def test_delete_leaves_an_unmanaged_object_alone(file: str, prior: ResourceState) -> None:
+    """An object without the managed-by label is not ours: nothing is deleted, UNCHANGED."""
+    replay, adapter = build(file, "unmarked")
+    outcome = await adapter.delete(prior)
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UNCHANGED
+    assert [r.method for r in replay.seen] == ["GET"]
+
+
 async def test_delete_rejects_an_unknown_resource_kind() -> None:
     """A state without a known kind is a non-retryable error and sends nothing."""
     with pytest.raises(AdapterError) as err:
@@ -452,12 +489,27 @@ async def test_a_scope_that_gains_a_repository_grant_is_rewritten_in_place() -> 
     assert outcome.change.state is ChangeState.UPDATED
 
 
-async def test_credential_creation_race_converges() -> None:
-    """A3: 409 on POST means a parallel worker created it; the result is UNCHANGED."""
+async def test_credential_creation_race_is_retried_not_adopted() -> None:
+    """A 409 on POST is retryable: the retry re-reads the Secret and checks that it is ours."""
     replay, adapter = build("credentials.json", "race")
-    outcome = await adapter.ensure_credential(REPO_SCOPE, prior_for(REPO_SLOT))
+    with pytest.raises(AdapterError) as err:
+        await adapter.ensure_credential(REPO_SCOPE, prior_for(REPO_SLOT))
+    replay.assert_exhausted()
+    assert err.value.retryable
+
+
+async def test_an_unmanaged_secret_is_neither_adopted_nor_deleted() -> None:
+    """A Secret of the generated name without the managed-by label is refused and left alone."""
+    replay, adapter = build("credentials.json", "unmarked")
+    with pytest.raises(AdapterError) as err:
+        await adapter.ensure_credential(REPO_SCOPE, prior_for(REPO_SLOT))
+    replay.assert_exhausted()
+    assert not err.value.retryable
+    replay, adapter = build("credentials.json", "unmarked")
+    outcome = await adapter.delete_credential(REPO_SCOPE, prior_for(REPO_SLOT))
     replay.assert_exhausted()
     assert outcome.change.state is ChangeState.UNCHANGED
+    assert [r.method for r in replay.seen] == ["GET"]
 
 
 async def test_a_missing_installation_is_a_manual_action() -> None:

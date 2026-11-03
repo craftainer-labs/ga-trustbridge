@@ -292,6 +292,34 @@
       "exchanges": [
         {
           "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "images",
+                "sourceRepos": [
+                  "https://github.com/acme/images"
+                ],
+                "destinations": []
+              }
+            }
+          }
+        },
+        {
+          "request": {
             "method": "DELETE",
             "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
           },
@@ -322,7 +350,7 @@
       "exchanges": [
         {
           "request": {
-            "method": "DELETE",
+            "method": "GET",
             "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
           },
           "response": {
@@ -334,6 +362,35 @@
               "reason": "NotFound",
               "code": 404,
               "message": "appprojects not found"
+            }
+          }
+        }
+      ]
+    },
+    "unmarked": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101"
+              },
+              "spec": {
+                "description": "images",
+                "sourceRepos": [
+                  "https://github.com/acme/images"
+                ],
+                "destinations": []
+              }
             }
           }
         }

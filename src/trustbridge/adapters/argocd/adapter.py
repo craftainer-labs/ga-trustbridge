@@ -87,6 +87,17 @@ def _name_part(value: str, what: str) -> str:
     return value
 
 
+def _marked(obj: JsonObj) -> bool:
+    """Return whether the adapter created the object (it carries the managed-by label)."""
+    labels = (obj.get("metadata") or {}).get("labels") or {}
+    return bool(labels.get(MANAGED_BY_LABEL) == MANAGED_BY)
+
+
+def _collision(what: str) -> AdapterError:
+    """Refuse an object of the generated name that the adapter did not create."""
+    return AdapterError(False, f"{what} exists but is not managed by trustbridge; not adopting it")
+
+
 def _decoded(obj: JsonObj, key: str) -> str | None:
     raw = (obj.get("data") or {}).get(key)
     return base64.b64decode(raw).decode() if isinstance(raw, str) else None
@@ -173,13 +184,14 @@ class ArgoCDAdapter:
             found = await c.call("GET", path, accept=NOT_FOUND)
             if found.status_code == HTTP_NOT_FOUND:
                 post = await c.call("POST", self._projects(), json=body, accept=CONFLICT)
-                state = (
-                    ChangeState.UNCHANGED
-                    if post.status_code == HTTP_CONFLICT
-                    else ChangeState.CREATED
-                )
+                if post.status_code == HTTP_CONFLICT:
+                    # Created meanwhile; the retry re-reads it and checks that it is ours.
+                    raise AdapterError(True, "the AppProject was created concurrently")
+                state = ChangeState.CREATED
             else:
                 existing = json_object(found)
+                if not _marked(existing):
+                    raise _collision("the AppProject")
                 spec = existing.get("spec") or {}
                 if (spec.get("description") or "") == description:
                     state = ChangeState.UNCHANGED
@@ -205,7 +217,7 @@ class ArgoCDAdapter:
         url = self._repo_url(p.tenant, s.key)
         path = f"{self._projects()}/{seg(p.project.name)}"
         async with self._client() as c:
-            project = await self._existing(c, path, "the AppProject")
+            project = await self._existing(c, path, "the AppProject", managed=True)
             repos = list((project.get("spec") or {}).get("sourceRepos") or [])
             if url in repos:
                 state = ChangeState.UNCHANGED
@@ -217,11 +229,17 @@ class ArgoCDAdapter:
         return Applied(Change(state), ResourceState(url, ref))
 
     @staticmethod
-    async def _existing(c: KubeClient, path: str, what: str) -> JsonObj:
+    async def _existing(
+        c: KubeClient, path: str, what: str, *, managed: bool = False
+    ) -> JsonObj:
+        """GET an object that must exist; with `managed`, it must also be one we created."""
         found = await c.call("GET", path, accept=NOT_FOUND)
         if found.status_code == HTTP_NOT_FOUND:
             raise AdapterError(False, f"{what} does not exist in the Argo CD namespace")
-        return json_object(found)
+        obj = json_object(found)
+        if managed and not _marked(obj):
+            raise _collision(what)
+        return obj
 
     # ---- webhooks --------------------------------------------------------
     async def ensure_webhook(self, t: WebhookTarget, prior: ResourceState | None) -> Applied:
@@ -263,8 +281,7 @@ class ArgoCDAdapter:
         async with self._client() as c:
             if kind == "project":
                 path = f"{self._projects()}/{seg(prior.name)}"
-                gone = (await c.call("DELETE", path, accept=NOT_FOUND)).status_code
-                removed = gone != HTTP_NOT_FOUND
+                removed = await self._delete_managed(c, path)
             elif kind == "repository":
                 removed = await self._remove_repository(c, prior)
             elif kind == "webhook":
@@ -282,11 +299,20 @@ class ArgoCDAdapter:
         project = json_object(found)
         spec = project.get("spec") or {}
         repos = list(spec.get("sourceRepos") or [])
-        if prior.name not in repos:
+        if not _marked(project) or prior.name not in repos:
             return False
         kept = [repo for repo in repos if repo != prior.name]
         await self._put_project(c, path, {**project, "spec": {**spec, "sourceRepos": kept}})
         return True
+
+    @staticmethod
+    async def _delete_managed(c: KubeClient, path: str) -> bool:
+        """Delete the object only when we created it; absent or foreign is left alone (False)."""
+        found = await c.call("GET", path, accept=NOT_FOUND)
+        if found.status_code == HTTP_NOT_FOUND or not _marked(json_object(found)):
+            return False
+        gone = await c.call("DELETE", path, accept=NOT_FOUND)
+        return gone.status_code != HTTP_NOT_FOUND
 
     async def _remove_webhook(self, c: KubeClient, name: str) -> bool:
         removed = False
@@ -334,16 +360,19 @@ class ArgoCDAdapter:
             found = await c.call("GET", path, accept=NOT_FOUND)
             if found.status_code == HTTP_NOT_FOUND:
                 post = await c.call("POST", self._core("secrets"), json=body, accept=CONFLICT)
-                state = (
-                    ChangeState.UNCHANGED
-                    if post.status_code == HTTP_CONFLICT
-                    else ChangeState.CREATED
-                )
-            elif self._secret_matches(json_object(found), kind, fields):
-                state = ChangeState.UNCHANGED
+                if post.status_code == HTTP_CONFLICT:
+                    # Created meanwhile; the retry re-reads it and checks that it is ours.
+                    raise AdapterError(True, "the Secret was created concurrently")
+                state = ChangeState.CREATED
             else:
-                await c.call("PUT", path, json=body)
-                state = ChangeState.UPDATED
+                existing = json_object(found)
+                if not _marked(existing):
+                    raise _collision("the Secret")
+                if self._secret_matches(existing, kind, fields):
+                    state = ChangeState.UNCHANGED
+                else:
+                    await c.call("PUT", path, json=body)
+                    state = ChangeState.UPDATED
         ref = {"kind": "secret", "secret": slot.name}
         new_state = CredentialState(
             current=replace(slot, ref=ref, delivered=True), previous=prior.previous
@@ -410,8 +439,7 @@ class ArgoCDAdapter:
 
     async def _delete_secret(self, c: KubeClient, slot: CredentialSlot) -> bool:
         path = f"{self._core('secrets')}/{seg(slot.name)}"
-        gone = await c.call("DELETE", path, accept=NOT_FOUND)
-        return gone.status_code != HTTP_NOT_FOUND
+        return await self._delete_managed(c, path)
 
     async def list_credentials(self, t: Tenant) -> Sequence[ListedCredential]:
         """List the tenant's trustbridge-named Secrets (found by label, filtered by name prefix)."""

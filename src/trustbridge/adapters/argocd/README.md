@@ -141,10 +141,12 @@ The fixtures encode these as best-effort shapes; check them against a real Argo 
 
 ## Known limitations
 
-- Same-name adoption: `ensure_project` and `ensure_credential` adopt an existing AppProject or Secret
-  of the generated name (a POST `409` is UNCHANGED, by the A3 convention) without checking the
-  `managed-by` label, and `delete` later removes it. Names embed the whole tenant id, so a clash needs
-  an operator to create an object by that exact name.
+- Ownership: every AppProject and Secret the adapter creates carries
+  `app.kubernetes.io/managed-by: trustbridge`. An existing object of the generated name without it
+  is never adopted (`ensure_*` raises a non-retryable `AdapterError`), and `delete` leaves it alone
+  and reports UNCHANGED, as for an absent object. A POST `409` is a retryable error; the retry re-reads
+  the object and applies the same check. Names embed the whole tenant id; the label is the only
+  ownership marker (no tenant annotation).
 - `ensure_webhook` writes the token Secret and then the ConfigMap in two calls; if the second fails
   the retry completes it, but a webhook dropped from state before then leaves an orphan
   `<name>-token` key. `delete` of a webhook aborts (non-retryable) if either object vanishes between

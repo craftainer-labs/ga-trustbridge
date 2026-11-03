@@ -330,6 +330,35 @@
           }
         }
       ]
+    },
+    "unmarked": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101"
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [
+                  "https://github.com/acme/images"
+                ],
+                "destinations": []
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
