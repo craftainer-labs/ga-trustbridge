@@ -186,10 +186,10 @@ class HarborAdapter:
 
     @staticmethod
     def _require_private(found: httpx.Response) -> None:
-        """Refuse an existing project that is public: the adapter only ever creates private ones."""
+        """Refuse an existing project that is not explicitly private (we create private ones)."""
         metadata = json_object(found).get("metadata")
         public = metadata.get("public") if isinstance(metadata, dict) else None
-        if str(public).lower() == "true":
+        if str(public).lower() != "false":
             raise AdapterError(False, "Harbor project exists but is public; not adopting it")
 
     # ---- repositories ----------------------------------------------------
@@ -468,8 +468,9 @@ class HarborAdapter:
     ) -> JsonObj | None:
         """Return the project robot `name`; its full name is `<prefix><project>+<name>`.
 
-        With `robot_id` (deleting a recorded slot) the robot also matches by that id, so one that
-        sits in another project than the ref says is still found; the name must match either way.
+        With `robot_id` (deleting a recorded slot) the id decides instead of the project, so a robot
+        that sits in another project than the ref says is still found; the name must match
+        either way, and the caller checks the tenant prefix and the marker.
         """
         for robot in await self._robots(c, name):
             full = robot.get("name")
@@ -479,7 +480,11 @@ class HarborAdapter:
             if slot_name != name:
                 continue
             found_id = self._robot_id(robot)
-            if head.rsplit("$", 1)[-1] == project or found_id == robot_id:
+            if robot_id is not None:
+                matched = found_id == robot_id
+            else:
+                matched = head.rsplit("$", 1)[-1] == project
+            if matched:
                 return robot
         return None
 
