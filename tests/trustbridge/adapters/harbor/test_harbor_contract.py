@@ -564,7 +564,8 @@ def _listing(page: int, items: list[dict[str, object]]) -> dict[str, object]:
 async def test_listings_follow_every_page() -> None:
     """A robot beyond the first 100 results is still found (here: created on page two)."""
     robot = {"id": 300, "name": f"robot${PROJECT}+{CRED}", "description": "managed by trustbridge"}
-    replay = Replay([_listing(1, _robot_page(100, 0)), _listing(2, [robot])])
+    first = [*_robot_page(99, 0), {"id": 99, "name": "no-plus-sign"}]
+    replay = Replay([_listing(1, first), _listing(2, [robot])])
     adapter = HarborAdapter(config(), transport=replay.transport(), clock=lambda: NOW)
     outcome = await adapter.ensure_credential(PUSH, state_of(DELIVERED_SLOT))
     replay.assert_exhausted()
