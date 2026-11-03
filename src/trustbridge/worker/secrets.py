@@ -22,7 +22,7 @@ class SecretUnavailable(Exception):  # noqa: N818 -- a result, named for what it
     """The secret could not be read or written (store down, ref unknown, empty value)."""
 
 
-class SecretNotFound(SecretUnavailable):  # noqa: N818 -- a result, named for what it says
+class SecretNotFound(SecretUnavailable):
     """A `store:` secret that is definitely absent (the store answered; nothing is there).
 
     A subclass of `SecretUnavailable`, so callers that treat both alike keep working; callers

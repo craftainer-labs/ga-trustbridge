@@ -449,9 +449,7 @@ class PgDeliveryStore:
         """Record relays."""
         if keys:
             await self._exec(
-                update(WebhookDelivery)
-                .where(_in_keys(keys))
-                .values(last_relayed_at=now)
+                update(WebhookDelivery).where(_in_keys(keys)).values(last_relayed_at=now)
             )
 
     async def list_relayable(

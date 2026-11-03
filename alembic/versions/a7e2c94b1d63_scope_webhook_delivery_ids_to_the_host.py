@@ -47,7 +47,11 @@ def upgrade() -> None:
             "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_wd_host_body_sha256 "
             "ON webhook_deliveries (host, body_sha256)"
         )
+    # Squawk's ban-drop-constraint is ignored for this one statement: the primary key is
+    # swapped atomically onto an already-built unique index, the new key (host, delivery_id)
+    # is strictly more specific than the old one, and the swap is the purpose of this migration.
     op.execute(
+        "-- squawk-ignore ban-drop-constraint\n"
         "ALTER TABLE webhook_deliveries DROP CONSTRAINT webhook_deliveries_pkey, "
         "ADD CONSTRAINT webhook_deliveries_pkey PRIMARY KEY USING INDEX ux_wd_host_delivery"
     )
@@ -63,7 +67,9 @@ def downgrade() -> None:
             "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_wd_delivery "
             "ON webhook_deliveries (delivery_id)"
         )
+    # The reverse swap; ignored for the same reason as in `upgrade`.
     op.execute(
+        "-- squawk-ignore ban-drop-constraint\n"
         "ALTER TABLE webhook_deliveries DROP CONSTRAINT webhook_deliveries_pkey, "
         "ADD CONSTRAINT webhook_deliveries_pkey PRIMARY KEY USING INDEX ux_wd_delivery"
     )
