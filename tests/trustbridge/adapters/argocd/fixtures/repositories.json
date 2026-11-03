@@ -1,0 +1,335 @@
+{
+  "source": "Read-modify-write of an AppProject's spec.sourceRepos",
+  "scenarios": {
+    "add": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [
+                  "https://github.com/acme/other"
+                ],
+                "destinations": []
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}",
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [
+                  "https://github.com/acme/other",
+                  "https://github.com/acme/images"
+                ],
+                "destinations": []
+              }
+            }
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [
+                  "https://github.com/acme/other",
+                  "https://github.com/acme/images"
+                ],
+                "destinations": []
+              }
+            }
+          }
+        }
+      ]
+    },
+    "exists": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [
+                  "https://github.com/acme/images"
+                ],
+                "destinations": []
+              }
+            }
+          }
+        }
+      ]
+    },
+    "project_missing": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 404,
+            "json": {
+              "kind": "Status",
+              "apiVersion": "v1",
+              "status": "Failure",
+              "reason": "NotFound",
+              "code": 404,
+              "message": "appprojects not found"
+            }
+          }
+        }
+      ]
+    },
+    "conflict": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [],
+                "destinations": []
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}",
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [
+                  "https://github.com/acme/images"
+                ],
+                "destinations": []
+              }
+            }
+          },
+          "response": {
+            "status": 409,
+            "json": {
+              "kind": "Status",
+              "reason": "Conflict",
+              "code": 409
+            }
+          }
+        }
+      ]
+    },
+    "delete": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [
+                  "https://github.com/acme/images",
+                  "https://github.com/acme/other"
+                ],
+                "destinations": []
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}",
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [
+                  "https://github.com/acme/other"
+                ],
+                "destinations": []
+              }
+            }
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [
+                  "https://github.com/acme/other"
+                ],
+                "destinations": []
+              }
+            }
+          }
+        }
+      ]
+    },
+    "delete_absent": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 404,
+            "json": {
+              "kind": "Status",
+              "apiVersion": "v1",
+              "status": "Failure",
+              "reason": "NotFound",
+              "code": 404,
+              "message": "appprojects not found"
+            }
+          }
+        }
+      ]
+    },
+    "delete_not_listed": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/apis/argoproj.io/v1alpha1/namespaces/argocd/appprojects/${project}"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "${project}",
+                "namespace": "argocd",
+                "resourceVersion": "101",
+                "labels": {
+                  "app.kubernetes.io/managed-by": "trustbridge"
+                }
+              },
+              "spec": {
+                "description": "",
+                "sourceRepos": [
+                  "https://github.com/acme/other"
+                ],
+                "destinations": []
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
