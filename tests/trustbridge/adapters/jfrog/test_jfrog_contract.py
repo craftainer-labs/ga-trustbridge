@@ -805,10 +805,9 @@ async def test_a_token_response_without_a_token_is_rejected() -> None:
     [
         [{"description": CONTEXT["cred_push"]}],
         [{"description": CONTEXT["cred_push"], "token_id": 7}],
-        [None],
         {"not": "a list"},
     ],
-    ids=["no-token-id", "non-string-token-id", "non-object-entry", "not-a-list"],
+    ids=["no-token-id", "non-string-token-id", "not-a-list"],
 )
 async def test_a_malformed_token_listing_is_an_adapter_error(tokens: object) -> None:
     """A malformed listing is a non-retryable `AdapterError` (not a KeyError or TypeError)."""
@@ -820,6 +819,28 @@ async def test_a_malformed_token_listing_is_an_adapter_error(tokens: object) -> 
     with pytest.raises(AdapterError) as err:
         await adapter.list_credentials(TENANT)
     assert not err.value.retryable
+
+
+async def test_malformed_entries_that_do_not_match_are_ignored() -> None:
+    """The listing spans the whole instance; an unrelated odd entry must not block a tenant."""
+    listing = {
+        "request": {"method": "GET", "path": "/access/api/v1/tokens"},
+        "response": {
+            "status": 200,
+            "json": {"tokens": [None, "x", {"token_id": 1}, {"description": "ci-token"}]},
+        },
+    }
+    mappings = {
+        "request": {
+            "method": "GET",
+            "path": f"/access/api/v1/oidc/{provider_name(TENANT_ID)}/identity_mappings",
+        },
+        "response": {"status": 404, "json": None},
+    }
+    replay = Replay([listing, mappings])
+    adapter = JFrogAdapter(config(), transport=replay.transport(), clock=lambda: NOW)
+    assert await adapter.list_credentials(TENANT) == []
+    replay.assert_exhausted()
 
 
 async def test_a_malformed_token_listing_also_fails_the_exact_name_lookup() -> None:

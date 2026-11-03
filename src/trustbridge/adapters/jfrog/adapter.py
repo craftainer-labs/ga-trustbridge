@@ -556,14 +556,15 @@ class JFrogAdapter:
 
     @staticmethod
     async def _find_tokens(c: JFrogClient, name: str, *, prefix: bool = False) -> list[JsonObj]:
-        tokens = json_object(await c.call("GET", f"{ACCESS}/tokens")).get("tokens") or []
+        tokens = json_object(await c.call("GET", f"{ACCESS}/tokens")).get("tokens")
+        if tokens is None:
+            return []
         if not isinstance(tokens, list):
             raise AdapterError(False, "JFrog returned a token listing that is not a list")
         found = []
         for token in tokens:
-            if not isinstance(token, dict):
-                raise AdapterError(False, "JFrog returned a malformed token listing entry")
-            description = str(token.get("description") or "")
+            # The listing spans the whole instance: only an entry this call selects must be sound.
+            description = str(token.get("description") or "") if isinstance(token, dict) else ""
             if description.startswith(name) if prefix else description == name:
                 if not isinstance(token.get("token_id"), str):
                     msg = "JFrog returned a token listing entry without token_id"
