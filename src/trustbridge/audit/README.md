@@ -120,7 +120,9 @@ schema_version`. Timestamps are UTC with a `Z`; ids and `source_ip` are strings;
 `f6d2b8c14a39` changes `on_behalf_of` from `text` to `jsonb` (user decision: structured, not a
 `key=value` string). It is N-1 compatible because the previous release never touches
 `audit_events` and nothing wrote the column before this release (no backfill needed; a stray
-string value is kept as a JSON string). It only alters the column: no roles, no grants.
+`sender=..;delivery=..` string is converted to the object, any other stray value to null). It
+also adds `ck_audit_events_on_behalf_of`: the database accepts only null or an object with a
+numeric `github_sender_id` and a string `delivery_id`. No roles, no grants.
 
 - `audit_events` with indexes `(tenant_id, seq)`, `(occurred_at)`, `(actor_sub, seq)` and, added
   here, `(recorded_at)` (the lag bound looks up the first recent event).

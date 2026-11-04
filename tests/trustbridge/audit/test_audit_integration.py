@@ -818,13 +818,13 @@ async def _migration_steps(conn: AsyncConnection) -> list[object]:
     seen: list[object] = []
     await conn.run_sync(_run_migration, "downgrade")
     seen.append((await conn.execute(text(_COLUMN_TYPE))).scalar_one())
-    for suffix, value in (("a", "sender=1;delivery=d"), ("b", None)):
+    for suffix, value in (("a", "sender=1;delivery=d"), ("b", None), ("c", "garbage")):
         await conn.execute(text(_LEGACY_INSERT), {"sub": f"migration-{suffix}", "v": value})
     await conn.run_sync(_run_migration, "upgrade")
     seen.append([tuple(r) for r in (await conn.execute(text(_LEGACY_ROWS))).all()])
     await conn.run_sync(_run_migration, "downgrade")
     legacy = text("SELECT on_behalf_of FROM audit_events WHERE actor_sub = 'migration-a'")
-    seen.append((await conn.execute(legacy)).scalar_one())
+    seen.append(json.loads((await conn.execute(legacy)).scalar_one()))
     await conn.run_sync(_run_migration, "upgrade")
     who = json.dumps({"github_sender_id": 9, "delivery_id": "d-9"})
     await conn.execute(text(_OBJECT_INSERT), {"v": who})
@@ -837,7 +837,7 @@ async def _migration_steps(conn: AsyncConnection) -> list[object]:
 async def test_the_on_behalf_of_migration_keeps_legacy_strings_and_nulls_and_reverses(
     db: Db,
 ) -> None:
-    """text -> jsonb keeps null as null and a legacy string as a JSON string; down reverses."""
+    """text -> jsonb turns a legacy `sender=..;delivery=..` string into the object."""
     try:
         async with db.admin.connect() as conn:
             seen = await _migration_steps(conn)
@@ -849,10 +849,11 @@ async def test_the_on_behalf_of_migration_keeps_legacy_strings_and_nulls_and_rev
     assert seen == [
         "text",
         [
-            ("migration-a", "sender=1;delivery=d", "string"),
+            ("migration-a", {"github_sender_id": 1, "delivery_id": "d"}, "object"),
             ("migration-b", None, None),
+            ("migration-c", None, None),
         ],
-        "sender=1;delivery=d",
+        {"github_sender_id": 1, "delivery_id": "d"},
         {"github_sender_id": 9, "delivery_id": "d-9"},
     ]
 

@@ -16,15 +16,16 @@ there is no contract step. The change rewrites the table, which holds only purge
 this point; it takes the exclusive lock briefly and lock and statement timeouts are set first.
 The row triggers do not fire on a rewrite, so append-only enforcement is untouched.
 
-A value that is somehow present (a dev database) is kept as a JSON string, never lost or
-rejected. No roles are created and no grants change: the existing table grants carry over.
+A value that is somehow present (a dev database; no release wrote one) is converted, not
+dropped, when it has the old ``sender=<digits>;delivery=<id>`` form: it becomes the object. Any
+other stray value cannot be represented and becomes null. No roles are created and no grants
+change: the existing table grants carry over.
 
 ``ck_audit_events_on_behalf_of`` then pins the shape in the database, so no insert path (the app
 role's ``INSERT`` grant included) can store anything but null or
-``{"github_sender_id": <number>, "delivery_id": "<string>"}``. It is added ``NOT VALID``
-(Squawk's ``constraint-missing-not-valid``): it is enforced for every new row at once, and a
-stray legacy string in a dev database stays readable instead of blocking the upgrade. It is not
-validated afterwards for the same reason (a validated add would fail on that string).
+``{"github_sender_id": <number>, "delivery_id": "<string>"}``. It is added ``NOT VALID`` and then
+validated in the same step (Squawk's ``constraint-missing-not-valid``); the table is tiny and the
+conversion above guarantees every existing row passes. The downgrade drops it first.
 """
 
 from collections.abc import Sequence
@@ -50,7 +51,11 @@ def upgrade() -> None:
     op.execute(
         "-- squawk-ignore changing-column-type\n"
         "ALTER TABLE audit_events ALTER COLUMN on_behalf_of TYPE jsonb "
-        "USING CASE WHEN on_behalf_of IS NULL THEN NULL ELSE to_jsonb(on_behalf_of) END"
+        "USING CASE WHEN on_behalf_of ~ '^sender=[0-9]{1,18};delivery=' THEN "
+        "jsonb_build_object('github_sender_id', "
+        "CAST(substring(on_behalf_of FROM '^sender=([0-9]+);') AS bigint), "
+        "'delivery_id', substring(on_behalf_of FROM '^sender=[0-9]+;delivery=(.*)$')) "
+        "ELSE NULL END"
     )
     op.execute(
         f"ALTER TABLE audit_events ADD CONSTRAINT {CHECK_NAME} CHECK ("
@@ -60,6 +65,7 @@ def upgrade() -> None:
         "AND jsonb_typeof(on_behalf_of->'github_sender_id') = 'number' "
         "AND jsonb_typeof(on_behalf_of->'delivery_id') = 'string')) NOT VALID"
     )
+    op.execute(f"ALTER TABLE audit_events VALIDATE CONSTRAINT {CHECK_NAME}")
 
 
 def downgrade() -> None:
