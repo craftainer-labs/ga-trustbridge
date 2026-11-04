@@ -20,6 +20,9 @@ def invalid_cursor() -> AdminProblem:
     return AdminProblem(400, "invalid-cursor", "The cursor is not valid")
 
 
+MAX_SEQ = 2**63 - 1  # a Postgres bigint: a larger position would be a 500, not a 400
+
+
 def encode_cursor(key: str | int, ident: str) -> str:
     """The cursor for the position after the row with this sort key and id."""
     raw = json.dumps([key, ident], separators=(",", ":")).encode()
@@ -41,6 +44,8 @@ def decode_cursor(cursor: str) -> tuple[str | int, str]:
         or isinstance(value[0], bool)
         or not isinstance(value[0], str | int)
     ):
+        raise invalid_cursor()
+    if isinstance(value[0], int) and not 0 <= value[0] <= MAX_SEQ:
         raise invalid_cursor()
     return value[0], value[1]
 

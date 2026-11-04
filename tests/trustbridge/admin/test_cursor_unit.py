@@ -28,6 +28,8 @@ def test_a_cursor_round_trips_and_is_url_safe() -> None:
         base64.urlsafe_b64encode(b'[true,"a"]').decode(),
         base64.urlsafe_b64encode(b'{"a":"b"}').decode(),
         base64.urlsafe_b64encode(b'[1.5,"a"]').decode(),
+        base64.urlsafe_b64encode(b'[9223372036854775808,"a"]').decode(),
+        base64.urlsafe_b64encode(b'[-1,"a"]').decode(),
     ],
 )
 def test_a_malformed_cursor_is_a_400(bad: str) -> None:

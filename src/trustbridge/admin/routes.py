@@ -6,6 +6,7 @@ handlers only read.
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -19,7 +20,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.admin.access import all_tenants, tenant_ref
-from trustbridge.admin.cursor import decode_cursor, encode_cursor, invalid_cursor, paginate
+from trustbridge.admin.cursor import MAX_SEQ, decode_cursor, encode_cursor, invalid_cursor, paginate
 from trustbridge.admin.guards import guard, guard_any_grant
 from trustbridge.admin.problems import AdminProblem
 from trustbridge.admin.runtime import AdminRuntime, admin_runtime
@@ -40,6 +41,7 @@ from trustbridge.rbac import Principal, Role, get_principal, tenant_roles
 from trustbridge.rbac.deps import client_ip, safe_request_id
 from trustbridge.tenancy import TenantInfo, tenant_session
 
+logger = logging.getLogger(__name__)
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 _PROBLEMS: dict[int | str, dict[str, Any]] = {
@@ -388,20 +390,25 @@ async def _export_stream(  # noqa: PLR0913 - everything the event records
             current = replace(current, after_seq=page.next_seq)
         complete = True
     finally:
-        await asyncio.shield(
-            record_export(
-                runtime.writer,
-                sub=principal.sub,
-                iss=principal.iss,
-                tenant_id=tenant_id,
-                query=query,
-                row_count=count,
-                last_seq=last_seq,
-                complete=complete,
-                source_ip=source_ip,
-                request_id=request_id,
+        try:
+            await asyncio.shield(
+                record_export(
+                    runtime.writer,
+                    sub=principal.sub,
+                    iss=principal.iss,
+                    tenant_id=tenant_id,
+                    query=query,
+                    row_count=count,
+                    last_seq=last_seq,
+                    complete=complete,
+                    source_ip=source_ip,
+                    request_id=request_id,
+                )
             )
-        )
+        except Exception:
+            # The response is already streaming; the failed audit write must not mask the
+            # original error, so it is logged loudly instead.
+            logger.exception("audit.export row not written; %d rows were sent", count)
 
 
 def _export_response(
@@ -434,7 +441,7 @@ _EXPORT_RESPONSE: dict[int | str, dict[str, Any]] = {
         "content": {"application/x-ndjson": {"schema": {"type": "string"}}},
     }
 }
-SinceSeq = Annotated[int | None, Query(ge=0, description="Resume after this seq (exclusive)")]
+SinceSeq = Annotated[int | None, Query(ge=0, le=MAX_SEQ, description="Resume after this seq (exclusive)")]
 
 
 @router.get(
