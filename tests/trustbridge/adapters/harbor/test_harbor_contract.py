@@ -580,11 +580,14 @@ async def test_a_robot_of_another_project_does_not_count() -> None:
 async def test_a_robot_without_the_marker_is_never_adopted_or_deleted() -> None:
     """Ownership: a same-named robot that trustbridge did not create is not touched."""
     for call in ("ensure", "rotate"):
-        _, adapter = build("credentials.json", "foreign_robot")
+        replay, adapter = build("credentials.json", "foreign_robot_create")
         action = adapter.ensure_credential if call == "ensure" else adapter.rotate_begin
-        with pytest.raises(AdapterError) as info:
+        with pytest.raises(AdapterError):
             await action(PUSH, state_of(DELIVERED_SLOT))
-        assert not info.value.retryable
+        replay.assert_exhausted()
+        # The listed unmarked robot is skipped (never adopted or refreshed): a create is tried,
+        # which Harbor refuses because the name is taken.
+        assert [r.method for r in replay.seen] == ["GET", "GET", "POST"]
     replay, adapter = build("credentials.json", "foreign_robot")
     outcome = await adapter.delete_credential(PUSH, state_of(SLOT))
     replay.assert_exhausted()
@@ -792,18 +795,24 @@ async def test_a_project_robot_listing_carries_the_project_id() -> None:
 
 
 @pytest.mark.parametrize("call", ["list", "ensure", "rotate"])
-async def test_an_absent_credential_project_is_a_clear_error(call: str) -> None:
-    """A 404 for the credential project is a non-retryable error naming it, not an empty list."""
+async def test_an_absent_credential_project_is_a_retryable_error_or_empty(call: str) -> None:
+    """Ensure/rotate: a retryable error naming the project (a later reconcile may create it).
+
+    List: no robots, since they went with the project, so the orphan sweep is not stuck.
+    """
     replay, adapter = build("credentials.json", "list_project_missing")
+    if call == "list":
+        assert await adapter.list_credentials(TENANT) == []
+        replay.assert_exhausted()
+        assert {r.method for r in replay.seen} == {"GET"}
+        return
     with pytest.raises(AdapterError) as info:
-        if call == "list":
-            await adapter.list_credentials(TENANT)
-        elif call == "ensure":
+        if call == "ensure":
             await adapter.ensure_credential(PUSH, state_of())
         else:
             await adapter.rotate_begin(PUSH, state_of())
     replay.assert_exhausted()
-    assert not info.value.retryable
+    assert info.value.retryable
     assert PROJECT in info.value.message
     assert {r.method for r in replay.seen} == {"GET"}
 
@@ -819,6 +828,15 @@ async def test_deletes_tolerate_an_absent_credential_project() -> None:
     replay.assert_exhausted()
     assert gone.change.state is ChangeState.UNCHANGED
     assert {r.method for r in replay.seen} == {"GET"}
+
+
+async def test_a_missing_project_is_read_once_for_a_multi_slot_delete() -> None:
+    """The 404 is cached for the session: two slots, one `GET /projects/{name}`, no DELETE."""
+    replay, adapter = build("fallback.json", "delete_project_missing")
+    outcome = await adapter.delete_credential(PUSH, state_of(SLOT, PREV_SLOT_NO_ID))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UNCHANGED
+    assert [r.url.path for r in replay.seen] == [f"/api/v2.0/projects/{PROJECT}"]
 
 
 async def test_a_project_without_an_id_is_an_error() -> None:
@@ -916,10 +934,11 @@ async def test_the_project_id_is_read_once_per_operation() -> None:
 
 async def test_a_robot_found_by_id_without_the_marker_is_refused() -> None:
     """Ownership also applies to the id path."""
-    _, adapter = build("credentials.json", "by_id_foreign")
-    with pytest.raises(AdapterError) as info:
+    replay, adapter = build("credentials.json", "by_id_foreign")
+    with pytest.raises(AdapterError):
         await adapter.ensure_credential(PUSH, state_of(BY_ID_SLOT))
-    assert not info.value.retryable
+    replay.assert_exhausted()
+    assert [r.method for r in replay.seen] == ["GET", "GET", "GET", "POST"]
 
 
 async def test_a_project_creation_race_applies_the_privacy_check() -> None:

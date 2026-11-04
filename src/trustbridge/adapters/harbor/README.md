@@ -60,17 +60,19 @@ webhook is `STATIC_HEADER` in `Authorization`, trigger-only.
   its full name (`<prefix><project>+<name>`, default prefix `robot$`) still ends in
   `<credential project>+<slot name>` and it has the marker. An id Harbor no longer knows (404),
   one that now names a robot failing any of those checks (renamed, moved, foreign) and a slot
-  without an id all fall back to the project listing, where the name is matched exactly on the
-  client and the marker is checked by the caller. A robot found by id that fails the checks is
-  never adopted, refreshed or deleted. The listing is
+  without an id all fall back to the project listing, where the same checks apply (exact name, project,
+  tenant prefix, marker). A robot failing them, found by id or by listing, is never adopted,
+  refreshed or deleted; a fallback is logged at debug level. The listing is
   `q=Level=project,ProjectID=<id>,name=~<name>`: the swagger does not document the `Level` and
   `ProjectID` keys (its `ListRobot` text only says "with the specified level and project"), but
   the handler requires `ProjectID` with `Level=project` (a 400 otherwise): `ListRobot` in
   <https://github.com/goharbor/harbor/blob/main/src/server/v2.0/handler/robot.go>. The id is
   `Project.project_id` from `GET /projects/{name}` (swagger `Project`), read once per adapter
-  operation (no cache across calls). A credential project that does not exist (404) is a
-  non-retryable error naming it for ensure, rotate and list, never an empty listing; the delete
-  paths treat it as already gone (Harbor removes a project's robots with it) and send no DELETE.
+  operation (a 404 is cached too; nothing is cached across calls). A credential project that does
+  not exist (404) is a retryable error naming it for ensure and rotate (it is operator
+  configuration, created by a later reconcile or fixed by the operator); list returns an empty
+  list and the delete paths treat it as already gone (Harbor removes a project's robots with it),
+  sending no DELETE.
 - **Webhook.** Harbor sends `auth_header` verbatim as the `Authorization` request header, so the
   inbound check is a static-header comparison, never an HMAC; the payload is only a trigger.
   Default event `PUSH_ARTIFACT`. Harbor masks `auth_header`, so the state ref keeps `auth`, an
