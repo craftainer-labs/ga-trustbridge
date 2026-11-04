@@ -441,7 +441,9 @@ _EXPORT_RESPONSE: dict[int | str, dict[str, Any]] = {
         "content": {"application/x-ndjson": {"schema": {"type": "string"}}},
     }
 }
-SinceSeq = Annotated[int | None, Query(ge=0, le=MAX_SEQ, description="Resume after this seq (exclusive)")]
+SinceSeq = Annotated[
+    int | None, Query(ge=0, le=MAX_SEQ, description="Resume after this seq (exclusive)")
+]
 
 
 @router.get(
