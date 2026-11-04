@@ -434,7 +434,7 @@ _EXPORT_RESPONSE: dict[int | str, dict[str, Any]] = {
         "content": {"application/x-ndjson": {"schema": {"type": "string"}}},
     }
 }
-AfterSeq = Annotated[int | None, Query(ge=0, description="Resume after this seq (exclusive)")]
+SinceSeq = Annotated[int | None, Query(ge=0, description="Resume after this seq (exclusive)")]
 
 
 @router.get(
@@ -450,10 +450,10 @@ async def export_audit_events(  # noqa: PLR0913 - the documented query surface
     runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
     filters: Filters,
     tenant_id: InstanceTenant = None,
-    after_seq: AfterSeq = None,
+    since_seq: SinceSeq = None,
 ) -> StreamingResponse:
     """Stream all tenants' audit events as NDJSON (instance-scoped auditor); itself audited."""
-    query = _query(filters, tenant_id=tenant_id, after_seq=after_seq)
+    query = _query(filters, tenant_id=tenant_id, after_seq=since_seq)
     return _export_response(request, runtime, principal, query, None)
 
 
@@ -470,8 +470,8 @@ async def export_tenant_audit_events(  # noqa: PLR0913 - the documented query su
     principal: Annotated[Principal, Depends(get_principal)],
     runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
     filters: Filters,
-    after_seq: AfterSeq = None,
+    since_seq: SinceSeq = None,
 ) -> StreamingResponse:
     """Stream one tenant's audit events as NDJSON; itself audited."""
-    query = _query(filters, after_seq=after_seq)
+    query = _query(filters, after_seq=since_seq)
     return _export_response(request, runtime, principal, query, tenant_id)

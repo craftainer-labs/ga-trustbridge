@@ -39,9 +39,8 @@ Lists take `limit` (1 to 200, default 50) and an opaque `cursor`, and answer
 **Audit parameters** are `AuditQuery`'s names: `since` (inclusive) and `until` (exclusive) on
 `occurred_at` (RFC 3339 with a zone), `actor_sub`, `action`, `resource_type`, `resource_id`,
 `outcome` (`success`, `denied`, `failure`), `descending` (list only) and, on the instance routes,
-`tenant_id` to narrow. The export takes `after_seq` (resume after that `seq`, exclusive) instead
-of `cursor` and `limit`; ADR 0032 wrote `since_seq` for it, `after_seq` is the name `AuditQuery`
-already has.
+`tenant_id` to narrow. The export takes `since_seq` (resume after that `seq`, exclusive; ADR 0032's
+name, mapped to `AuditQuery.after_seq`) instead of `cursor` and `limit`.
 
 **The audit cursor** is an unsigned base64url JSON pair `[sort key, id]` (for audit, `[seq,
 event id]`; for hosts and tenants, the name or id). It only names a position, and every query is
@@ -90,9 +89,9 @@ rejection becomes a 429). Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_REQUES
   the snapshot `docs/openapi/admin-v1.json` with its drift test: NG6d-2.
 - `GET /tenants/{t}/adapters`: nothing on main loads adapters in the api process (no
   `ADAPTERS_ENABLED`, no registry), so there is no capability summary to serve; it needs that
-  wiring first.
+  wiring first (NG6d-2).
 - `GET /audit-events/{id}`: neither `tb_audit_list` nor a plain `SELECT` can read one null-tenant
-  event by id without a new database function (a migration).
+  event by id without a new database function (a migration); NG6d-2.
 - `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
   (ADR 0034); NG6h.
 - Every `POST` (NG6e). `admin_disabled_by` and `admin_disable_reason` are not in `TenantOut`

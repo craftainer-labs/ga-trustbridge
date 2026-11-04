@@ -431,7 +431,7 @@ def test_instance_export_streams_ndjson_in_pages_and_writes_its_event(
     reads = _paged(monkeypatch)
     env = build(writer=object())
     response = env.client(AUDITOR).get(
-        "/admin/v1/audit-events/export", params={"action": "authz.denied", "after_seq": 0}
+        "/admin/v1/audit-events/export", params={"action": "authz.denied", "since_seq": 0}
     )
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/x-ndjson")

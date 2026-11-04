@@ -209,7 +209,7 @@ async def test_the_export_is_ordered_paged_scoped_and_audited(db: rls.Db) -> Non
         assert len({e["seq"] for e in everything}) == len(everything) >= 5
         resumed = await instance.get(
             "/admin/v1/audit-events/export",
-            params={"action": "tenant.sync", "after_seq": everything[1]["seq"]},
+            params={"action": "tenant.sync", "since_seq": everything[1]["seq"]},
         )
         assert [json.loads(line)["seq"] for line in resumed.text.splitlines()] == [
             e["seq"] for e in everything[2:]

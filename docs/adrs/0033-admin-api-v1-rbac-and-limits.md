@@ -3,7 +3,8 @@
 ## Status
 
 Proposed. G-api answers from the user are recorded below (2026-11-03); none are open.
-No code is written yet. It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
+NG6d-1 (#23) implemented `me`, openapi, hosts, tenants and audit read/export. The other routes arrive with NG6d-2, NG6e and NG6h.
+It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
 endpoints) merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (instance layout, the abuse
 limiter, the NG6 split of limits),
