@@ -72,7 +72,6 @@ def upgrade() -> None:
     )
 
 
-
 def downgrade() -> None:
     """Downgrade schema."""
     op.execute("SET LOCAL lock_timeout = '5s'")
