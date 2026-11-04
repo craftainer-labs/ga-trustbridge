@@ -141,7 +141,7 @@ def _check_payload(name: str, value: object) -> None:
         raise ValueError(f"{name} must be an object")
     try:
         dumped = json.dumps(value, allow_nan=False)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         raise ValueError(f"{name} is not serializable as JSON") from None
     if len(dumped.encode()) > MAX_PAYLOAD_BYTES:
         raise ValueError(f"{name} is larger than {MAX_PAYLOAD_BYTES} bytes")
