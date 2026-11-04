@@ -481,7 +481,8 @@ class HarborAdapter:
             items.extend(batch)
             if len(batch) < int(PAGE_SIZE):
                 return items
-        raise AdapterError(False, f"Harbor listing {path} has more than {MAX_PAGES} pages")
+        msg = f"Harbor listing {path} exceeds the safety bound of {MAX_PAGES} pages"
+        raise AdapterError(False, msg)
 
     @staticmethod
     async def _project_id(c: HarborClient, project: str) -> int | None:
