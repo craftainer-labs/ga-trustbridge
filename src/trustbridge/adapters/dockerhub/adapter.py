@@ -4,6 +4,7 @@ See `README.md` for the endpoints, which payload shapes Docker's documentation c
 per-repository grant maps to an organization access token, and what still needs a live check.
 """
 
+import logging
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -51,15 +52,23 @@ ORGS = "/v2/orgs"
 NAMESPACES = "/v2/namespaces"
 
 HTTP_NOT_FOUND = 404
+HTTP_FORBIDDEN = 403
 HTTP_CONFLICT = 409
 NOT_FOUND = frozenset({HTTP_NOT_FOUND})
 CONFLICT = frozenset({HTTP_CONFLICT})
+FORBIDDEN = frozenset({HTTP_FORBIDDEN})
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://hub.docker.com"
 MARKER = "managed by trustbridge"
 """The description of every repository and token the adapter creates: its ownership marker."""
 
 TOKEN_TTL = timedelta(days=90)
+CAPACITY_MESSAGE = (
+    "Docker Hub refused to create the access token (HTTP 403): the organization is probably at "
+    "its cap of access tokens (Team 10, Business 100); delete one in Docker Hub"
+)
 PAGE_SIZE = 100
 MAX_PAGES = 50
 CREDENTIAL_LIMIT = 10
@@ -165,8 +174,15 @@ class DockerHubAdapter:
             return DEFAULT_BASE_URL
         url = raw.get_secret_value().rstrip("/")
         parts = urlsplit(url)
-        if parts.scheme != "https" or not parts.netloc or parts.query or parts.fragment:
-            raise AdapterConfigurationError("Docker Hub base_url must be an https URL")
+        if (
+            parts.scheme != "https"
+            or not parts.netloc
+            or "@" in parts.netloc
+            or parts.query
+            or parts.fragment
+        ):
+            msg = "Docker Hub base_url must be an https URL without credentials, query or fragment"
+            raise AdapterConfigurationError(msg)
         return url
 
     def _namespace(self) -> str:
@@ -296,7 +312,9 @@ class DockerHubAdapter:
             recorded = slot.ref.get("token_id")
             current = next((t for t in existing if t["id"] == recorded and self._usable(t)), None)
             if slot.delivered and current is not None:
-                return await self._confirm(c, s, prior, namespace, current)
+                confirmed = await self._confirm(c, s, prior, current, existing)
+                if confirmed is not None:
+                    return confirmed
             return await self._issue(c, s, prior, namespace, existing)
 
     async def rotate_begin(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome:
@@ -411,17 +429,58 @@ class DockerHubAdapter:
         c: DockerHubClient,
         s: CredentialScope,
         prior: CredentialState,
-        namespace: str,
         token: JsonObj,
-    ) -> CredentialOutcome:
-        """Keep a delivered, usable OAT; PATCH its resources when the grant drifted."""
+        existing: list[JsonObj],
+    ) -> CredentialOutcome | None:
+        """Keep a delivered, usable OAT: PATCH a drifted grant, delete other same-label tokens.
+
+        Returns None when the token is gone (404 on the read): the caller issues a new one. The
+        other same-label tokens are leftovers whose secret is lost (a cleanup that failed after
+        an issue); the recorded token is never among them.
+        """
+        namespace = self._namespace()
         path = f"{ORGS}/{seg(namespace)}/access-tokens/{seg(token['id'])}"
         desired = self._resources(s)
-        current = json_object(await c.call("GET", path))
-        if _normalised(current.get("resources")) == _normalised(desired):
-            return CredentialOutcome(Change(ChangeState.UNCHANGED), prior, None)
-        await c.call("PATCH", path, json={"resources": desired})
-        return CredentialOutcome(Change(ChangeState.UPDATED), prior, None)
+        read = await c.call("GET", path, accept=NOT_FOUND)
+        if read.status_code == HTTP_NOT_FOUND:
+            return None
+        state = ChangeState.UNCHANGED
+        if _normalised(json_object(read).get("resources")) != _normalised(desired):
+            await c.call("PATCH", path, json={"resources": desired})
+            state = ChangeState.UPDATED
+        for stale in existing:
+            if stale["id"] != token["id"] and await self._delete_token(c, namespace, stale["id"]):
+                state = ChangeState.UPDATED
+        return CredentialOutcome(Change(state), prior, None)
+
+    async def _create_token(
+        self,
+        c: DockerHubClient,
+        namespace: str,
+        body: JsonObj,
+        existing: list[JsonObj],
+        live: str | None,
+    ) -> tuple[JsonObj, list[JsonObj]]:
+        """POST the token; on a 403 (the token limit) free stale same-label tokens and retry once.
+
+        Returns the response and the same-label tokens still to delete. Only tokens other than
+        the recorded live one are deleted before the create; the live one waits for its
+        replacement. Still refused with nothing stale to free is a non-retryable capacity error.
+        """
+        path = f"{ORGS}/{seg(namespace)}/access-tokens"
+        response = await c.call("POST", path, json=body, accept=FORBIDDEN)
+        remaining = existing
+        if response.status_code == HTTP_FORBIDDEN:
+            stale = [t for t in existing if t["id"] != live]
+            if not stale:
+                raise AdapterError(False, CAPACITY_MESSAGE)
+            for old in stale:
+                await self._delete_token(c, namespace, old["id"])
+            remaining = [t for t in existing if t["id"] == live]
+            response = await c.call("POST", path, json=body, accept=FORBIDDEN)
+            if response.status_code == HTTP_FORBIDDEN:
+                raise AdapterError(False, CAPACITY_MESSAGE)
+        return json_object(response), remaining
 
     async def _issue(
         self,
@@ -433,11 +492,12 @@ class DockerHubAdapter:
     ) -> CredentialOutcome:
         """Create the OAT (secret shown once), then delete the older same-label ones.
 
-        Two phases: a failed create (5xx, 429, token limit) leaves every old token in place and
-        is retried as the error says. Older same-label tokens (their secret is lost, and they
-        count toward the limit) go only after the create succeeded, and never the new one: the
-        list was read before the create. A retry after a failure in the second phase finds the
-        new token among the older ones, because its secret was never returned, and replaces it.
+        Two phases: a failed create (5xx, 429) leaves every old token in place and is retried as
+        the error says; a 403 first frees stale tokens (see `_create_token`). Older same-label
+        tokens (their secret is lost, and they count toward the limit) go only after the create
+        succeeded, and never the new one: the list was read before the create. A delete that
+        fails then is logged and tolerated, because the secret must not be lost: the next
+        reconcile (`_confirm`) deletes every same-label token but the recorded one.
         """
         slot = self._current(base)
         expires = self._clock() + TOKEN_TTL
@@ -447,21 +507,31 @@ class DockerHubAdapter:
             "resources": self._resources(s),
             "expires_at": _format_time(expires),
         }
-        created = json_object(
-            await c.call("POST", f"{ORGS}/{seg(namespace)}/access-tokens", json=body)
+        created, remaining = await self._create_token(
+            c, namespace, body, existing, slot.ref.get("token_id")
         )
         secret = created.get("token")
         token_id = created.get("id")
         if not isinstance(secret, str) or not isinstance(token_id, str):
             raise AdapterError(False, "Docker Hub returned an unexpected token response")
-        for old in existing:
-            await self._delete_token(c, namespace, old["id"])
+        leftover = 0
+        for old in remaining:
+            try:
+                await self._delete_token(c, namespace, old["id"])
+            except AdapterError as exc:
+                leftover += 1
+                _log.warning("dockerhub: stale token cleanup failed: %s", exc.message)
         issued = IssuedSecret({"token": SecretStr(secret)}, expires)
         ref = {"kind": "oat", "token_id": token_id}
         state = CredentialState(
             current=replace(slot, ref=ref, delivered=False), previous=base.previous
         )
-        change = Change(ChangeState.UPDATED if existing else ChangeState.CREATED)
+        detail = (
+            f"{leftover} stale token(s) remain; the next reconcile deletes them"
+            if leftover
+            else None
+        )
+        change = Change(ChangeState.UPDATED if existing else ChangeState.CREATED, detail=detail)
         return CredentialOutcome(change, state, issued)
 
     @staticmethod

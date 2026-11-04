@@ -12,7 +12,7 @@ Entry point `dockerhub = "trustbridge.adapters.dockerhub:DockerHubAdapter"` in t
 
 Connection data per tenant (`AdapterConfig.connection`): `namespace` (required: the Docker Hub
 organization; it is the "project"), `username` (required: the dedicated service user that owns
-the PAT) and an optional `base_url` (https, no query; default `https://hub.docker.com`). The
+the PAT) and an optional `base_url` (https, no userinfo, query or fragment; default `https://hub.docker.com`). The
 organization-owner PAT is `privileged_credential`. The adapter is stateless;
 `DockerHubAdapter(config, *, transport=None, clock=None)` takes the last two for the contract
 tests. `github_outputs` reads the constant per-instance `namespace` (user decision: that counts as
@@ -82,11 +82,16 @@ The adapter therefore always issues OATs, never PATs.
   the previous one stays valid; `rotate_finish` deletes the previous. Issuing is itself two-phase:
   the OAT is created first, and only then are the older same-label tokens deleted (their secret is
   gone, Docker shows it once, and they count toward the limit). A failed create leaves the old
-  tokens in place and is retried. If a delete fails after the create, the error is retryable and
-  the retry finds the new token (its secret was never returned) among the old ones and replaces it,
-  so a retry converges to one token. A delivered token is confirmed only by the id its slot
-  records; if that token is gone or unusable, a new one is issued with `delivered=False` and the
-  core delivers the new secret.
+  tokens in place and is retried (5xx, 429). A 403 on the create is taken as the token limit: the
+  adapter deletes the same-label tokens other than the one the slot records as live, then creates
+  once more; still refused, or nothing stale to free, is a non-retryable capacity error (the live
+  token is never deleted before its replacement exists). A delete that fails after a successful
+  create is logged and tolerated, so the new secret is returned and delivered; the next
+  `ensure_credential` (a delivered, matching token) deletes every same-label token except the
+  recorded id. A token is confirmed only by the id its slot records; if it is gone or unusable (a
+  404 on the read included), a new one is issued with `delivered=False` and the core delivers the
+  new secret. Core stores the bumped slot (generation + 1, new label, empty `ref`) before it calls
+  `rotate_begin`, so the new label is the slot's `name`.
 - **Token limit.** `credential_limit=10` (Docker Team; Business allows 100). Expired and deactivated
   tokens count until deleted, so a deactivated or expired delivered token is deleted and re-issued.
   An OAT is created with a 90-day expiry (Docker allows up to one year).
@@ -155,8 +160,12 @@ The fixtures encode these as best-effort shapes; none has a primary-documentatio
 - No webhook is created through the API (see Decisions).
 - A failure after the token was created and before the core stored the secret loses the secret; the
   next call creates another and then deletes the lost one. The create comes first so that a failed
-  create never costs the old token, which means re-issuing needs a free slot under the token limit
-  (a tenant at the limit gets a non-retryable 403 and keeps its old token).
+  create never costs the live token; a tenant at the token limit has the stale same-label tokens
+  freed first, and with only live tokens left gets a non-retryable capacity error. Docker documents
+  no status for the limit; 403 is assumed (it is also what a missing permission returns, so the
+  capacity message says "probably").
+- The ownership marker is an exact match of the description: a repository whose description a
+  human edited is refused (fail-closed ownership) until the marker is restored.
 - Docker documents no way to tell a missing organization from a forbidden one except the status
   codes of `GET /v2/orgs/{ns}/settings`; a namespace that is a user account (not an organization)
   is not supported, since organization access tokens exist only for organizations.

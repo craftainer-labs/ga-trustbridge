@@ -180,7 +180,15 @@ async def test_a_missing_or_empty_username_is_a_configuration_error(
 
 
 @pytest.mark.parametrize(
-    "url", ["http://hub.docker.com", "https://", "https://h.example/?q=1", "https://h.example/#f"]
+    "url",
+    [
+        "http://hub.docker.com",
+        "https://",
+        "https://h.example/?q=1",
+        "https://h.example/#f",
+        "https://user:pass@hub.docker.com",
+        "https://user@hub.docker.com",
+    ],
 )
 def test_base_url_must_be_plain_https(url: str) -> None:
     """The operator-provisioned base_url must be https without query or fragment."""
@@ -483,31 +491,98 @@ async def test_old_tokens_go_only_after_the_create_succeeded() -> None:
     assert outcome.state.current.ref["token_id"] == T4
 
 
-async def test_a_retry_after_a_failed_cleanup_converges_to_one_token() -> None:
-    """The create worked but deleting the old token failed: a retryable error. The retry finds
-    the unreturned token among the old ones, creates once and deletes each exactly once."""
+def deleted_ids(replay: Replay) -> list[str]:
+    """Return the token ids the adapter sent a DELETE for, in order."""
+    return [r.url.path.rsplit("/", 1)[1] for r in replay.seen if r.method == "DELETE"]
+
+
+async def test_a_cleanup_failure_after_the_create_returns_the_secret(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The create worked, deleting the old token failed: log it, keep the new secret and state."""
     replay, adapter = build("credentials.json", "issue_delete_fails_after_create")
-    with pytest.raises(AdapterError) as err:
-        await adapter.ensure_credential(PULL, CredentialState(PULL_SLOT))
+    with caplog.at_level("WARNING"):
+        outcome = await adapter.ensure_credential(PULL, CredentialState(PULL_SLOT))
     replay.assert_exhausted()
-    assert err.value.retryable
+    assert isinstance(outcome.credential, IssuedSecret)
+    assert outcome.credential.values["token"].get_secret_value() == "dckr_oat_dummy_t4"
+    assert outcome.state.current is not None
+    assert outcome.state.current.ref["token_id"] == T4
+    assert not outcome.state.current.delivered
+    assert outcome.change.detail is not None
+    assert "stale token cleanup failed" in caplog.text
+    assert "dckr_oat_dummy" not in caplog.text
+    assert deleted_ids(replay) == [T0]
+
+
+async def test_the_next_reconcile_deletes_the_leftover_tokens() -> None:
+    """Delivered with the new id recorded: the other same-label token goes, the recorded stays."""
+    replay, adapter = build("credentials.json", "confirm_prunes_after_failed_cleanup")
+    slot = replace(PULL_SLOT, ref={"kind": "oat", "token_id": T4}, delivered=True)
+    outcome = await adapter.ensure_credential(PULL, CredentialState(slot))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UPDATED
+    assert outcome.credential is None
+    assert deleted_ids(replay) == [T0]
+
+
+async def test_a_retry_after_a_crash_replaces_every_unreturned_token() -> None:
+    """No ref recorded (crash before the state was stored): one create, then both are deleted."""
     replay, adapter = build("credentials.json", "issue_retry_after_partial_failure")
     outcome = await adapter.ensure_credential(PULL, CredentialState(PULL_SLOT))
     replay.assert_exhausted()
     assert outcome.change.state is ChangeState.UPDATED
-    deleted = [r.url.path.rsplit("/", 1)[1] for r in replay.seen if r.method == "DELETE"]
-    assert deleted == [T0, T4]
+    assert deleted_ids(replay) == [T0, T4]
     assert outcome.state.current is not None
     assert outcome.state.current.ref["token_id"] == T6
 
 
+async def test_at_the_limit_a_stale_token_is_freed_and_the_create_retried() -> None:
+    """A 403 on the create: delete the stale same-label token, then create once more."""
+    replay, adapter = build("credentials.json", "issue_limit_frees_stale")
+    outcome = await adapter.ensure_credential(PULL, CredentialState(PULL_SLOT))
+    replay.assert_exhausted()
+    assert isinstance(outcome.credential, IssuedSecret)
+    assert deleted_ids(replay) == [T0]
+    assert [r.method for r in replay.seen] == ["POST", "GET", "POST", "DELETE", "POST"]
+
+
+async def test_at_the_limit_with_only_live_tokens_the_error_is_a_capacity_error() -> None:
+    """The recorded live token is never deleted to make room: a non-retryable capacity error."""
+    slot = replace(PULL_SLOT, ref={"kind": "oat", "token_id": T1})
+    replay, adapter = build("credentials.json", "issue_limit_only_live")
+    with pytest.raises(AdapterError, match="cap of access tokens") as err:
+        await adapter.ensure_credential(PULL, CredentialState(slot))
+    replay.assert_exhausted()
+    assert not err.value.retryable
+    assert deleted_ids(replay) == []
+    replay, adapter = build("credentials.json", "issue_limit_still_hit")
+    with pytest.raises(AdapterError, match="cap of access tokens") as err:
+        await adapter.ensure_credential(PULL, CredentialState(slot))
+    replay.assert_exhausted()
+    assert not err.value.retryable
+    assert deleted_ids(replay) == [T0]
+
+
 async def test_a_delivered_token_is_matched_by_its_recorded_id() -> None:
-    """Another usable token of the same label is neither confirmed nor touched."""
+    """Another usable token of the same label is not the one confirmed; it is cleaned up."""
     replay, adapter = build("credentials.json", "confirm_matches_recorded_id")
     outcome = await adapter.ensure_credential(PULL, DELIVERED_PULL)
     replay.assert_exhausted()
-    assert outcome.change.state is ChangeState.UNCHANGED
-    assert replay.seen[-1].url.path.endswith(f"/{T1}")
+    assert outcome.change.state is ChangeState.UPDATED
+    assert replay.seen[2].url.path.endswith(f"/{T1}")
+    assert deleted_ids(replay) == [T0]
+
+
+async def test_a_recorded_token_that_vanishes_on_the_read_is_issued_again() -> None:
+    """A 404 on GET-by-id means the token is gone: fall back to a new, undelivered one."""
+    replay, adapter = build("credentials.json", "confirm_token_gone")
+    outcome = await adapter.ensure_credential(PULL, DELIVERED_PULL)
+    replay.assert_exhausted()
+    assert isinstance(outcome.credential, IssuedSecret)
+    assert outcome.state.current is not None
+    assert not outcome.state.current.delivered
+    assert outcome.state.current.ref["token_id"] == T4
 
 
 async def test_a_delivered_token_that_is_gone_is_issued_again_undelivered() -> None:
@@ -556,6 +631,22 @@ async def test_rotate_begin_resumes_after_a_crash() -> None:
     replay.assert_exhausted()
     assert outcome.change.state is ChangeState.UPDATED
     assert outcome.state.previous == PREV_SLOT
+
+
+async def test_rotate_begin_gets_the_bumped_generation_and_label() -> None:
+    """Core stores the next slot (generation + 1, new name, empty ref) before calling rotate_begin.
+
+    The adapter must create the token under `current.name` and leave `previous` alone; the
+    previous generation's label differs only in its suffix.
+    """
+    assert PUSH_SLOT.generation == PREV_SLOT.generation + 1
+    assert PUSH_SLOT.name != PREV_SLOT.name
+    assert not PUSH_SLOT.ref
+    replay, adapter = build("credentials.json", "rotate_begin")
+    await adapter.rotate_begin(PUSH, CredentialState(PUSH_SLOT, PREV_SLOT))
+    created = next(r for r in replay.seen if r.method == "POST" and "access-tokens" in r.url.path)
+    assert json.loads(created.content)["label"] == PUSH_SLOT.name
+    assert deleted_ids(replay) == []
 
 
 async def test_rotate_finish_deletes_previous_only() -> None:
