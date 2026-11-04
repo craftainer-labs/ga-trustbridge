@@ -452,6 +452,26 @@ def test_instance_export_streams_ndjson_in_pages_and_writes_its_event(
     assert event["query"].action == "authz.denied"
 
 
+def test_a_failed_audit_write_is_logged_and_does_not_break_the_stream(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A DB outage while recording the export is logged, not raised over the stream."""
+
+    async def broken(writer: object, **kwargs: Any) -> None:  # noqa: ANN401
+        del writer, kwargs
+        msg = "db down"
+        raise RuntimeError(msg)
+
+    _paged(monkeypatch)
+    monkeypatch.setattr(routes, "record_export", broken)
+    env = build(writer=object())
+    with caplog.at_level("ERROR", logger=routes.logger.name):
+        response = env.client(AUDITOR).get("/admin/v1/audit-events/export")
+    assert response.status_code == 200
+    assert [json.loads(line)["seq"] for line in response.text.splitlines()] == [1, 2, 3]
+    assert "audit.export row not written; 3 rows were sent" in caplog.text
+
+
 def test_tenant_export_runs_in_the_tenants_scope(
     monkeypatch: pytest.MonkeyPatch, exported: Exports
 ) -> None:

@@ -211,9 +211,12 @@ async def test_the_export_is_ordered_paged_scoped_and_audited(db: rls.Db) -> Non
             "/admin/v1/audit-events/export",
             params={"action": "tenant.sync", "since_seq": everything[1]["seq"]},
         )
-        assert [json.loads(line)["seq"] for line in resumed.text.splitlines()] == [
-            e["seq"] for e in everything[2:]
-        ]
+        # The lag window moves between the two reads, so rows that aged past it may follow.
+        resumed_seqs = [json.loads(line)["seq"] for line in resumed.text.splitlines()]
+        expected = [e["seq"] for e in everything[2:]]
+        assert resumed_seqs[: len(expected)] == expected
+        assert resumed_seqs == sorted(resumed_seqs)
+        assert min(resumed_seqs) > everything[1]["seq"]
     events = await _rows(
         db,
         'SELECT actor_sub, tenant_id, resource_id, outcome, "after" FROM audit_events '
