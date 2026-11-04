@@ -13,10 +13,12 @@ from fastapi.testclient import TestClient
 from tests.trustbridge.admin import helpers
 from tests.trustbridge.admin.helpers import ACME, OTHER, build, problem
 from trustbridge.admin import routes
+from trustbridge.admin.access import NoTenants
 from trustbridge.admin.cursor import encode_cursor
 from trustbridge.admin.guards import GUARDED
 from trustbridge.audit import ActorType, AuditPage, AuditQuery, AuditRecord, Outcome
-from trustbridge.tenancy import TenantInfo
+from trustbridge.rbac import RbacConfig, RbacRuntime
+from trustbridge.tenancy import TenantInfo, current_tenant
 
 ADMIN = "trustbridge:admin"
 VIEWER = "trustbridge:viewer"
@@ -506,7 +508,7 @@ def test_a_tenant_that_vanished_between_the_check_and_the_read_is_a_404(
     """RBAC saw the tenant, the listing no longer does."""
 
     async def none(_factory: object) -> list[TenantInfo]:
-        return []
+        return [_info(OTHER)]
 
     monkeypatch.setattr(routes, "all_tenants", none)
     problem(build().client(ACME_VIEWER).get(f"/admin/v1/tenants/{ACME.id}"), 404, "not-found")
@@ -530,3 +532,32 @@ def test_a_missing_runtime_is_a_server_error_not_an_open_door() -> None:
         raise_server_exceptions=False,
     )
     assert client.get("/admin/v1/hosts").status_code == 500
+
+
+def test_a_principal_with_no_grant_cannot_list_tenants_even_without_a_denial_sink() -> None:
+    """403 for no grant at all; the sink is optional."""
+    env = build()
+    env.app.state.rbac = RbacRuntime(RbacConfig(helpers.CLIENT), helpers.Access([]))
+    problem(env.client().get("/admin/v1/tenants"), 403, "forbidden")
+
+
+def test_me_without_a_database_lists_no_tenants() -> None:
+    """Mock mode: the grants are shown, no tenant is resolved."""
+    body = build(factory=None).client(VIEWER).get("/admin/v1/me").json()
+    assert body["tenants"] == []
+    assert [g["role"] for g in body["grants"]] == ["viewer"]
+
+
+def test_the_spec_is_built_once() -> None:
+    """The second call returns the cached document."""
+    assert routes.openapi_spec() is routes.openapi_spec()
+
+
+async def test_no_tenants_access_resolves_nothing() -> None:
+    """`MODE=mock` without a database."""
+    access = NoTenants()
+    assert await access.get_tenant(uuid4()) is None
+    tenant = uuid4()
+    with access.tenant_context(tenant):
+        assert current_tenant.get() == tenant
+    assert current_tenant.get() is None

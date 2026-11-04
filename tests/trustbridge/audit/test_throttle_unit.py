@@ -2,8 +2,11 @@
 
 from dataclasses import replace
 
+import pytest
+
 from tests.trustbridge.fakes import FakeRedis
 from tests.trustbridge.helpers import as_redis
+from trustbridge.audit import throttle as throttle_module
 from trustbridge.audit.denial import Denial
 from trustbridge.audit.throttle import ThrottledDenials
 from trustbridge.ratelimit import InMemoryWindowCounter, ValkeyWindowCounter, WindowCounter
@@ -208,3 +211,38 @@ async def test_a_flush_that_cannot_reach_the_counter_is_logged_and_skipped() -> 
     valkey.down = False
     await throttle.denied(_denial())
     assert sink.rows[5].suppressed == 2
+
+
+async def test_the_second_replica_to_notice_the_closed_window_writes_no_second_summary() -> None:
+    """Both replicas see the first denial of the new window; only one claims the summary."""
+    valkey = FakeRedis()
+    sink, clock = Sink(), Clock()
+    one = _throttle(sink, ValkeyWindowCounter(as_redis(valkey)), clock)
+    two = _throttle(sink, ValkeyWindowCounter(as_redis(valkey)), clock)
+    for _ in range(7):
+        await one.denied(_denial())
+    clock.now += WINDOW
+    await one.denied(_denial())  # claims the summary
+    await two.denied(_denial())  # second denial of the window: n == 2, nothing to claim
+    other = _throttle(sink, ValkeyWindowCounter(as_redis(valkey)), clock)
+    assert (
+        await other._claim_summary(
+            other._base(_denial()),
+            int(clock.now // WINDOW) - 1,
+            _denial(),
+        )
+        is None
+    )
+    assert [r.suppressed for r in sink.rows].count(2) == 1
+
+
+async def test_the_index_of_open_windows_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Past the cap the count is still kept in the store, only the flush index stops growing."""
+    monkeypatch.setattr(throttle_module, "MAX_OPEN_WINDOWS", 1)
+    sink, clock = Sink(), Clock()
+    throttle = _throttle(sink, InMemoryWindowCounter(), clock)
+    for sub in ("a", "b"):
+        for _ in range(6):
+            await throttle.denied(_denial(sub=sub))
+    clock.now += WINDOW
+    assert await throttle.flush() == 1  # only "a" was indexed

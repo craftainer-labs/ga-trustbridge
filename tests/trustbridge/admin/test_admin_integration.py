@@ -20,7 +20,7 @@ from app.oidc import get_current_claims
 from app.problem_details import register_problem_handlers
 from tests.trustbridge.admin.helpers import _claims, build, token
 from tests.trustbridge.tenancy import test_rls_integration as rls
-from trustbridge.admin.access import SqlTenantAccess
+from trustbridge.admin.access import SqlTenantAccess, all_tenants
 from trustbridge.audit import Action, ActorType, AuditDenials, AuditEvent, AuditWriter, Outcome
 from trustbridge.rbac import Authorized, RbacConfig, RbacRuntime, Role, require_role
 from trustbridge.tenancy import current_tenant, install_tenant_hook
@@ -243,3 +243,10 @@ async def test_no_audit_route_changes_a_row(db: rls.Db) -> None:
 async def _no_leftover_context() -> AsyncIterator[None]:
     yield
     assert current_tenant.get() is None
+
+
+async def test_all_tenants_lists_every_tenant_ordered_by_id(db: rls.Db) -> None:
+    """The real read behind `/tenants`: both tenants, sorted, whatever the caller's context."""
+    rows = await all_tenants(db.app)
+    assert [t.id for t in rows] == sorted([db.a, db.b], key=str)
+    assert {t.org for t in rows} == {"a", "b"}
