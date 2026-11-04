@@ -4,7 +4,8 @@ A fixture file holds named scenarios; a scenario is an ordered list of request/r
 The transport asserts that the adapter sends exactly those requests in that order (method, path
 with query, JSON body when the fixture gives one, and the bearer from the login exchange) and
 answers with the recorded response. No network is involved. `${name}` placeholders stand for
-values derived from the tenant and scope.
+values derived from the tenant and scope. A request may name the `bearer` it must carry when it is
+not the first login's (after a re-login).
 """
 
 import json
@@ -58,7 +59,7 @@ class Replay:
         if request.url.path == LOGIN_PATH:
             assert "authorization" not in request.headers
         else:
-            assert request.headers["authorization"] == f"Bearer {BEARER}"
+            assert request.headers["authorization"] == f"Bearer {want.get('bearer', BEARER)}"
         assert str(request.url).startswith(BASE_URL)
         if "json" in want:
             assert json.loads(request.content) == want["json"]

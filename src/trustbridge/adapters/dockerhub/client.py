@@ -16,6 +16,7 @@ from trustbridge.adapters.interface import AdapterError
 JsonObj = dict[str, Any]
 
 DEFAULT_TIMEOUT_SECONDS = 15.0
+HTTP_UNAUTHORIZED = 401
 HTTP_REQUEST_TIMEOUT = 408
 HTTP_TOO_EARLY = 425
 HTTP_TOO_MANY_REQUESTS = 429
@@ -116,10 +117,21 @@ class DockerHubClient:
         params: dict[str, str] | None = None,
         accept: frozenset[int] = frozenset(),
     ) -> httpx.Response:
-        """Send a request; return on 2xx or a status in `accept`, otherwise raise `AdapterError`."""
+        """Send a request; return on 2xx or a status in `accept`, otherwise raise `AdapterError`.
+
+        The bearer lives 10 minutes. A 401 means it expired: log in again and send the request
+        once more. A second 401 is an error like any other (non-retryable).
+        """
         if self._bearer is None:
             self._bearer = await self._login()
-        return await self._send(method, path, json=json, params=params, accept=accept)
+        response = await self._send(
+            method, path, json=json, params=params, accept=accept | {HTTP_UNAUTHORIZED}
+        )
+        if response.status_code == HTTP_UNAUTHORIZED and HTTP_UNAUTHORIZED not in accept:
+            self._bearer = None  # the login must not carry the expired bearer
+            self._bearer = await self._login()
+            response = await self._send(method, path, json=json, params=params, accept=accept)
+        return response
 
 
 def json_object(response: httpx.Response) -> JsonObj:

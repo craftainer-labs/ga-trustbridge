@@ -87,6 +87,8 @@ REPOSITORY_MANUAL_ACTION = (
 _REPO_NAME = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _REPO_NAME_MIN = 2
 _REPO_NAME_MAX = 255
+_TOKEN_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+"""Docker's access token ids are UUIDs (its examples: `a7a5ef25-8889-43a0-8cc7-f2a94268e861`)."""
 
 
 def _format_time(moment: datetime) -> str:
@@ -130,8 +132,14 @@ class DockerHubAdapter:
         transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        """Keep the per-tenant config; `transport` and `clock` exist for the contract tests."""
+        """Keep the per-tenant config; `transport` and `clock` exist for the contract tests.
+
+        The namespace and `base_url` are checked here, so `github_outputs` (a pure function that
+        reads the namespace) can never raise; the credential and the username are checked per call.
+        """
         self._config = config
+        self._namespace()
+        self._base_url()
         self._transport = transport
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -197,15 +205,17 @@ class DockerHubAdapter:
     async def ensure_project(
         self, t: Tenant, s: ProjectSpec, prior: ResourceState | None
     ) -> Applied:
-        """Check that the tenant's namespace is reachable; Docker Hub has no projects to create."""
+        """Check that the tenant's organization exists; Docker Hub has no projects to create.
+
+        The organization settings endpoint answers 404 for an unknown organization, so an empty
+        one (200) is told apart from a missing one; 403 and any other status are errors.
+        """
         del t, s, prior
         namespace = self._namespace()
         async with self._client() as c:
-            found = await c.call(
-                "GET", self._repos_path(namespace), params={"page_size": "1"}, accept=NOT_FOUND
-            )
+            found = await c.call("GET", f"{ORGS}/{seg(namespace)}/settings", accept=NOT_FOUND)
         if found.status_code == HTTP_NOT_FOUND:
-            raise AdapterError(False, "Docker Hub namespace was not found")
+            raise AdapterError(False, "Docker Hub organization was not found")
         ref = {"kind": "project", "namespace": namespace}
         return Applied(Change(ChangeState.UNCHANGED), ResourceState(name=namespace, ref=ref))
 
@@ -218,7 +228,7 @@ class DockerHubAdapter:
     async def ensure_repository(
         self, p: ProjectRef, s: RepoSpec, prior: ResourceState | None
     ) -> Applied:
-        """Create a private repository; one that exists without the marker is never adopted."""
+        """Create a private repository; never adopt an unmarked one or flip a public one private."""
         del prior
         if s.package_type.lower() != "docker":
             raise AdapterConfigurationError("Docker Hub repositories hold docker images only")
@@ -240,8 +250,16 @@ class DockerHubAdapter:
                     found = await c.call("GET", path)
                 else:
                     state = ChangeState.CREATED
-            if state is ChangeState.UNCHANGED and json_object(found).get("description") != MARKER:
-                raise AdapterError(False, "repository exists and is not managed by trustbridge")
+            if state is ChangeState.UNCHANGED:
+                existing = json_object(found)
+                if existing.get("description") != MARKER:
+                    raise AdapterError(False, "repository exists and is not managed by trustbridge")
+                if existing.get("is_private") is not True:
+                    msg = (
+                        f"repository {namespace}/{name} is public: trustbridge never changes "
+                        "visibility, set it to private in the repository's Settings in Docker Hub"
+                    )
+                    raise AdapterError(False, msg)
         ref = {"kind": "repository", "namespace": namespace, "repository": name}
         return Applied(Change(state), ResourceState(name=name, ref=ref))
 
@@ -272,9 +290,13 @@ class DockerHubAdapter:
         namespace = self._namespace()
         async with self._client() as c:
             existing = await self._find_tokens(c, namespace, slot.name)
-            usable = [t for t in existing if self._usable(t)]
-            if slot.delivered and usable:
-                return await self._confirm(c, s, prior, namespace, usable[0])
+            # Only the token this slot recorded counts. If it is gone or unusable the secret
+            # cannot be read back, so `_issue` returns a fresh one with `delivered=False` and the
+            # core delivers it again (ADR 0029, "Secret issuance").
+            recorded = slot.ref.get("token_id")
+            current = next((t for t in existing if t["id"] == recorded and self._usable(t)), None)
+            if slot.delivered and current is not None:
+                return await self._confirm(c, s, prior, namespace, current)
             return await self._issue(c, s, prior, namespace, existing)
 
     async def rotate_begin(self, s: CredentialScope, prior: CredentialState) -> CredentialOutcome:
@@ -375,8 +397,10 @@ class DockerHubAdapter:
                 # must be sound.
                 name = str(token.get("label") or "") if isinstance(token, dict) else ""
                 if name.startswith(label) if prefix else name == label:
-                    if not isinstance(token.get("id"), str):
-                        raise AdapterError(False, "Docker Hub returned a token entry without id")
+                    token_id = token.get("id")
+                    if not isinstance(token_id, str) or not _TOKEN_ID.fullmatch(token_id):
+                        msg = "Docker Hub returned a token entry without a valid id"
+                        raise AdapterError(False, msg)
                     found.append(token)
             if not body.get("next"):
                 return found
@@ -407,10 +431,15 @@ class DockerHubAdapter:
         namespace: str,
         existing: list[JsonObj],
     ) -> CredentialOutcome:
-        """Delete same-label OATs (secret lost, limit-counting), then create; secret shown once."""
+        """Create the OAT (secret shown once), then delete the older same-label ones.
+
+        Two phases: a failed create (5xx, 429, token limit) leaves every old token in place and
+        is retried as the error says. Older same-label tokens (their secret is lost, and they
+        count toward the limit) go only after the create succeeded, and never the new one: the
+        list was read before the create. A retry after a failure in the second phase finds the
+        new token among the older ones, because its secret was never returned, and replaces it.
+        """
         slot = self._current(base)
-        for old in existing:
-            await self._delete_token(c, namespace, old["id"])
         expires = self._clock() + TOKEN_TTL
         body: JsonObj = {
             "label": slot.name,
@@ -425,6 +454,8 @@ class DockerHubAdapter:
         token_id = created.get("id")
         if not isinstance(secret, str) or not isinstance(token_id, str):
             raise AdapterError(False, "Docker Hub returned an unexpected token response")
+        for old in existing:
+            await self._delete_token(c, namespace, old["id"])
         issued = IssuedSecret({"token": SecretStr(secret)}, expires)
         ref = {"kind": "oat", "token_id": token_id}
         state = CredentialState(
@@ -435,8 +466,11 @@ class DockerHubAdapter:
 
     @staticmethod
     async def _delete_token(c: DockerHubClient, namespace: str, token_id: str) -> bool:
+        """Delete one OAT; True only when Docker confirmed it (2xx), False when it was gone."""
+        if not _TOKEN_ID.fullmatch(token_id):
+            raise AdapterError(False, "Docker Hub token id is not a UUID; refusing to delete it")
         path = f"{ORGS}/{seg(namespace)}/access-tokens/{seg(token_id)}"
-        return (await c.call("DELETE", path, accept=NOT_FOUND)).status_code != HTTP_NOT_FOUND
+        return (await c.call("DELETE", path, accept=NOT_FOUND)).is_success
 
     async def _delete_slot(self, c: DockerHubClient, slot: CredentialSlot) -> bool:
         """Delete the OATs a slot's label names. True if any went."""

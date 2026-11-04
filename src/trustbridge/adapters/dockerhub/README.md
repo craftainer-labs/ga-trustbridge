@@ -16,7 +16,12 @@ the PAT) and an optional `base_url` (https, no query; default `https://hub.docke
 organization-owner PAT is `privileged_credential`. The adapter is stateless;
 `DockerHubAdapter(config, *, transport=None, clock=None)` takes the last two for the contract
 tests. `github_outputs` reads the constant per-instance `namespace` (user decision: that counts as
-pure).
+pure); the constructor therefore rejects a missing or empty `namespace` and a bad `base_url`
+(`AdapterConfigurationError`), so `github_outputs` cannot raise. The username and the PAT are
+checked per call. The namespace is also the `DOCKERHUB_USERNAME` variable because Docker documents
+`docker login --username <YOUR_ORGANIZATION_NAME>` for an organization access token (the
+organization access tokens page below) and the login API's `identifier` as "an organization name"
+for one.
 
 `base_url` is operator configuration and is not checked against an allow-list. No tenant or
 webhook input reaches it: the only writer of connection data, `ConnectionData.put`
@@ -29,12 +34,12 @@ sent to that URL).
 
 | Interface method | Docker Hub call |
 | --- | --- |
-| login (every call) | `POST /v2/auth/token` `{identifier: username, secret: PAT}` returns `access_token` (valid 10 minutes) |
-| `ensure_project` | `GET /v2/namespaces/{ns}/repositories?page_size=1`: confirms the namespace is reachable; creates nothing (404 is a non-retryable error) |
-| `ensure_repository` | `GET /v2/namespaces/{ns}/repositories/{name}`, `POST /v2/namespaces/{ns}/repositories` (`name`, `namespace`, `description`, `is_private: true`) |
+| login (every call) | `POST /v2/auth/token` `{identifier: username, secret: PAT}` returns `access_token` (valid 10 minutes); a 401 mid-operation logs in once more and retries that request once, a second 401 is a non-retryable error |
+| `ensure_project` | `GET /v2/orgs/{ns}/settings` (the documented organization lookup: 200 exists, 404 unknown); creates nothing. 404 is a non-retryable "not found"; 403 and every other status are errors, never "present" |
+| `ensure_repository` | `GET /v2/namespaces/{ns}/repositories/{name}`, `POST /v2/namespaces/{ns}/repositories` (`name`, `namespace`, `description`, `is_private: true`); an existing repository must carry the marker and be private |
 | `ensure_webhook` | none: returns `NEEDS_MANUAL_ACTION` (see Decisions) |
 | `delete` | none: a repository is `NEEDS_MANUAL_ACTION`, a namespace or webhook is `UNCHANGED` |
-| `ensure_credential`, `rotate_begin` | `GET /v2/orgs/{ns}/access-tokens` (paged), `POST /v2/orgs/{ns}/access-tokens`, `GET`/`PATCH .../{id}`, `DELETE .../{id}` |
+| `ensure_credential`, `rotate_begin` | `GET /v2/orgs/{ns}/access-tokens` (paged), `POST /v2/orgs/{ns}/access-tokens`, then `DELETE .../{id}` of older same-label tokens; `GET`/`PATCH .../{id}` of the recorded token |
 | `rotate_finish`, `delete_credential` | the same listing, then `DELETE` of the tokens whose label is the slot name |
 | `list_credentials` | `GET /v2/orgs/{ns}/access-tokens`, label prefix `tb-<tenant hex>-` |
 | `health_check` | login plus `GET /v2/namespaces/{ns}/repositories?page_size=1` |
@@ -65,14 +70,23 @@ The adapter therefore always issues OATs, never PATs.
   (ADR 0029, NR5), so this long-lived owner credential is the accepted exception to EB-9.
 - **Ownership marker (never adopt or delete foreign objects).** Every token the adapter creates has
   the label `tb-<tenant uuid hex>-<scope key>-g<generation>` and description `managed by
-  trustbridge`. The adapter lists, confirms and deletes tokens only by an exact label that starts
+  trustbridge`. Token ids are checked against the UUID format Docker's examples show before they
+  are used in a URL; any other id is refused. The adapter lists, confirms and deletes tokens only by an exact label that starts
   with the tenant's prefix, and refuses (non-retryable) a slot name without it; humans' tokens and
   other tenants' tokens in the same organization are never touched. A repository is created with
   the description `managed by trustbridge`; an existing repository without that description is a
-  non-retryable error, not adopted. Repositories are always created private.
+  non-retryable error, not adopted. Repositories are always created private; an existing marked repository that is public is a
+  non-retryable error naming the manual fix (set it private in the repository's Settings), because
+  the adapter never changes visibility.
 - **Two-phase rotation.** `rotate_begin` creates the next generation's OAT under its own label while
-  the previous one stays valid; `rotate_finish` deletes the previous. Any same-label token left by a
-  crash is deleted first: its secret is gone (Docker shows it once) and it counts toward the limit.
+  the previous one stays valid; `rotate_finish` deletes the previous. Issuing is itself two-phase:
+  the OAT is created first, and only then are the older same-label tokens deleted (their secret is
+  gone, Docker shows it once, and they count toward the limit). A failed create leaves the old
+  tokens in place and is retried. If a delete fails after the create, the error is retryable and
+  the retry finds the new token (its secret was never returned) among the old ones and replaces it,
+  so a retry converges to one token. A delivered token is confirmed only by the id its slot
+  records; if that token is gone or unusable, a new one is issued with `delivered=False` and the
+  core delivers the new secret.
 - **Token limit.** `credential_limit=10` (Docker Team; Business allows 100). Expired and deactivated
   tokens count until deleted, so a deactivated or expired delivered token is deleted and re-issued.
   An OAT is created with a 90-day expiry (Docker allows up to one year).
@@ -123,7 +137,10 @@ The fixtures encode these as best-effort shapes; none has a primary-documentatio
 - The response to `GET /v2/namespaces/{ns}/repositories/{name}` for an unknown repository (404 is
   assumed) and for `POST` on an existing one (409 is assumed; the OpenAPI lists 400, 401, 403, 404
   and 500).
-- `GET /v2/namespaces/{ns}/repositories?page_size=1` answering 404 for an unknown namespace.
+- `GET /v2/orgs/{ns}/settings` answering 200 to an organization owner's bearer and 404 to an unknown
+  organization (the OpenAPI lists 200, 401, 403, 404; it states no owner requirement for GET).
+- Whether Docker rejects a second token with an existing label: the issue now creates before it
+  deletes, so a uniqueness rule on labels would fail the create (400/409, non-retryable).
 - The `page_size` maximum for the token listing (100 requested) and that `next` is null on the last
   page.
 - That the PAT bearer can call the organization token endpoints without an extra scope, and that a
@@ -137,8 +154,14 @@ The fixtures encode these as best-effort shapes; none has a primary-documentatio
 - A repository the adapter created is never deleted through the API; `delete` reports a manual step.
 - No webhook is created through the API (see Decisions).
 - A failure after the token was created and before the core stored the secret loses the secret; the
-  next call deletes the token and creates another (it needs a free slot under the limit, and the
-  delete runs first so that it does).
+  next call creates another and then deletes the lost one. The create comes first so that a failed
+  create never costs the old token, which means re-issuing needs a free slot under the token limit
+  (a tenant at the limit gets a non-retryable 403 and keeps its old token).
+- Docker documents no way to tell a missing organization from a forbidden one except the status
+  codes of `GET /v2/orgs/{ns}/settings`; a namespace that is a user account (not an organization)
+  is not supported, since organization access tokens exist only for organizations.
+- A repository that is public is never made private by the adapter: the person fixes it in Docker
+  Hub and the next reconcile succeeds.
 - With 10 scopes (Team) rotation is refused by the core's `credential_limit` rule.
 - `ensure_project` does not distinguish two `ProjectSpec` keys: a tenant has one Docker Hub
   namespace, and every project spec maps to it.

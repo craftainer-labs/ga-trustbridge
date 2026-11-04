@@ -16,6 +16,7 @@ from pydantic import SecretStr
 from tests.trustbridge.adapters.dockerhub.replay import BEARER, PAT, Replay, load_scenario
 from trustbridge.adapters.dockerhub import DockerHubAdapter
 from trustbridge.adapters.dockerhub import adapter as adapter_module
+from trustbridge.adapters.dockerhub.client import DockerHubClient
 from trustbridge.adapters.interface import (
     AdapterConfig,
     AdapterConfigurationError,
@@ -82,10 +83,18 @@ CONTEXT = {
     "prev": credential_name(TENANT_ID, PUSH.key, 1),
     "cred_admin": credential_name(TENANT_ID, ADMIN.key, 1),
 }
+T0 = "a0000000-0000-4000-8000-000000000000"
+T1 = "a1000000-0000-4000-8000-000000000000"
+T4 = "a4000000-0000-4000-8000-000000000000"
+T5 = "a5000000-0000-4000-8000-000000000000"
+T6 = "a6000000-0000-4000-8000-000000000000"
+T_PREV = "b0000000-0000-4000-8000-000000000000"
 PULL_SLOT = CredentialSlot(1, CONTEXT["cred_pull"])
-DELIVERED_PULL = CredentialState(replace(PULL_SLOT, delivered=True))
+DELIVERED_PULL = CredentialState(
+    replace(PULL_SLOT, ref={"kind": "oat", "token_id": T1}, delivered=True)
+)
 PUSH_SLOT = CredentialSlot(2, CONTEXT["cred_push"])
-PREV_SLOT = CredentialSlot(1, CONTEXT["prev"], {"kind": "oat", "token_id": "t-prev"}, True)
+PREV_SLOT = CredentialSlot(1, CONTEXT["prev"], {"kind": "oat", "token_id": T_PREV}, True)
 PROJECT_REF = ProjectRef(TENANT, ResourceState("acme", {"kind": "project", "namespace": "acme"}))
 
 
@@ -151,32 +160,32 @@ async def test_missing_pat_is_a_configuration_error() -> None:
     assert health.detail is not None
 
 
-@pytest.mark.parametrize("missing", ["namespace", "username"])
-async def test_missing_connection_data_is_a_configuration_error(missing: str) -> None:
-    """A namespace and a username are required connection data."""
-    adapter = offline_adapter(**{missing: None})
+@pytest.mark.parametrize("value", [None, SecretStr("")])
+def test_a_missing_or_empty_namespace_fails_at_construction(value: SecretStr | None) -> None:
+    """The namespace feeds `github_outputs`, which must not raise: it is checked up front."""
+    with pytest.raises(AdapterConfigurationError, match="namespace"):
+        offline_adapter(namespace=value)
+
+
+@pytest.mark.parametrize("value", [None, SecretStr("")])
+async def test_a_missing_or_empty_username_is_a_configuration_error(
+    value: SecretStr | None,
+) -> None:
+    """A username is required connection data, checked when the client is built."""
+    adapter = offline_adapter(username=value)
     with pytest.raises(AdapterConfigurationError):
         await adapter.ensure_project(TENANT, ProjectSpec("default"), None)
     with pytest.raises(AdapterConfigurationError):
         await adapter.list_credentials(TENANT)
 
 
-@pytest.mark.parametrize("missing", ["namespace", "username"])
-async def test_empty_connection_data_is_a_configuration_error(missing: str) -> None:
-    """An empty namespace or username is as bad as a missing one."""
-    adapter = offline_adapter(**{missing: SecretStr("")})
-    with pytest.raises(AdapterConfigurationError):
-        await adapter.ensure_project(TENANT, ProjectSpec("default"), None)
-
-
 @pytest.mark.parametrize(
     "url", ["http://hub.docker.com", "https://", "https://h.example/?q=1", "https://h.example/#f"]
 )
-async def test_base_url_must_be_plain_https(url: str) -> None:
+def test_base_url_must_be_plain_https(url: str) -> None:
     """The operator-provisioned base_url must be https without query or fragment."""
-    adapter = offline_adapter(base_url=SecretStr(url))
     with pytest.raises(AdapterConfigurationError):
-        await adapter.ensure_project(TENANT, ProjectSpec("default"), None)
+        offline_adapter(base_url=SecretStr(url))
 
 
 async def test_base_url_override_is_used_and_trailing_slash_dropped() -> None:
@@ -210,12 +219,23 @@ async def test_ensure_project_confirms_the_namespace() -> None:
 
 
 async def test_ensure_project_fails_for_an_unknown_namespace() -> None:
-    """A namespace that does not exist is a non-retryable error."""
+    """The organization settings answer 404: a non-retryable "not found"."""
     replay, adapter = build("projects.json", "namespace_missing")
-    with pytest.raises(AdapterError) as err:
+    with pytest.raises(AdapterError, match="was not found") as err:
         await adapter.ensure_project(TENANT, ProjectSpec("default"), None)
     replay.assert_exhausted()
     assert not err.value.retryable
+
+
+async def test_ensure_project_treats_a_403_as_an_error_not_as_present() -> None:
+    """A forbidden lookup is neither "found" nor "missing": a non-retryable HTTP 403 error."""
+    replay, adapter = build("projects.json", "namespace_forbidden")
+    with pytest.raises(AdapterError, match="HTTP 403") as err:
+        await adapter.ensure_project(TENANT, ProjectSpec("default"), None)
+    replay.assert_exhausted()
+    assert not err.value.retryable
+    assert "not found" not in err.value.message
+    assert "forbidden: not an owner" not in err.value.message
 
 
 # ---- repositories ----------------------------------------------------------------------------
@@ -253,6 +273,17 @@ async def test_ensure_repository_converges_after_a_lost_race() -> None:
     applied = await adapter.ensure_repository(PROJECT_REF, RepoSpec("api"), None)
     replay.assert_exhausted()
     assert applied.change.state is ChangeState.UNCHANGED
+
+
+@pytest.mark.parametrize("scenario", ["repo_public", "repo_race_public"])
+async def test_ensure_repository_refuses_a_public_marked_repository(scenario: str) -> None:
+    """A marked repository that is not private is an error: visibility is never flipped."""
+    replay, adapter = build("repositories.json", scenario)
+    with pytest.raises(AdapterError, match="acme/api is public") as err:
+        await adapter.ensure_repository(PROJECT_REF, RepoSpec("api"), None)
+    replay.assert_exhausted()
+    assert not err.value.retryable
+    assert {"PATCH", "PUT"}.isdisjoint(request.method for request in replay.seen)
 
 
 async def test_ensure_repository_rejects_other_package_types_and_bad_names() -> None:
@@ -302,7 +333,7 @@ async def test_ensure_credential_project_wide_grant() -> None:
     assert outcome.credential.expires_at == datetime(2027, 1, 30, 12, 0, tzinfo=UTC)
     current = outcome.state.current
     assert current is not None
-    assert current.ref == {"kind": "oat", "token_id": "t1"}
+    assert current.ref == {"kind": "oat", "token_id": T1}
     assert not current.delivered
     body = json.loads(replay.seen[-1].content)
     assert body["resources"] == [
@@ -431,6 +462,78 @@ async def test_issue_rejects_an_unexpected_response() -> None:
     replay.assert_exhausted()
 
 
+async def test_a_failed_create_keeps_the_old_token() -> None:
+    """Two-phase issue: the create fails (503, retryable) and no DELETE has been sent."""
+    replay, adapter = build("credentials.json", "issue_create_fails_keeps_old")
+    with pytest.raises(AdapterError) as err:
+        await adapter.ensure_credential(PULL, CredentialState(PULL_SLOT))
+    replay.assert_exhausted()
+    assert err.value.retryable
+    assert [r.method for r in replay.seen] == ["POST", "GET", "POST"]
+
+
+async def test_old_tokens_go_only_after_the_create_succeeded() -> None:
+    """The create precedes the delete, and the new token is never deleted."""
+    replay, adapter = build("credentials.json", "reissue_undelivered")
+    outcome = await adapter.ensure_credential(PULL, CredentialState(PULL_SLOT))
+    replay.assert_exhausted()
+    assert [r.method for r in replay.seen] == ["POST", "GET", "POST", "DELETE"]
+    assert replay.seen[-1].url.path.endswith(f"/{T0}")
+    assert outcome.state.current is not None
+    assert outcome.state.current.ref["token_id"] == T4
+
+
+async def test_a_retry_after_a_failed_cleanup_converges_to_one_token() -> None:
+    """The create worked but deleting the old token failed: a retryable error. The retry finds
+    the unreturned token among the old ones, creates once and deletes each exactly once."""
+    replay, adapter = build("credentials.json", "issue_delete_fails_after_create")
+    with pytest.raises(AdapterError) as err:
+        await adapter.ensure_credential(PULL, CredentialState(PULL_SLOT))
+    replay.assert_exhausted()
+    assert err.value.retryable
+    replay, adapter = build("credentials.json", "issue_retry_after_partial_failure")
+    outcome = await adapter.ensure_credential(PULL, CredentialState(PULL_SLOT))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UPDATED
+    deleted = [r.url.path.rsplit("/", 1)[1] for r in replay.seen if r.method == "DELETE"]
+    assert deleted == [T0, T4]
+    assert outcome.state.current is not None
+    assert outcome.state.current.ref["token_id"] == T6
+
+
+async def test_a_delivered_token_is_matched_by_its_recorded_id() -> None:
+    """Another usable token of the same label is neither confirmed nor touched."""
+    replay, adapter = build("credentials.json", "confirm_matches_recorded_id")
+    outcome = await adapter.ensure_credential(PULL, DELIVERED_PULL)
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UNCHANGED
+    assert replay.seen[-1].url.path.endswith(f"/{T1}")
+
+
+async def test_a_delivered_token_that_is_gone_is_issued_again_undelivered() -> None:
+    """The recorded token is missing: a new secret comes back with `delivered=False`, so the core
+    delivers it again (ADR 0029, "Secret issuance"); the stale same-label token goes afterwards."""
+    replay, adapter = build("credentials.json", "delivered_token_gone")
+    outcome = await adapter.ensure_credential(PULL, DELIVERED_PULL)
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UPDATED
+    assert isinstance(outcome.credential, IssuedSecret)
+    assert outcome.state.current is not None
+    assert outcome.state.current.ref["token_id"] == T4
+    assert not outcome.state.current.delivered
+
+
+async def test_a_token_id_that_is_not_a_uuid_is_never_used_in_a_url() -> None:
+    """A listing entry with an id like `../../x` is refused, and so is deleting it directly."""
+    replay, adapter = build("credentials.json", "list_entry_bad_id")
+    with pytest.raises(AdapterError, match="without a valid id"):
+        await adapter.list_credentials(TENANT)
+    replay.assert_exhausted()
+    async with DockerHubClient("https://hub.docker.com", "u", SecretStr(PAT)) as client:
+        with pytest.raises(AdapterError, match="not a UUID"):
+            await adapter._delete_token(client, "acme", "../../x")
+
+
 # ---- rotation (two-phase) --------------------------------------------------------------------
 async def test_rotate_begin_creates_the_next_generation_and_keeps_previous() -> None:
     """A8: the new OAT is created under the next label; `previous` stays untouched and valid."""
@@ -443,7 +546,7 @@ async def test_rotate_begin_creates_the_next_generation_and_keeps_previous() -> 
     assert outcome.state.previous == PREV_SLOT
     assert outcome.state.current is not None
     assert outcome.state.current.name == CONTEXT["cred_push"]
-    assert outcome.state.current.ref == {"kind": "oat", "token_id": "t5"}
+    assert outcome.state.current.ref == {"kind": "oat", "token_id": T5}
 
 
 async def test_rotate_begin_resumes_after_a_crash() -> None:
@@ -506,7 +609,7 @@ async def test_list_credentials_pages_and_keeps_only_this_tenants_prefix() -> No
     listed = await adapter.list_credentials(TENANT)
     replay.assert_exhausted()
     assert [item.name for item in listed] == [CONTEXT["cred_pull"], CONTEXT["cred_push"]]
-    assert listed[0].ref == {"kind": "oat", "token_id": "t1"}
+    assert listed[0].ref == {"kind": "oat", "token_id": T1}
 
 
 async def test_list_credentials_stops_at_the_page_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -525,7 +628,7 @@ async def test_list_credentials_rejects_malformed_listings() -> None:
         await adapter.list_credentials(TENANT)
     replay.assert_exhausted()
     replay, adapter = build("credentials.json", "list_entry_without_id")
-    with pytest.raises(AdapterError, match="without id"):
+    with pytest.raises(AdapterError, match="without a valid id"):
         await adapter.list_credentials(TENANT)
     replay.assert_exhausted()
 
@@ -611,3 +714,19 @@ async def test_login_failures_are_classified(scenario: str, retryable: bool) -> 
     replay.assert_exhausted()
     assert err.value.retryable is retryable
     assert PAT not in err.value.message
+
+
+async def test_a_401_mid_operation_logs_in_again_and_retries_once() -> None:
+    """The bearer expired: a fresh login (without the old bearer), then the same request."""
+    replay, adapter = build("credentials.json", "list_relogin_ok")
+    assert await adapter.list_credentials(TENANT) == []
+    replay.assert_exhausted()
+
+
+async def test_a_second_401_is_terminal() -> None:
+    """After one re-login and one retry a 401 ends the operation, non-retryably."""
+    replay, adapter = build("credentials.json", "list_relogin_twice")
+    with pytest.raises(AdapterError, match="HTTP 401") as err:
+        await adapter.list_credentials(TENANT)
+    replay.assert_exhausted()
+    assert not err.value.retryable

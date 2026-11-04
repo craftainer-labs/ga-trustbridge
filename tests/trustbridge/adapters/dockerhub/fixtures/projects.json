@@ -22,15 +22,16 @@
     {
      "request": {
       "method": "GET",
-      "path": "/v2/namespaces/acme/repositories?page_size=1"
+      "path": "/v2/orgs/acme/settings"
      },
      "response": {
       "status": 200,
       "json": {
-       "count": 0,
-       "next": null,
-       "previous": null,
-       "results": []
+       "restricted_images": {
+        "enabled": false,
+        "allow_official_images": true,
+        "allow_verified_publishers": true
+       }
       }
      }
     }
@@ -57,13 +58,45 @@
     {
      "request": {
       "method": "GET",
-      "path": "/v2/namespaces/acme/repositories?page_size=1"
+      "path": "/v2/orgs/acme/settings"
      },
      "response": {
       "status": 404,
       "json": {
        "message": "not found",
        "errinfo": null
+      }
+     }
+    }
+   ]
+  },
+  "namespace_forbidden": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/auth/token",
+      "json": {
+       "identifier": "svc-tb",
+       "secret": "dckr_pat_dummy"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "access_token": "jwt-bearer-value"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/orgs/acme/settings"
+     },
+     "response": {
+      "status": 403,
+      "json": {
+       "message": "forbidden: not an owner"
       }
      }
     }
