@@ -127,7 +127,10 @@ async def test_the_lifespan_can_be_entered_repeatedly_registering_each_check_onc
             return None
 
         async def execute(self, _stmt: object) -> types.SimpleNamespace:
-            return types.SimpleNamespace(scalar_one_or_none=lambda: REQUIRED_SCHEMA_VERSION)
+            return types.SimpleNamespace(
+                scalar_one_or_none=lambda: REQUIRED_SCHEMA_VERSION,
+                one=lambda: ("trustbridge_app", False, False, False),  # a safe role (ADR 0031)
+            )
 
     settings = make_settings(mode="dev", allow_mock_mode=False)
     install(
@@ -144,8 +147,8 @@ async def test_the_lifespan_can_be_entered_repeatedly_registering_each_check_onc
         async with app.router.lifespan_context(app):
             await asyncio.sleep(0)
     results = await registry.run_all()
-    assert [r.name for r in results] == ["schema"]
-    assert results[0].healthy
+    assert [r.name for r in results] == ["schema", "role_safety"]
+    assert results[0].healthy  # the role check turns healthy only after its background read
 
 
 def test_install_is_idempotent_and_adds_the_proxy_middleware_once() -> None:

@@ -16,6 +16,12 @@ yet (release N+1), so the app role behaves as before.
   `list_tenants` (reads `tb_list_tenants()` with no context), `iterate_tenants` (each tenant id
   yielded inside its own context) and `for_each_tenant` (runs a coroutine per tenant, logs and
   counts a failure as `trustbridge.tenants.sweep_failures` and carries on).
+- `role_check.py`: the runtime role safety check. `evaluate(RoleFacts)` is the pure decision: not
+  ready only when an RLS table is forced (the six tenant-owned tables or `audit_events`) and
+  `current_user` is a superuser or has `BYPASSRLS`; with nothing forced yet it is skipped.
+  `RoleGate` reads the role and the forced tables with one catalog query (fail closed if it cannot),
+  `RoleCheck` / `register_role_check` add a `role_safety` check next to the schema check on the api's
+  `/ready`, with the reason as its detail. See "Role safety check" below.
 
 ## Rules
 
@@ -47,3 +53,23 @@ Production table and function grants for `trustbridge_app` come only from the mi
 (`GRANT` to roles that already exist, never `CREATE ROLE`), per ADR 0031. The root `compose.yml`
 smoke stack additionally sets default privileges for the app role; that is smoke-only, because the
 template's frozen migrations grant nothing and the perf run needs CRUD on the template's tables.
+
+## Role safety check
+
+The api, the worker and the reconciler check once the schema is current that `current_user` is
+neither a superuser nor `BYPASSRLS` (ADR 0031 "Role safety checks"). The api starts it after its
+schema wait (`main.wait_gates`); the worker and the reconciler share `worker.runtime.run_process`.
+
+| | api | worker / reconciler |
+| --- | --- | --- |
+| `MODE=production` | `/ready` not ready with the reason; exits 1 after `SCHEMA_WAIT_SECONDS` | waits, then exits 1 after `SCHEMA_WAIT_SECONDS` |
+| otherwise | `/ready` not ready with the reason, a warning is logged, polling continues, never exits | one check, a warning is logged, processing continues |
+
+The seven RLS tables are looked up schema-qualified (`role_check.APP_SCHEMA`, `public`) with
+`to_regclass`, as plain or partitioned tables, never through the `search_path`. An expected table
+that cannot be found is itself not ready (the reason names it), so a superuser is never passed by
+not seeing the tables. The schema wait and the role wait share one `SCHEMA_WAIT_SECONDS` budget
+counted from start-up.
+
+Dev databases are often reached as a superuser, so outside production the check only reports.
+`MODE=mock` is always ready and touches no database.
