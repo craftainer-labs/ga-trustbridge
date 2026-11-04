@@ -120,3 +120,12 @@ async def test_a_failing_audit_fails_the_handler_so_the_delivery_is_retried() ->
     audit.fail = True
     with pytest.raises(RuntimeError, match="unwritable"):
         await handlers.on_installation(_ctx("created"))
+
+
+async def test_a_sender_id_outside_the_audit_range_records_no_sender() -> None:
+    """An id the audit model would refuse (0, negative, above 2^63-1) is a null, not a failure."""
+    _tenants, audit, _lookup, handlers = _setup()
+    for bad in (0, -5, 2**63):
+        await handlers.on_installation(_ctx("created", {"sender": {"id": bad}}))
+    await handlers.on_installation(_ctx("created", {"sender": {"id": 2**63 - 1}}))
+    assert [c["sender"] for c in audit.calls] == [None, None, None, 2**63 - 1]

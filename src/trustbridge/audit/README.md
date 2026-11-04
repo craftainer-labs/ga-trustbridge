@@ -1,10 +1,10 @@
 # trustbridge/audit/
 
 The append-only audit log ([ADR 0032](../../../docs/adrs/0032-audit-log.md), Accepted
-2026-11-04 with #18 and #21; the remaining flows arrive with NG6d, NG6e and NG6h, per the
+2026-11-04 with #18 and #21; the remaining flows arrive with NG6e and NG6h (the read routes and the export arrived with NG6d), per the
 deferred table below): the storage layer (NG6c), event value validation, redaction and the
 emitters at the call sites that exist today (NG6f). Out of scope
-here: the admin API routes serving list and export (NG6d), the mutating endpoints' events (NG6e)
+here: the mutating endpoints' events (NG6e)
 and tenant deletion (NG6h). SIEM push is a follow-up.
 
 - `model.py`: `AuditEvent` (what to write; validates every value at construction), `AuditRecord`
@@ -65,8 +65,41 @@ null `tenant_id` (`authz.denied`, instance-level events) is written with no cont
 
 `CredentialCore` is not instantiated by any process yet (NG5/NG6), so the credential events are
 wired by whoever builds it: `SqlCredentialStore(session_factory, CredentialAuditObserver(writer,
-actor))` and `CoreDeps(..., orphans=observer)`. The api wires `RbacRuntime(config, access,
-AuditDenials(AuditWriter(session_factory)))` when it mounts the admin API (NG6d).
+actor))` and `CoreDeps(..., orphans=observer)`. `trustbridge.main` wires `RbacRuntime(config, access, ThrottledDenials(AuditDenials(AuditWriter(
+session_factory)), counter, ...))` when it builds the admin runtime.
+
+### Bounding `authz.denied` (`throttle.py`)
+
+A principal with a valid token can ask for random tenant ids and be denied each time, so the sink
+is wrapped in `ThrottledDenials` (NG6d decision A6). Per (subject, reason) and fixed window
+(`AUDIT_DENIED_WINDOW_SECONDS`, default 60) the first `AUDIT_DENIED_BURST` (default 5) denials are
+recorded in full: the 5th is a row, the 6th is only counted (in the counter store and the metric
+`trustbridge.audit.authz_denied.suppressed`). When the window has closed, ONE summary
+`authz.denied` row is written: `after` carries `suppressed` (how many were not recorded) and
+`window_seconds`, `resource_id` is null, and the denied principal, `reason`, `required_role` and
+`scope` are those of the last suppressed denial. A window that closes with nothing suppressed
+writes no summary. The window count lives in Valkey (shared by the replicas, key
+`tb:audit:denied:<hash of sub and reason>:<window>`); a claim marker makes the summary happen once.
+
+**When the summary is written.** Either on the next denial of the same (subject, reason) in a later
+window, or by `ThrottledDenials.flush()`, which the api calls every window from a background task
+(a process-local index of windows that had suppressed denials). A restart loses only that index:
+the counts stay in Valkey, so the summary is then written when that subject is denied again, and
+not at all if it never is (and the counts expire after two windows). A Valkey outage or timeout
+(`AUDIT_DENIED_TIMEOUT_MS`, default 50) fails open to recording the row: the audit trail is never
+thinned by an outage, and the request path stays bounded.
+
+## Read and export routes (NG6d)
+
+`trustbridge.admin` serves `GET /admin/v1/audit-events`, `/audit-events/export` and the same two
+under `/tenants/{tenant_id}` to the `auditor` role (see `admin/README.md`). The export event:
+`record_export` (`export_event.py`) writes one `audit.export` event per export request, after the
+stream ended or was cut off, in its own transaction (in the tenant's context for a tenant export):
+the reader's `sub` and `iss`, `resource_type=audit_events`, `resource_id` the tenant id or
+`instance`, and in `after` the scope, the filters of the request (`after_seq`, `since`, `until`,
+`actor_sub`, `action`, `resource_type`, `resource_id`, `outcome`, the instance route's `tenant_id`),
+`row_count`, `last_seq` and `complete`. An export that failed or whose client went away is outcome
+`failure` with `complete: false` and `last_seq` to resume from.
 
 ## Deferred events
 
@@ -77,11 +110,9 @@ ADR names them, with no emitter:
 | --- | --- |
 | Every mutating admin API call with before/after (`tenant.disable`, `delivery.requeue`, `credential.rotate`, ...) and the router-walk test (inv. 8) | NG6e |
 | `host.registration.start` and adapter configuration changes through the API | NG6e |
-| `audit.export` (who exported, the range) and the audit read routes | NG6d |
 | The deletion's own events (0034) | NG6h |
-| Wiring `AuditDenials` into the mounted router | NG6d |
 | The reconciler duty calling `purge_expired` (ADR 0032 "Retention") | NG6h |
-| A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export"). No such timeout exists on main and the engine is the template's (`app.db`) | NG6d (api) with NG6h (deletion batches) |
+| A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export"). No such timeout exists on main and the engine is the template's (`app.db`) | NG6h (api and deletion batches). Left out of NG6d: the read routes do not need it, and no connection on main sets a timeout to check against |
 
 An operation ending `failed` (rolled back, previous state restored) has no event of its own
 because ADR 0032 does not list it; the inverse `oidc_trust` event shows a rolled-back kind change.
@@ -101,7 +132,7 @@ All take an `AsyncSession` (or factory) and leave the transaction to the caller,
 
 **Cursor.** `AuditPage.next_seq` is the last item's `seq` when more follow, else `None`. Continue
 an ascending read with `AuditQuery(after_seq=next_seq)`, a descending one
-(`descending=True`) with `before_seq=next_seq`. NG6d wraps `seq` in an opaque token if it wants.
+(`descending=True`) with `before_seq=next_seq`. The admin API wraps `seq` and the event id in an opaque cursor.
 `limit` is 1 to 1000.
 
 **Export lag.** `lag_seconds` makes a read stop before the first event whose `recorded_at` is

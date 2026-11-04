@@ -87,9 +87,10 @@ or `unsuspend` installation event left behind), the credential events (issue, ro
 finish, revoke, abandoned operation, the orphan sweep's deletion, OIDC trust created and
 removed), and `audit.purge` (written by the purge function, #18). *Not yet implemented, with the
 item that builds the flow:* every mutating admin API call (NG6e), host registration and adapter
-configuration changes through the API (NG6e), `audit.export` and the audit read routes (NG6d),
-the tenant deletion's own events (NG6h), and wiring the denial sink into the mounted router
-(NG6d). An operation that ends `failed` (rolled back, previous state restored) has no event of
+configuration changes through the API (NG6e) and the tenant deletion's own events (NG6h).
+*Implemented in NG6d:* `audit.export` and the audit read routes, and the denial sink wired into the
+mounted router (bounded per subject and reason: the first five denials per window are rows, the rest
+are summarised in one row). An operation that ends `failed` (rolled back, previous state restored) has no event of
 its own; the `oidc_trust` event of a rolled-back kind change shows the reversal.
 
 **Same transaction.** For a mutating API call and for a credential state change, the audit row
@@ -169,7 +170,7 @@ The transport is user decision 2 below. The export is:
 
 - **Ordered and resumable** by `seq`, one JSON object per event with the columns above
   (`on_behalf_of`, `before` and `after` are nested objects or null). The reading functions
-  (`export_ndjson`, `list_events`) are implemented in #18; the routes are NG6d.
+  (`export_ndjson`, `list_events`) are implemented in #18; the routes are implemented in NG6d.
 - **Lag-bounded.** Because identity values can commit out of order (a transaction with a lower
   `seq` can become visible after one with a higher `seq`), an export returns only events whose
   `recorded_at` is older than `AUDIT_EXPORT_LAG_SECONDS` (default 30), so a SIEM that resumes
@@ -180,7 +181,7 @@ The transport is user decision 2 below. The export is:
   against that timeout. This is a stated consistency model, not real-time delivery. The lag
   filter is implemented (`tb_audit_list`, `export_ndjson`); the timeouts and the startup check
   are not on main yet (no such timeout exists, and the engine is the template's) and arrive
-  with the api (NG6d) and the deletion batches (NG6h).
+  with NG6h; NG6d left them out because the read routes do not need them.
 - **Filtered by scope** (the reader's tenants) and by a time or `seq` range.
 - Itself audited.
 

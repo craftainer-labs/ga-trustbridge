@@ -67,6 +67,11 @@ class FakeRedis:
         """The `id` field (delivery id) of each entry in order."""
         return [fields["id"] for _, fields in self.entries(name)]
 
+    async def get(self, name: str) -> str | None:
+        """`GET` of a counter key (the limiter's `INCR` values)."""
+        self._check()
+        return str(self.kv[name]) if name in self.kv else None
+
     async def sadd(self, name: str, *values: str) -> int:
         """Add members to a set."""
         self._check()

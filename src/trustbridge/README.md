@@ -5,7 +5,7 @@ The instance package of the trustbridge GitHub App, a sibling of the template's 
 `app`; `app` never imports it (import-linter). Nothing under `src/app/` is edited.
 
 - `main.py`: the api entrypoint `trustbridge.main:app`. Imports the template app, mounts the
-  webhook routes, installs `ProxyHeadersMiddleware`, wraps the template's lifespan (schema gate,
+  webhook routes and the admin API, installs `ProxyHeadersMiddleware`, wraps the template's lifespan (schema gate,
   host startup checks and recheck task, webhook secret cache) and releases its resources after
   the template has shut down.
 - `settings.py`: `TrustbridgeSettings` (extends the template's `Settings`). `GITHUB_HOSTS` and
@@ -14,6 +14,10 @@ The instance package of the trustbridge GitHub App, a sibling of the template's 
   near-miss detection and the startup logging of effective defaults.
 - `webhooks/`: the GitHub webhook ingress, the Argo CD notification route and the abuse limiter.
   See its `README.md`.
+- `admin/`: the admin API v1 read routes under `/admin/v1` (ADR 0033), their guards, rate limits,
+  problem types and cursor. See its `README.md`.
+- `ratelimit.py`: the fixed-window limiter (Valkey `INCR`, fail open) shared by `webhooks` and
+  `admin`; a leaf module.
 - `worker/`: the shared runtime core (outbox, stream, worker, reconciler, leases, schema gate,
   secret store, the ports over these for the GitHub and adapter cores, migrate Job). See its
   `README.md`.
@@ -31,8 +35,10 @@ The instance package of the trustbridge GitHub App, a sibling of the template's 
 - `reconciler/`, `migrations/`: one-line `__main__` shims so the commands keep the names in the
   ADR (`python -m trustbridge.reconciler`, `python -m trustbridge.migrations upgrade`).
 
-Import rules (import-linter, `pyproject.toml`): `main` > `webhooks` > `worker` > `settings`;
-`app` never imports `trustbridge`; `adapters` and `signer` never import `github`.
+Import rules (import-linter, `pyproject.toml`): `main` > `webhooks` and `admin` (independent) >
+`worker` > `ratelimit` > `settings`; `app` never imports `trustbridge`; `adapters` and `signer`
+never import `github`; `audit` never imports `rbac` or `admin`; `rbac` never imports `tenancy`,
+`admin`, `webhooks` or `main`.
 
 ## How the pieces are wired
 
@@ -52,8 +58,8 @@ Import rules (import-linter, `pyproject.toml`): `main` > `webhooks` > `worker` >
    call `ArgoCdDeploymentHandler.handle`; until a `DeploymentStateSource` exists (NG5d) the route
    answers 503.
 
-Not wired yet: the admin manifest-flow endpoints (`github/manifest.py`) are NG6's and stay
-unmounted; the `CredentialCore` is not instantiated by any process because no adapter exists
+Not wired yet: the admin manifest-flow endpoints (`github/manifest.py`) belong to the mutating
+admin endpoints (NG6e) and stay unmounted; the `CredentialCore` is not instantiated by any process because no adapter exists
 (NG5): the lease, value store and connection-data ports it needs are built in `Core` for it; the
 reconcile requests (`ReconcileScheduler`) are recorded in the Valkey set `tb:reconcile`, whose
 consumer is the reconcile loop of NG5/NG6.

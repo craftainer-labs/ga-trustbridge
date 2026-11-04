@@ -20,6 +20,8 @@ from uuid import UUID
 from trustbridge.github.installations import InstallationInfo
 from trustbridge.github.ports import InstallationStore, ReconcileScheduler
 
+_MAX_SENDER_ID = 2**63 - 1
+
 _log = logging.getLogger(__name__)
 
 
@@ -161,7 +163,15 @@ class InstallationHandlers:
             return
         sender = ctx.payload.get("sender") or {}
         raw_id = sender.get("id")
-        sender_id = raw_id if isinstance(raw_id, int) and not isinstance(raw_id, bool) else None
+        # Attribution is best effort: a value the audit model would refuse (ADR 0032, 1..2^63-1)
+        # becomes a null `on_behalf_of` instead of failing the sync.
+        sender_id = (
+            raw_id
+            if isinstance(raw_id, int)
+            and not isinstance(raw_id, bool)
+            and 1 <= raw_id <= _MAX_SENDER_ID
+            else None
+        )
         await self._audit.tenant_synced(
             tenant_id=tenant_id,
             state=state,

@@ -12,6 +12,7 @@ from trustbridge.audit.emit import (
     current_trace_id,
     with_trace,
 )
+from trustbridge.audit.export_event import record_export
 from trustbridge.audit.model import (
     MAX_PAGE_SIZE,
     MAX_PAYLOAD_BYTES,
@@ -57,6 +58,7 @@ __all__ = [
     "project",
     "purge_batch",
     "purge_expired",
+    "record_export",
     "scrub_text",
     "truncate",
     "with_trace",

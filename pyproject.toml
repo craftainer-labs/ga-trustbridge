@@ -147,6 +147,7 @@ layers = [
 # trustbridge is the instance package beside the template's `app` (ADR 0028): it may import
 # `app`, never the other way round. Its own layers, top to bottom: main, webhooks, worker,
 # settings (worker is the shared runtime core: queue, leases, schema gate, stores, ports).
+# `admin` (the admin API) sits beside `webhooks`; `ratelimit` is the shared leaf both use.
 # `github` (the GitHub core) sits beside the layers because `settings` types its fields with
 # `github.hosts` and `github.runtime` takes the settings; the contracts below keep the
 # plugin-facing packages (`adapters`, `signer`) free of it.
@@ -163,10 +164,23 @@ source_modules = ["trustbridge.adapters"]
 forbidden_modules = ["trustbridge.github"]
 
 [[tool.importlinter.contracts]]
-name = "audit never imports rbac"
+name = "audit never imports rbac or the admin API"
 type = "forbidden"
 source_modules = ["trustbridge.audit"]
-forbidden_modules = ["trustbridge.rbac"]
+forbidden_modules = ["trustbridge.rbac", "trustbridge.admin"]
+
+# rbac (ADR 0033) authenticates through `app.oidc` and reaches the tenancy layer only through the
+# `TenantAccess` Protocol that `trustbridge.admin` implements; it sits below the admin API.
+[[tool.importlinter.contracts]]
+name = "rbac never imports tenancy, the admin API, webhooks or main"
+type = "forbidden"
+source_modules = ["trustbridge.rbac"]
+forbidden_modules = [
+    "trustbridge.tenancy",
+    "trustbridge.admin",
+    "trustbridge.webhooks",
+    "trustbridge.main",
+]
 
 [[tool.importlinter.contracts]]
 name = "signers never import the GitHub core"
@@ -180,8 +194,9 @@ type = "layers"
 containers = ["trustbridge"]
 layers = [
     "main",
-    "webhooks",
+    "webhooks | admin",
     "worker",
+    "ratelimit",
     "settings",
 ]
 
