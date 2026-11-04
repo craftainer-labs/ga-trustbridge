@@ -87,7 +87,10 @@ class AuditEvent:
         self._check_ids_and_version()
         _check_payload("before", self.before)
         _check_payload("after", self.after)
-        _check_on_behalf_of(self.on_behalf_of)
+        if self.on_behalf_of is not None:
+            _check_on_behalf_of(self.on_behalf_of)
+            # A private copy: the caller's dict can no longer change what gets written.
+            object.__setattr__(self, "on_behalf_of", dict(self.on_behalf_of))
 
     def _check_actor(self) -> None:
         """The actor columns agree with the actor type (and the table's check constraint)."""
@@ -133,6 +136,8 @@ def _check_text(name: str, value: object, limit: int) -> None:
         raise ValueError(f"{name} contains a control character")
 
 
+MAX_SENDER_ID = 2**63 - 1
+"""Largest `github_sender_id` (a signed 64-bit integer, like GitHub's ids)."""
 MAX_DELIVERY_ID = 100
 """Longest `delivery_id` in `on_behalf_of`."""
 
@@ -144,11 +149,13 @@ def _check_on_behalf_of(value: object) -> None:
     if not isinstance(value, dict) or set(value) != {"github_sender_id", "delivery_id"}:
         raise ValueError("on_behalf_of must be an object with github_sender_id and delivery_id")
     sender, delivery = value["github_sender_id"], value["delivery_id"]
-    if not isinstance(sender, int) or isinstance(sender, bool) or sender < 0:
-        raise ValueError("on_behalf_of.github_sender_id must be a non-negative integer")
+    if not isinstance(sender, int) or isinstance(sender, bool):
+        raise ValueError("on_behalf_of.github_sender_id must be an integer")
+    if not 1 <= sender <= MAX_SENDER_ID:
+        raise ValueError(f"on_behalf_of.github_sender_id must be from 1 to {MAX_SENDER_ID}")
+    if not isinstance(delivery, str) or not delivery:
+        raise ValueError("on_behalf_of.delivery_id must be a non-empty string")
     _check_text("on_behalf_of.delivery_id", delivery, MAX_DELIVERY_ID)
-    if delivery is None:
-        raise ValueError("on_behalf_of.delivery_id must be a string")
 
 
 def _check_payload(name: str, value: object) -> None:

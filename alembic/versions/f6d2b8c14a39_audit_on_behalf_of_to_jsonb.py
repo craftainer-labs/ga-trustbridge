@@ -18,6 +18,13 @@ The row triggers do not fire on a rewrite, so append-only enforcement is untouch
 
 A value that is somehow present (a dev database) is kept as a JSON string, never lost or
 rejected. No roles are created and no grants change: the existing table grants carry over.
+
+``ck_audit_events_on_behalf_of`` then pins the shape in the database, so no insert path (the app
+role's ``INSERT`` grant included) can store anything but null or
+``{"github_sender_id": <number>, "delivery_id": "<string>"}``. It is added ``NOT VALID``
+(Squawk's ``constraint-missing-not-valid``): it is enforced for every new row at once, and a
+stray legacy string in a dev database stays readable instead of blocking the upgrade. It is not
+validated afterwards for the same reason (a validated add would fail on that string).
 """
 
 from collections.abc import Sequence
@@ -31,6 +38,9 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+CHECK_NAME = "ck_audit_events_on_behalf_of"
+
+
 def upgrade() -> None:
     """Upgrade schema."""
     op.execute("SET LOCAL lock_timeout = '5s'")
@@ -42,12 +52,21 @@ def upgrade() -> None:
         "ALTER TABLE audit_events ALTER COLUMN on_behalf_of TYPE jsonb "
         "USING CASE WHEN on_behalf_of IS NULL THEN NULL ELSE to_jsonb(on_behalf_of) END"
     )
+    op.execute(
+        f"ALTER TABLE audit_events ADD CONSTRAINT {CHECK_NAME} CHECK ("
+        "on_behalf_of IS NULL OR ("
+        "jsonb_typeof(on_behalf_of) = 'object' "
+        "AND on_behalf_of ?& array['github_sender_id', 'delivery_id'] "
+        "AND jsonb_typeof(on_behalf_of->'github_sender_id') = 'number' "
+        "AND jsonb_typeof(on_behalf_of->'delivery_id') = 'string')) NOT VALID"
+    )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute("SET LOCAL statement_timeout = '120s'")
+    op.execute(f"ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS {CHECK_NAME}")
     op.execute(
         "-- squawk-ignore changing-column-type\n"
         "ALTER TABLE audit_events ALTER COLUMN on_behalf_of TYPE text "

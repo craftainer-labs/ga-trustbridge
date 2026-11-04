@@ -801,6 +801,11 @@ _LEGACY_ROWS = (
     "SELECT actor_sub, on_behalf_of, jsonb_typeof(on_behalf_of) FROM audit_events "
     "WHERE actor_sub LIKE 'migration-%' ORDER BY actor_sub"
 )
+_OBJECT_INSERT = (
+    "INSERT INTO audit_events (id, actor_type, actor_sub, action, resource_type, outcome, "
+    "on_behalf_of) VALUES (gen_random_uuid(), 'system', 'migration-obj', 'tenant.sync', "
+    "'tenant', 'success', CAST(:v AS jsonb))"
+)
 _LEGACY_INSERT = (
     "INSERT INTO audit_events (id, actor_type, actor_sub, action, resource_type, outcome, "
     "on_behalf_of) VALUES (gen_random_uuid(), 'system', :sub, 'tenant.sync', 'tenant', "
@@ -820,6 +825,12 @@ async def _migration_steps(conn: AsyncConnection) -> list[object]:
     await conn.run_sync(_run_migration, "downgrade")
     legacy = text("SELECT on_behalf_of FROM audit_events WHERE actor_sub = 'migration-a'")
     seen.append((await conn.execute(legacy)).scalar_one())
+    await conn.run_sync(_run_migration, "upgrade")
+    who = json.dumps({"github_sender_id": 9, "delivery_id": "d-9"})
+    await conn.execute(text(_OBJECT_INSERT), {"v": who})
+    await conn.run_sync(_run_migration, "downgrade")
+    as_text = text("SELECT on_behalf_of FROM audit_events WHERE actor_sub = 'migration-obj'")
+    seen.append(json.loads((await conn.execute(as_text)).scalar_one()))
     return seen
 
 
@@ -842,7 +853,31 @@ async def test_the_on_behalf_of_migration_keeps_legacy_strings_and_nulls_and_rev
             ("migration-b", None, None),
         ],
         "sender=1;delivery=d",
+        {"github_sender_id": 9, "delivery_id": "d-9"},
     ]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        '"a bare string"',
+        "[1, 2]",
+        "{}",
+        '{"github_sender_id": 1}',
+        '{"github_sender_id": "1", "delivery_id": "d"}',
+        '{"github_sender_id": 1, "delivery_id": 5}',
+    ],
+)
+async def test_the_database_refuses_an_on_behalf_of_of_the_wrong_shape(db: Db, bad: str) -> None:
+    """The CHECK holds for every insert path, not only the application's validation."""
+    with pytest.raises(DBAPIError, match="ck_audit_events_on_behalf_of"):
+        await _run_owner(
+            db,
+            "INSERT INTO audit_events (id, actor_type, actor_sub, action, resource_type, outcome, "
+            "on_behalf_of) VALUES (gen_random_uuid(), 'system', 'worker', 'tenant.sync', "
+            "'tenant', 'success', CAST(:v AS jsonb))",
+            v=bad,
+        )
 
 
 def _rotation(tenant: UUID) -> tuple[StoredCredential, Operation]:

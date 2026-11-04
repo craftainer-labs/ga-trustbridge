@@ -24,7 +24,7 @@ from trustbridge.audit import (
     scrub_text,
     truncate,
 )
-from trustbridge.audit.model import MAX_DELIVERY_ID
+from trustbridge.audit.model import MAX_DELIVERY_ID, MAX_SENDER_ID
 
 CANARY = "canary-secret-7f3a9c1e"
 PEM_KIND = "PRIVATE " + "KEY"  # split so secret scanners ignore this file
@@ -89,6 +89,12 @@ def test_every_system_actor_name_is_accepted() -> None:
         ({"on_behalf_of": {"github_sender_id": True, "delivery_id": "d"}}, "github_sender_id"),
         ({"on_behalf_of": {"github_sender_id": "1", "delivery_id": "d"}}, "github_sender_id"),
         ({"on_behalf_of": {"github_sender_id": -1, "delivery_id": "d"}}, "github_sender_id"),
+        ({"on_behalf_of": {"github_sender_id": 0, "delivery_id": "d"}}, "from 1 to"),
+        (
+            {"on_behalf_of": {"github_sender_id": MAX_SENDER_ID + 1, "delivery_id": "d"}},
+            "from 1 to",
+        ),
+        ({"on_behalf_of": {"github_sender_id": 1, "delivery_id": ""}}, "non-empty string"),
         ({"on_behalf_of": {"github_sender_id": 1, "delivery_id": 5}}, "delivery_id"),
         ({"on_behalf_of": {"github_sender_id": 1, "delivery_id": None}}, "delivery_id"),
         ({"on_behalf_of": {"github_sender_id": 1, "delivery_id": "a\nb"}}, "control character"),
@@ -121,6 +127,22 @@ def test_on_behalf_of_is_null_or_the_structured_object() -> None:
     assert _event().on_behalf_of is None
     who = {"github_sender_id": 583231, "delivery_id": "d" * MAX_DELIVERY_ID}
     assert _event(on_behalf_of=who).on_behalf_of == who
+
+
+def test_on_behalf_of_accepts_the_sender_id_bounds() -> None:
+    """1 and 2**63 - 1 are the ends of the accepted range."""
+    for sender in (1, MAX_SENDER_ID):
+        who = {"github_sender_id": sender, "delivery_id": "d"}
+        assert _event(on_behalf_of=who).on_behalf_of == who
+
+
+def test_the_event_keeps_a_private_copy_of_on_behalf_of() -> None:
+    """Changing the caller's dict after construction cannot change what is written."""
+    who: dict[str, Any] = {"github_sender_id": 5, "delivery_id": "d"}
+    event = _event(on_behalf_of=who)
+    who["login"] = "attacker"
+    who["delivery_id"] = "x" * 10_000
+    assert event.on_behalf_of == {"github_sender_id": 5, "delivery_id": "d"}
 
 
 def test_a_payload_at_the_bound_is_accepted() -> None:
