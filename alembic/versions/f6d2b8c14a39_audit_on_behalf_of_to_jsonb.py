@@ -82,5 +82,8 @@ def downgrade() -> None:
         "ALTER TABLE audit_events ALTER COLUMN on_behalf_of TYPE text "
         "USING CASE WHEN on_behalf_of IS NULL THEN NULL "
         "WHEN jsonb_typeof(on_behalf_of) = 'string' THEN on_behalf_of #>> '{}' "
+        "WHEN jsonb_typeof(on_behalf_of) = 'object' THEN "
+        "'sender=' || (on_behalf_of->>'github_sender_id') "
+        "|| ';delivery=' || (on_behalf_of->>'delivery_id') "
         "ELSE on_behalf_of::text END"
     )

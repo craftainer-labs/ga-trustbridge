@@ -89,8 +89,16 @@ class AuditEvent:
         _check_payload("after", self.after)
         if self.on_behalf_of is not None:
             _check_on_behalf_of(self.on_behalf_of)
-            # A private copy: the caller's dict can no longer change what gets written.
-            object.__setattr__(self, "on_behalf_of", dict(self.on_behalf_of))
+            # Rebuilt from the validated scalars: the caller's dict (or a subclass of it) can no
+            # longer change what gets written.
+            object.__setattr__(
+                self,
+                "on_behalf_of",
+                {
+                    "github_sender_id": int(self.on_behalf_of["github_sender_id"]),
+                    "delivery_id": str(self.on_behalf_of["delivery_id"]),
+                },
+            )
 
     def _check_actor(self) -> None:
         """The actor columns agree with the actor type (and the table's check constraint)."""

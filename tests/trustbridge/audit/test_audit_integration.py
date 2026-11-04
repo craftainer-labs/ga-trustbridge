@@ -797,8 +797,8 @@ _COLUMN_TYPE = (
     "SELECT data_type FROM information_schema.columns "
     "WHERE table_name = 'audit_events' AND column_name = 'on_behalf_of'"
 )
-_LEGACY_ROWS = (
-    "SELECT actor_sub, on_behalf_of, jsonb_typeof(on_behalf_of) FROM audit_events "
+_SNAPSHOT = (
+    "SELECT actor_sub, on_behalf_of FROM audit_events "
     "WHERE actor_sub LIKE 'migration-%' ORDER BY actor_sub"
 )
 _OBJECT_INSERT = (
@@ -813,49 +813,64 @@ _LEGACY_INSERT = (
 )
 
 
-async def _migration_steps(conn: AsyncConnection) -> list[object]:
-    """Downgrade, insert legacy rows, upgrade, read them, downgrade again; what each step saw."""
-    seen: list[object] = []
+async def _snapshot(conn: AsyncConnection) -> dict[str, object]:
+    """Every migration-test row's `on_behalf_of`, by `actor_sub`."""
+    return {row[0]: row[1] for row in (await conn.execute(text(_SNAPSHOT))).all()}
+
+
+async def _migration_steps(conn: AsyncConnection) -> dict[str, object]:
+    """Walk the revision down and up with legacy and object rows; each step's full snapshot."""
+    steps: dict[str, object] = {}
     await conn.run_sync(_run_migration, "downgrade")
-    seen.append((await conn.execute(text(_COLUMN_TYPE))).scalar_one())
+    steps["column before"] = (await conn.execute(text(_COLUMN_TYPE))).scalar_one()
     for suffix, value in (("a", "sender=1;delivery=d"), ("b", None), ("c", "garbage")):
         await conn.execute(text(_LEGACY_INSERT), {"sub": f"migration-{suffix}", "v": value})
     await conn.run_sync(_run_migration, "upgrade")
-    seen.append([tuple(r) for r in (await conn.execute(text(_LEGACY_ROWS))).all()])
+    steps["upgraded"] = await _snapshot(conn)
+    await conn.execute(
+        text(_OBJECT_INSERT), {"v": json.dumps({"github_sender_id": 9, "delivery_id": "d-9"})}
+    )
+    steps["with object"] = await _snapshot(conn)
     await conn.run_sync(_run_migration, "downgrade")
-    legacy = text("SELECT on_behalf_of FROM audit_events WHERE actor_sub = 'migration-a'")
-    seen.append(json.loads((await conn.execute(legacy)).scalar_one()))
+    steps["downgraded"] = await _snapshot(conn)
     await conn.run_sync(_run_migration, "upgrade")
-    who = json.dumps({"github_sender_id": 9, "delivery_id": "d-9"})
-    await conn.execute(text(_OBJECT_INSERT), {"v": who})
-    await conn.run_sync(_run_migration, "downgrade")
-    as_text = text("SELECT on_behalf_of FROM audit_events WHERE actor_sub = 'migration-obj'")
-    seen.append(json.loads((await conn.execute(as_text)).scalar_one()))
-    return seen
+    steps["re-upgraded"] = await _snapshot(conn)
+    return steps
 
 
-async def test_the_on_behalf_of_migration_keeps_legacy_strings_and_nulls_and_reverses(
+async def test_the_on_behalf_of_revision_converts_legacy_text_and_round_trips_losslessly(
     fresh_db: Db,
 ) -> None:
-    """text -> jsonb turns a legacy `sender=..;delivery=..` string into the object."""
+    """Up turns legacy text into the object (garbage into null); down writes the legacy text back.
+
+    Going up again restores every row exactly: nothing is lost and nothing becomes null.
+    """
     try:
         async with fresh_db.admin.connect() as conn:
-            seen = await _migration_steps(conn)
+            steps = await _migration_steps(conn)
             await conn.rollback()
     except DBAPIError as exc:
         if "permission" in str(exc) or "must be owner" in str(exc):
             pytest.skip("the test database user cannot alter the re-owned table")
         raise
-    assert seen == [
-        "text",
-        [
-            ("migration-a", {"github_sender_id": 1, "delivery_id": "d"}, "object"),
-            ("migration-b", None, None),
-            ("migration-c", None, None),
-        ],
-        {"github_sender_id": 1, "delivery_id": "d"},
-        {"github_sender_id": 9, "delivery_id": "d-9"},
-    ]
+    first = {
+        "migration-a": {"github_sender_id": 1, "delivery_id": "d"},
+        "migration-b": None,
+        "migration-c": None,
+    }
+    both = {**first, "migration-obj": {"github_sender_id": 9, "delivery_id": "d-9"}}
+    assert steps == {
+        "column before": "text",
+        "upgraded": first,
+        "with object": both,
+        "downgraded": {
+            "migration-a": "sender=1;delivery=d",
+            "migration-b": None,
+            "migration-c": None,
+            "migration-obj": "sender=9;delivery=d-9",
+        },
+        "re-upgraded": both,
+    }
 
 
 @pytest.mark.parametrize(
