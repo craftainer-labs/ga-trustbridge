@@ -13,6 +13,8 @@ Tests for the instance package `src/trustbridge/` (instance-added files under th
   coverage gate counts the SQL stores through them).
 - `tenancy/test_rls_integration.py` is marked `integration` (it needs the stack's Postgres, with the
   owner and app roles); `tenancy/test_tenancy_unit.py` needs no service.
+- `audit/test_audit_integration.py` is marked `integration` (it needs the stack's Postgres, with the
+  owner and app roles); `audit/test_audit_unit.py` needs no service.
 - `test_main.py` runs the real `trustbridge.main:app` in a subprocess (the entrypoint mutates the
   template app at import, which must not leak into the template's own tests).
 
