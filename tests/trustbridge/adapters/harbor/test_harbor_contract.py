@@ -4,6 +4,7 @@ Each test names the ADR 0029 invariant it covers. The fixtures under `fixtures/`
 Harbor's published swagger definition; the module README lists what is unconfirmed.
 """
 
+import hmac
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -100,9 +101,15 @@ CONTEXT = {
     "hook_secret": HOOK_SECRET,
 }
 HOOK = CONTEXT["hook"]
-HOOK_AUTH = sha256(f"{HOOK}|{HOOK_SECRET}".encode()).hexdigest()
+HOOK_AUTH = hmac.new(
+    ADMIN_SECRET.encode(),
+    b"trustbridge/harbor/webhook-digest/v1|" + f"{HOOK}|{HOOK_SECRET}".encode(),
+    sha256,
+).hexdigest()
+OLD_HOOK_AUTHS = (sha256(f"{HOOK}|{HOOK_SECRET}".encode()).hexdigest(), "0123456789abcdef0123")
 SLOT = CredentialSlot(2, CRED)
-DELIVERED_SLOT = CredentialSlot(2, CRED, {"kind": "robot", "robot_id": "11"}, True)
+DELIVERED_SLOT = CredentialSlot(2, CRED, {}, True)
+BY_ID_SLOT = CredentialSlot(2, CRED, {"kind": "robot", "robot_id": "11", "project": PROJECT}, True)
 PREV_SLOT = CredentialSlot(1, PREV, {"kind": "robot", "robot_id": "10", "project": PROJECT}, True)
 TARGET = WebhookTarget(TENANT, HOOK_URL, (), "hook-secret")
 
@@ -383,16 +390,17 @@ async def test_ensure_project_refuses_an_existing_public_project() -> None:
     assert not info.value.retryable
 
 
-async def test_a_previous_robot_found_by_id_in_another_project_is_deleted() -> None:
-    """A recorded robot id finds the robot even when it sits in another project than the ref."""
+async def test_a_recorded_robot_id_in_another_project_is_never_deleted() -> None:
+    """Ownership: the robot a recorded id names must sit in this tenant's credential project."""
     replay, adapter = build("credentials.json", "finish_moved")
     done = await adapter.rotate_finish(PUSH, state_of(SLOT, PREV_SLOT))
     replay.assert_exhausted()
-    assert done.change.state is ChangeState.DELETED
+    assert done.change.state is ChangeState.UNCHANGED
     replay, adapter = build("credentials.json", "finish_moved")
-    gone = await adapter.delete_credential(PUSH, CredentialState(current=None, previous=PREV_SLOT))
+    left = await adapter.delete_credential(PUSH, CredentialState(current=None, previous=PREV_SLOT))
     replay.assert_exhausted()
-    assert gone.change.state is ChangeState.DELETED
+    assert left.change.state is ChangeState.UNCHANGED
+    assert [r.method for r in replay.seen] == ["GET"]
 
 
 async def test_ensure_webhook_uses_the_project_in_its_prior_ref() -> None:
@@ -596,8 +604,17 @@ def _robot_page(count: int, offset: int) -> list[dict[str, object]]:
     ]
 
 
+def _project_lookup() -> dict[str, object]:
+    request = {"method": "GET", "path": f"/api/v2.0/projects/{PROJECT}"}
+    return {"request": request, "response": {"status": 200, "json": {"project_id": 7}}}
+
+
 def _listing(page: int, items: list[dict[str, object]]) -> dict[str, object]:
-    query = {"q": f"Level=project,name=~{CRED}", "page_size": "100", "page": str(page)}
+    query = {
+        "q": f"Level=project,ProjectID=7,name=~{CRED}",
+        "page_size": "100",
+        "page": str(page),
+    }
     request = {"method": "GET", "path": "/api/v2.0/robots", "query": query}
     return {"request": request, "response": {"status": 200, "json": items}}
 
@@ -606,7 +623,7 @@ async def test_listings_follow_every_page() -> None:
     """A robot beyond the first 100 results is still found (here: created on page two)."""
     robot = {"id": 300, "name": f"robot${PROJECT}+{CRED}", "description": "managed by trustbridge"}
     first = [*_robot_page(99, 0), {"id": 99, "name": "no-plus-sign"}]
-    replay = Replay([_listing(1, first), _listing(2, [robot])])
+    replay = Replay([_project_lookup(), _listing(1, first), _listing(2, [robot])])
     adapter = HarborAdapter(config(), transport=replay.transport(), clock=lambda: NOW)
     outcome = await adapter.ensure_credential(PUSH, state_of(DELIVERED_SLOT))
     replay.assert_exhausted()
@@ -616,11 +633,12 @@ async def test_listings_follow_every_page() -> None:
 async def test_an_endless_listing_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A listing that never ends is a non-retryable error, not a loop."""
     monkeypatch.setattr("trustbridge.adapters.harbor.adapter.MAX_PAGES", 1)
-    replay = Replay([_listing(1, _robot_page(100, 0))])
+    replay = Replay([_project_lookup(), _listing(1, _robot_page(100, 0))])
     adapter = HarborAdapter(config(), transport=replay.transport(), clock=lambda: NOW)
     with pytest.raises(AdapterError) as info:
         await adapter.ensure_credential(PUSH, state_of(DELIVERED_SLOT))
     assert not info.value.retryable
+    assert "safety bound" in info.value.message
 
 
 async def test_an_invalid_url_is_an_adapter_error_without_the_url() -> None:
@@ -759,6 +777,135 @@ async def test_list_credentials_returns_only_this_tenants_robots() -> None:
         (CRED, "11", PROJECT),
         (PREV, "10", PROJECT),
     }
+
+
+# ---- NG5bf follow-ups ------------------------------------------------------------------------
+async def test_a_project_robot_listing_carries_the_project_id() -> None:
+    """Harbor's ListRobot handler needs `ProjectID` with `Level=project`, read from the project."""
+    replay, adapter = build("credentials.json", "exists_delivered")
+    await adapter.ensure_credential(PUSH, state_of(DELIVERED_SLOT))
+    replay.assert_exhausted()
+    paths = [r.url.path for r in replay.seen]
+    assert paths == [f"/api/v2.0/projects/{PROJECT}", "/api/v2.0/robots"]
+    assert dict(replay.seen[1].url.params)["q"] == f"Level=project,ProjectID=7,name=~{CRED}"
+
+
+async def test_an_absent_credential_project_has_no_robots() -> None:
+    """A 404 for the project means an empty listing, without a robot request."""
+    replay, adapter = build("credentials.json", "list_project_missing")
+    assert await adapter.list_credentials(TENANT) == []
+    replay.assert_exhausted()
+
+
+async def test_a_project_without_an_id_is_an_error() -> None:
+    """A project answer with no positive integer `project_id` cannot scope a robot listing."""
+    _, adapter = build("credentials.json", "project_without_id")
+    with pytest.raises(AdapterError) as info:
+        await adapter.list_credentials(TENANT)
+    assert not info.value.retryable
+
+
+async def test_ensure_prefers_the_recorded_robot_id() -> None:
+    """A recorded id is read directly; its robot is found without a listing."""
+    replay, adapter = build("credentials.json", "by_id_delivered")
+    outcome = await adapter.ensure_credential(PUSH, state_of(BY_ID_SLOT))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UNCHANGED
+    replay, adapter = build("credentials.json", "by_id_rotate")
+    rotated = await adapter.rotate_begin(PUSH, state_of(BY_ID_SLOT))
+    replay.assert_exhausted()
+    assert rotated.change.state is ChangeState.UPDATED
+
+
+async def test_a_robot_moved_to_another_project_is_not_matched_by_id() -> None:
+    """The recorded id now sits in another project: it is not ours and a new robot is created."""
+    replay, adapter = build("credentials.json", "by_id_moved")
+    outcome = await adapter.ensure_credential(PUSH, state_of(BY_ID_SLOT))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.CREATED
+
+
+async def test_an_unknown_robot_id_falls_back_to_the_project_listing() -> None:
+    """A 404 for the recorded id (stale state) looks the name up in the credential project."""
+    replay, adapter = build("credentials.json", "by_id_gone")
+    outcome = await adapter.ensure_credential(PUSH, state_of(BY_ID_SLOT))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UNCHANGED
+
+
+async def test_a_robot_found_by_id_without_the_marker_is_refused() -> None:
+    """Ownership also applies to the id path."""
+    _, adapter = build("credentials.json", "by_id_foreign")
+    with pytest.raises(AdapterError) as info:
+        await adapter.ensure_credential(PUSH, state_of(BY_ID_SLOT))
+    assert not info.value.retryable
+
+
+async def test_a_project_creation_race_applies_the_privacy_check() -> None:
+    """A 409 re-reads the project; a private one is adopted, a public or unmarked one is refused."""
+    replay, adapter = build("projects.json", "race")
+    applied = await adapter.ensure_project(TENANT, ProjectSpec("default"), None)
+    replay.assert_exhausted()
+    assert applied.change.state is ChangeState.UNCHANGED
+    for scenario in ("race_public", "race_no_metadata"):
+        replay, adapter = build("projects.json", scenario)
+        with pytest.raises(AdapterError) as info:
+            await adapter.ensure_project(TENANT, ProjectSpec("default"), None)
+        replay.assert_exhausted()
+        assert not info.value.retryable
+    replay, adapter = build("projects.json", "race_gone")
+    with pytest.raises(AdapterError) as info:
+        await adapter.ensure_project(TENANT, ProjectSpec("default"), None)
+    assert info.value.retryable
+
+
+async def test_a_project_flipped_to_public_names_the_manual_fix() -> None:
+    """The refusal is non-retryable and says to set the project private in Harbor by hand."""
+    _, adapter = build("projects.json", "exists_public")
+    prior = ResourceState(PROJECT, {"kind": "project", "project_name": PROJECT})
+    with pytest.raises(AdapterError) as info:
+        await adapter.ensure_project(TENANT, ProjectSpec("default"), prior)
+    assert not info.value.retryable
+    assert "private" in info.value.message
+    assert "never changes" in info.value.message
+
+
+async def test_the_webhook_digest_is_a_keyed_hmac_not_a_plain_hash() -> None:
+    """The stored digest is an HMAC keyed by the admin credential, domain-separated."""
+    replay, adapter = build("webhooks.json", "create")
+    created = await adapter.ensure_webhook(TARGET, None)
+    replay.assert_exhausted()
+    assert created.state is not None
+    assert created.state.ref["auth"] == HOOK_AUTH
+    assert created.state.ref["auth"] != OLD_HOOK_AUTHS[0]
+
+
+async def test_the_webhook_digest_needs_the_admin_credential() -> None:
+    """The HMAC key is the admin credential: without one the call is a configuration error."""
+    adapter = HarborAdapter(
+        AdapterConfig(
+            TENANT, {"base_url": SecretStr(BASE_URL), "hook-secret": SecretStr(HOOK_SECRET)}, None
+        ),
+        transport=Replay([]).transport(),
+    )
+    with pytest.raises(AdapterConfigurationError):
+        await adapter.ensure_webhook(TARGET, None)
+
+
+@pytest.mark.parametrize("old", [*OLD_HOOK_AUTHS, None])
+async def test_an_old_or_missing_digest_is_pushed_once(old: str | None) -> None:
+    """A plain sha256, a short digest or none counts as unknown: one PUT, then the new digest."""
+    ref = {"kind": "webhook", "project": PROJECT} | ({"auth": old} if old else {})
+    replay, adapter = build("webhooks.json", "drift_secret")
+    applied = await adapter.ensure_webhook(TARGET, ResourceState(HOOK, ref))
+    replay.assert_exhausted()
+    assert applied.change.state is ChangeState.UPDATED
+    assert applied.state is not None
+    assert applied.state.ref["auth"] == HOOK_AUTH
+    replay, adapter = build("webhooks.json", "exists")
+    again = await adapter.ensure_webhook(TARGET, applied.state)
+    replay.assert_exhausted()
+    assert again.change.state is ChangeState.UNCHANGED
 
 
 # ---- github outputs (pure) -------------------------------------------------------------------

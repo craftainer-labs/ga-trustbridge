@@ -20,13 +20,13 @@ counts as pure).
 
 | Interface method | Harbor call |
 | --- | --- |
-| `ensure_project` | `GET/POST /api/v2.0/projects[/{name}]`; name `tb` + 20 hex of `sha256(tenant hex \| spec key)`, created private; 409 on create is a race |
+| `ensure_project` | `GET/POST /api/v2.0/projects[/{name}]`; name `tb` + 20 hex of `sha256(tenant hex \| spec key)`, created private; a 409 on create is a race: the project is re-read and adopted only if `public` is `false` (a missing value fails closed) |
 | `ensure_repository` | none: Harbor has no create-repository API (a repository appears on its first push), so it only returns the deterministic name `<project>/<key>` with `UNCHANGED` |
 | `ensure_webhook` | `GET/POST/PUT /api/v2.0/projects/{p}/webhook/policies[/{id}]`, type `http`, `auth_header` = the secret |
 | `delete` | `DELETE` on the project or the policy (policy found by name); a repository is never touched |
 | `ensure_credential`, `rotate_begin` | `GET/POST /api/v2.0/robots`, `PATCH /api/v2.0/robots/{id}` (refresh the secret) |
-| `rotate_finish`, `delete_credential` | `DELETE /api/v2.0/robots/{id}` (robot found by name) |
-| `list_credentials` | `GET /api/v2.0/robots?q=name=~<tenant prefix>` |
+| `rotate_finish`, `delete_credential` | `GET` then `DELETE /api/v2.0/robots/{id}` (recorded id; checked for name, credential project and marker) |
+| `list_credentials` | `GET /api/v2.0/projects/{p}`, then `GET /api/v2.0/robots?q=Level=project,ProjectID=<id>,name=~<tenant prefix>` (credential project only) |
 | `health_check` | `GET /api/v2.0/users/current` (authenticated) |
 
 ## Grants: project-wide only (user decision "Harbor scope")
@@ -55,11 +55,24 @@ webhook is `STATIC_HEADER` in `Authorization`, trigger-only.
   cannot be created under the same name. `rotate_begin` asks Harbor to refresh the robot's secret
   (`PATCH /robots/{id}`); the old secret stops working at once. `rotate_finish` deletes only a
   `previous` slot whose name differs from `current`.
-- **Robot lookup.** The listing spans the whole instance, so a robot is selected by the suffix
-  `<project>+<slot name>` of its full name (`<prefix><project>+<name>`, default prefix `robot$`).
+- **Robot lookup.** A recorded `robot_id` is read directly (`GET /robots/{id}`) by ensure, rotate,
+  `rotate_finish` and delete; the robot counts only if its full name (`<prefix><project>+<name>`,
+  default prefix `robot$`) still ends in `<credential project>+<slot name>`, so a renamed or moved
+  robot is never matched. Only an id Harbor no longer knows (404) or a slot without an id falls
+  back to the project listing, where the name is matched exactly on the client. The listing is
+  `q=Level=project,ProjectID=<id>,name=~<name>`: the swagger does not document the `Level` and
+  `ProjectID` keys (its `ListRobot` text only says "with the specified level and project"), but
+  the handler requires `ProjectID` with `Level=project` (a 400 otherwise): `ListRobot` in
+  <https://github.com/goharbor/harbor/blob/main/src/server/v2.0/handler/robot.go>. The id is
+  `Project.project_id` from `GET /projects/{name}` (swagger `Project`); an absent project has no
+  robots.
 - **Webhook.** Harbor sends `auth_header` verbatim as the `Authorization` request header, so the
   inbound check is a static-header comparison, never an HMAC; the payload is only a trigger.
-  Default event `PUSH_ARTIFACT`.
+  Default event `PUSH_ARTIFACT`. Harbor masks `auth_header`, so the state ref keeps `auth`, an
+  HMAC-SHA256 (keyed by the tenant's `privileged_credential`, message prefixed with the label
+  `trustbridge/harbor/webhook-digest/v1|`) of the policy name and secret. A stored digest that
+  differs (an older plain sha256, another length, none) is treated as unknown and pushed once;
+  rotating the admin credential therefore causes one extra PUT per webhook.
 - **Secret values.** `IssuedSecret.values` holds `username` (the robot's full name) and
   `password`; `github_outputs` writes variable `HARBOR_REGISTRY` and secrets `HARBOR_USERNAME` and
   `HARBOR_PASSWORD`.
@@ -88,8 +101,8 @@ No primary-documentation statement exists for these; the fixtures encode best-ef
 
 - That `PATCH /robots/{id}` with `{"secret": ""}` makes Harbor generate a secret and return it in
   `RobotSec`. The swagger only says "Refresh the robot secret".
-- That the robot list `q=Level=project,name=~<text>` (both filters ANDed) matches the full or stored name, and which prefix the
-  listed `name` carries (`robot$` by default, configurable in system settings).
+- Which prefix the listed robot `name` carries (`robot$` by default, configurable in system
+  settings) and that `name=~<text>` matches the full stored name.
 - That a robot name made of `tb-<hex>-<key>-g<n>` passes Harbor's robot name validation and
   length limit, and the answer for a duplicate name (409 assumed).
 - That a duplicate webhook policy name on `POST` answers 409 (not documented), and that the
@@ -103,8 +116,8 @@ No primary-documentation statement exists for these; the fixtures encode best-ef
   (follow-up NG5bf; see the 90-day limitation below).
 - Whether MSR 4 differs from upstream Harbor in any of these endpoints (its docs do not say).
 - That `GET /projects/{name}` answers 404 (not 403) for an absent project to the admin account.
-- Pagination: `page` and `page_size=100` are sent and pages are read until a short page (at most
-  50); `Link` and `X-Total-Count` headers are not used.
+- Pagination: `page` and `page_size=100` are sent and pages are read until a short page;
+  `Link` and `X-Total-Count` headers are not used.
 
 ## Known limitations
 
@@ -117,16 +130,24 @@ No primary-documentation statement exists for these; the fixtures encode best-ef
   no project identity, so robots and webhooks target the project derived for the spec key
   `default`, or the operator's `project_key` connection entry; nothing validates that this is a
   project `ensure_project` created. Binding them needs an I2 decision (follow-up).
-- An existing project that is public is refused (the adapter only creates private projects).
-- Listings are read up to 50 pages of 100 (5000 items); beyond that every credential call fails
-  with a non-retryable error.
+- An existing project that is not private is refused (the adapter only creates private
+  projects), including one flipped to public later and one found after a create race. The adapter
+  never changes visibility itself. The non-retryable error says what to do: set the project to
+  private in Harbor (project Configuration, Public off) and reconcile again.
+- Every listing is filtered by name (webhooks `q=name=<exact>`, robots `name=~<text>` within one
+  project), so results stay small. A cap of 50 pages of 100 remains only as a safety bound; past
+  it the call fails with a non-retryable error.
+- `list_credentials` lists the credential project only (the derived `default` project or the
+  operator's `project_key`), the one project the adapter creates robots in; robots elsewhere are
+  not swept.
 - A scope whose permission changes gets a new robot name (the scope key changes); the old robot is
   removed by `delete_credential` or the orphan sweep, not rewritten in place.
 - **Ownership.** The adapter never adopts, updates or deletes what it did not create. Robots and
   webhook policies carry the description `managed by trustbridge`; one with the same name but
   another description is refused (create, refresh) or left alone (delete). Robot names must also
   start with the tenant prefix and match the exact project, so a robot of another project with a
-  similar name never counts. Harbor projects have no free-form field: only a project named
+  similar name never counts. A robot is deleted by recorded id only if it sits in the credential
+  project and carries the marker; one elsewhere is left alone. Harbor projects have no free-form field: only a project named
   `tb<20 hex digits>` (derived from tenant and key) is deleted.
 - Robots are created with a 90-day duration. A secret refresh does not extend it, and the adapter
   does not renew an expiring robot; recreate it (delete the credential) before it lapses.

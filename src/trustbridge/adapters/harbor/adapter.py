@@ -4,6 +4,7 @@ See `README.md` for the endpoints, which payload shapes the Harbor documentation
 still need a live confirmation, and the known limitations (notably: no per-repository grants).
 """
 
+import hmac
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -73,6 +74,10 @@ PROJECT_DIGEST_LENGTH = 20
 _PROJECT_NAME = re.compile(rf"tb[0-9a-f]{{{PROJECT_DIGEST_LENGTH}}}")
 PAGE_SIZE = "100"
 MAX_PAGES = 50
+"""A safety bound on one listing, not a capacity: every listing is already filtered by name (and a
+robot listing by project), so it stays small; a listing past the bound fails non-retryably."""
+WEBHOOK_DIGEST_LABEL = b"trustbridge/harbor/webhook-digest/v1|"
+"""Domain separation for the HMAC that detects a rotated webhook secret."""
 MARKER = "managed by trustbridge"
 """Written to the description of every robot and webhook policy the adapter creates; one without
 it is never adopted, updated or deleted (Harbor projects carry no free-form field, so a project
@@ -173,11 +178,14 @@ class HarborAdapter:
             found = await c.call("GET", f"{API}/projects/{seg(name)}", accept=NOT_FOUND)
             if found.status_code == HTTP_NOT_FOUND:
                 created = await c.call("POST", f"{API}/projects", json=body, accept=CONFLICT)
-                state = (
-                    ChangeState.UNCHANGED
-                    if created.status_code == HTTP_CONFLICT
-                    else ChangeState.CREATED
-                )
+                state = ChangeState.CREATED
+                if created.status_code == HTTP_CONFLICT:
+                    # A parallel writer created it: adopt it only after the same privacy check.
+                    again = await c.call("GET", f"{API}/projects/{seg(name)}", accept=NOT_FOUND)
+                    if again.status_code == HTTP_NOT_FOUND:
+                        raise AdapterError(True, "Harbor project was created concurrently")
+                    self._require_private(again)
+                    state = ChangeState.UNCHANGED
             else:
                 self._require_private(found)
                 state = ChangeState.UNCHANGED
@@ -190,7 +198,12 @@ class HarborAdapter:
         metadata = json_object(found).get("metadata")
         public = metadata.get("public") if isinstance(metadata, dict) else None
         if str(public).lower() != "false":
-            raise AdapterError(False, "Harbor project exists but is public; not adopting it")
+            msg = (
+                "Harbor project exists but is not private; trustbridge never changes a project's "
+                "visibility. Set the project to private in Harbor (project Configuration, "
+                "Public off) and run the reconcile again"
+            )
+            raise AdapterError(False, msg)
 
     # ---- repositories ----------------------------------------------------
     async def ensure_repository(
@@ -239,7 +252,7 @@ class HarborAdapter:
         base = f"{API}/projects/{seg(project)}/webhook/policies"
         # Harbor never returns `auth_header` in the clear, so a rotated secret is detected by a
         # digest kept in the ref; a missing digest (or a changed one) pushes the body again.
-        auth = sha256(f"{name}|{secret.get_secret_value()}".encode()).hexdigest()
+        auth = self._webhook_digest(name, secret)
         known_auth = prior.ref.get("auth") if prior is not None else None
         async with self._client() as c:
             existing = await self._find_policy(c, project, name)
@@ -261,6 +274,18 @@ class HarborAdapter:
                     state = ChangeState.UPDATED
         ref = {"kind": "webhook", "project": project, "policy": name, "auth": auth}
         return Applied(Change(state), ResourceState(name=name, ref=ref))
+
+    def _webhook_digest(self, name: str, secret: SecretStr) -> str:
+        """HMAC-SHA256 of the policy name and secret, keyed by the tenant's admin credential.
+
+        Any stored digest that differs (an older plain sha256, another length, none) counts as
+        unknown and is pushed once.
+        """
+        key = self._config.privileged_credential
+        if key is None:
+            raise AdapterConfigurationError("Harbor admin credential is not configured")
+        message = WEBHOOK_DIGEST_LABEL + f"{name}|{secret.get_secret_value()}".encode()
+        return hmac.new(key.get_secret_value().encode(), message, sha256).hexdigest()
 
     def _webhook_secret(self, t: WebhookTarget) -> SecretStr:
         if t.secret_ref is None:
@@ -334,7 +359,7 @@ class HarborAdapter:
         slot = self._current(prior)
         project = self._project_for_credentials()
         async with self._client() as c:
-            existing = await self._find_robot(c, project, slot.name)
+            existing = await self._find_robot(c, project, slot.name, slot.ref.get("robot_id"))
             if existing is None:
                 return await self._create_robot(c, s, prior, slot, project)
             self._require_owned(existing)
@@ -347,7 +372,7 @@ class HarborAdapter:
         slot = self._current(prior)
         project = self._project_for_credentials()
         async with self._client() as c:
-            existing = await self._find_robot(c, project, slot.name)
+            existing = await self._find_robot(c, project, slot.name, slot.ref.get("robot_id"))
             if existing is None:
                 return await self._create_robot(c, s, prior, slot, project)
             self._require_owned(existing)
@@ -378,10 +403,10 @@ class HarborAdapter:
         return CredentialOutcome(change, CredentialState(current=None), None)
 
     async def list_credentials(self, t: Tenant) -> Sequence[ListedCredential]:
-        """List the tenant's trustbridge-named robot accounts (all projects)."""
+        """List the tenant's trustbridge-named robots of the credential project."""
         prefix = tenant_prefix(t.id)
         async with self._client() as c:
-            robots = await self._robots(c, prefix)
+            robots = await self._robots(c, self._project_for_credentials(), prefix)
         listed = []
         for robot in robots:
             full = robot.get("name")
@@ -456,37 +481,59 @@ class HarborAdapter:
             items.extend(batch)
             if len(batch) < int(PAGE_SIZE):
                 return items
-        raise AdapterError(False, f"Harbor listing {path} has more than {MAX_PAGES} pages")
+        msg = f"Harbor listing {path} exceeds the safety bound of {MAX_PAGES} pages"
+        raise AdapterError(False, msg)
 
     @staticmethod
-    async def _robots(c: HarborClient, name_part: str) -> list[JsonObj]:
-        """List project robots whose name contains `name_part` (the listing spans the instance)."""
-        return await HarborAdapter._pages(c, f"{API}/robots", f"Level=project,name=~{name_part}")
+    async def _project_id(c: HarborClient, project: str) -> int | None:
+        """Return the numeric id of a project (`Project.project_id`), or None when absent."""
+        found = await c.call("GET", f"{API}/projects/{seg(project)}", accept=NOT_FOUND)
+        if found.status_code == HTTP_NOT_FOUND:
+            return None
+        project_id = json_object(found).get("project_id")
+        if not isinstance(project_id, int) or isinstance(project_id, bool) or project_id <= 0:
+            raise AdapterError(False, "Harbor returned a project without a project_id")
+        return project_id
+
+    @staticmethod
+    async def _robots(c: HarborClient, project: str, name_part: str) -> list[JsonObj]:
+        """List the robots of one project whose name contains `name_part`.
+
+        Harbor's ListRobot handler requires `ProjectID` next to `Level=project` (a missing one is
+        a 400); an absent project has no robots.
+        """
+        project_id = await HarborAdapter._project_id(c, project)
+        if project_id is None:
+            return []
+        query = f"Level=project,ProjectID={project_id},name=~{name_part}"
+        return await HarborAdapter._pages(c, f"{API}/robots", query)
 
     async def _find_robot(
         self, c: HarborClient, project: str, name: str, robot_id: str | None = None
     ) -> JsonObj | None:
-        """Return the project robot `name`; its full name is `<prefix><project>+<name>`.
+        """Return the robot `name` of `project`; its full name is `<prefix><project>+<name>`.
 
-        With `robot_id` (deleting a recorded slot) the id decides instead of the project, so a robot
-        that sits in another project than the ref says is still found; the name must match
-        either way, and the caller checks the tenant prefix and the marker.
+        A recorded `robot_id` is read directly (`GET /robots/{id}`); that robot counts only when
+        its name and project still match (a renamed or moved one is not ours). Only an id Harbor
+        no longer knows falls back to the project listing. Callers check the marker.
         """
-        for robot in await self._robots(c, name):
-            full = robot.get("name")
-            if not isinstance(full, str) or "+" not in full:
-                continue
-            head, slot_name = full.rsplit("+", 1)
-            if slot_name != name:
-                continue
-            found_id = self._robot_id(robot)
-            if robot_id is not None:
-                matched = found_id == robot_id
-            else:
-                matched = head.rsplit("$", 1)[-1] == project
-            if matched:
+        if robot_id is not None:
+            got = await c.call("GET", f"{API}/robots/{seg(robot_id)}", accept=NOT_FOUND)
+            if got.status_code != HTTP_NOT_FOUND:
+                robot = json_object(got)
+                return robot if self._robot_matches(robot, project, name) else None
+        for robot in await self._robots(c, project, name):
+            if self._robot_matches(robot, project, name):
                 return robot
         return None
+
+    @staticmethod
+    def _robot_matches(robot: JsonObj, project: str, name: str) -> bool:
+        full = robot.get("name")
+        if not isinstance(full, str) or "+" not in full:
+            return False
+        head, slot_name = full.rsplit("+", 1)
+        return slot_name == name and head.rsplit("$", 1)[-1] == project
 
     async def _create_robot(
         self,
@@ -581,10 +628,15 @@ class HarborAdapter:
         return CredentialOutcome(Change(change), state, issued)
 
     async def _delete_slot(self, c: HarborClient, slot: CredentialSlot) -> bool:
-        """Delete the robot a slot names (found by name in its project). True if it went."""
+        """Delete the robot a slot names, only inside the credential project. True if it went.
+
+        The slot's recorded id is read first, but the robot must carry this tenant's name prefix,
+        sit in the project this tenant owns (the derived `default` project or the operator's
+        `project_key`) and carry the marker; anything else is left alone.
+        """
         if not slot.name.startswith(tenant_prefix(self._config.tenant.id)):
             return False
-        project = slot.ref.get("project") or self._project_for_credentials()
+        project = self._project_for_credentials()
         robot = await self._find_robot(c, project, slot.name, slot.ref.get("robot_id"))
         if robot is None or robot.get("description") != MARKER:
             return False
