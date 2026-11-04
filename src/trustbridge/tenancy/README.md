@@ -40,3 +40,10 @@ and `tb_list_tenants` (fixed `search_path = pg_catalog, public`, `EXECUTE` revok
 granted to `trustbridge_app` and `trustbridge_owner`), and the inert `tenant_isolation` and
 `owner_all` policies. `tb_delete_tenant` arrives with tenant data deletion (NG6h), and
 `tb_list_tenants` gets its real `admin_disabled_at` and `deleting` values from NG6e and NG6h.
+
+## Grants
+
+Production table and function grants for `trustbridge_app` come only from the migrations
+(`GRANT` to roles that already exist, never `CREATE ROLE`), per ADR 0031. The root `compose.yml`
+smoke stack additionally sets default privileges for the app role; that is smoke-only, because the
+template's frozen migrations grant nothing and the perf run needs CRUD on the template's tables.

@@ -350,9 +350,11 @@ services:
         condition: service_completed_successfully
 
 configs:
-  # Runs once as the bootstrap superuser against POSTGRES_DB. The default privileges give the
-  # runtime role the DML rights on the template's own tables (heroes, revisions), whose frozen
-  # migrations grant nothing; the trustbridge revisions GRANT to it themselves.
+  # Runs once as the bootstrap superuser against POSTGRES_DB. SMOKE STACK ONLY: the default
+  # privileges below give the runtime role DML on every table the owner creates, because the
+  # template's frozen migrations (heroes, revisions) grant nothing and the perf run needs CRUD.
+  # Production grants come only from the migrations themselves (ADR 0031); the trustbridge
+  # revisions GRANT to the app role explicitly and this is not a model for a real deployment.
   smoke-postgres-roles:
     content: |
       CREATE ROLE trustbridge_owner LOGIN PASSWORD 'smoke-only-owner-pw' NOSUPERUSER NOBYPASSRLS;

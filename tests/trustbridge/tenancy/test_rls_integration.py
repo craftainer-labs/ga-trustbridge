@@ -277,7 +277,7 @@ async def _admin_scalar(db: Db, statement: Executable) -> object:
 
 
 async def _values(session: AsyncSession, name: str, key: str) -> list[Any]:
-    result = await session.execute(select(column(key)).select_from(table(name)))
+    result: Result[Any] = await session.execute(select(column(key)).select_from(table(name)))
     return list(result.scalars().all())
 
 
