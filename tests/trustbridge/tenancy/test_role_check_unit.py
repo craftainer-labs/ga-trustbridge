@@ -24,6 +24,7 @@ from trustbridge.tenancy import (
 from trustbridge.tenancy import role_check as role_module
 from trustbridge.worker import runtime
 from trustbridge.worker.runtime import ProcessOverrides
+from trustbridge.worker.schema import SchemaGate
 
 
 def _facts(*, superuser: bool = False, bypassrls: bool = False, forced: bool = True) -> RoleFacts:
@@ -295,7 +296,7 @@ async def test_the_worker_role_wait_gets_what_the_schema_wait_left(
         seen.append(timeout)
         return False
 
-    monkeypatch.setattr(runtime.SchemaGate, "wait", slow_schema)
+    monkeypatch.setattr(SchemaGate, "wait", slow_schema)
     monkeypatch.setattr(RoleGate, "startup", capture)
     overrides = ProcessOverrides(
         redis=as_redis(FakeRedis()), checker=FakeHostChecker(), stop=asyncio.Event()
