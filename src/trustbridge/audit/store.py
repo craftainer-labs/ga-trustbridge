@@ -29,6 +29,7 @@ from trustbridge.audit.model import (
 
 _MAX_SEQ = 9223372036854775807
 DEFAULT_PURGE_BATCH = 1000
+MAX_PURGE_BATCH = 10000  # the ceiling `tb_audit_purge` enforces
 DEFAULT_EXPORT_PAGE = 500
 _COLUMNS = (
     "id, seq, occurred_at, recorded_at, tenant_id, actor_type, actor_sub, actor_iss, "
@@ -257,6 +258,8 @@ async def purge_expired(
     """
     if retention_days == 0:
         return 0
+    if not 1 <= batch_size <= MAX_PURGE_BATCH:
+        raise ValueError(f"batch_size must be between 1 and {MAX_PURGE_BATCH}")
     cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
     total = 0
     while True:
