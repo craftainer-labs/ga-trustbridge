@@ -13,7 +13,6 @@ from opentelemetry import trace
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-import trustbridge.audit.emit as emit
 from trustbridge.audit import (
     Action,
     ActorType,
@@ -24,6 +23,7 @@ from trustbridge.audit import (
     SystemActor,
     TenantSyncAudit,
     current_trace_id,
+    emit,
     with_trace,
 )
 from trustbridge.rbac import Denial, Role
