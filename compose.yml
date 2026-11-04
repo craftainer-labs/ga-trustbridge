@@ -364,6 +364,8 @@ configs:
       ALTER SCHEMA public OWNER TO trustbridge_owner;
       ALTER DEFAULT PRIVILEGES FOR ROLE trustbridge_owner IN SCHEMA public
         GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO trustbridge_app;
+      ALTER DEFAULT PRIVILEGES FOR ROLE trustbridge_owner IN SCHEMA public
+        GRANT USAGE, SELECT ON SEQUENCES TO trustbridge_app;
   smoke-mosquitto-conf:
     content: |
       listener 8883

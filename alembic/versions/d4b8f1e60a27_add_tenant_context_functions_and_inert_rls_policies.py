@@ -156,8 +156,8 @@ def _policies_sql() -> list[str]:
 
 def upgrade() -> None:
     """Upgrade schema."""
-    op.execute("SET lock_timeout = '5s'")
-    op.execute("SET statement_timeout = '120s'")
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute("SET LOCAL statement_timeout = '120s'")
     if not op.get_context().as_sql:  # offline rendering (the SQL lint) cannot query the catalog
         check_roles(op.get_bind(), production=is_production())
 
@@ -238,14 +238,12 @@ def upgrade() -> None:
         f"{SCHEMA_COMPAT_VERSION}) ON CONFLICT (id) DO UPDATE SET version = "
         f"GREATEST(schema_compat.version, {SCHEMA_COMPAT_VERSION})"
     )
-    op.execute("RESET statement_timeout")
-    op.execute("RESET lock_timeout")
 
 
 def downgrade() -> None:
     """Downgrade schema."""
-    op.execute("SET lock_timeout = '5s'")
-    op.execute("SET statement_timeout = '120s'")
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute("SET LOCAL statement_timeout = '120s'")
     for table in KEYED_TABLES:
         op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
         op.execute(f"DROP POLICY IF EXISTS owner_all ON {table}")
@@ -254,5 +252,3 @@ def downgrade() -> None:
     op.execute("DROP POLICY IF EXISTS owner_all ON tenants")
     for signature in reversed(FUNCTION_SIGNATURES):
         op.execute(f"DROP FUNCTION IF EXISTS {signature}")
-    op.execute("RESET statement_timeout")
-    op.execute("RESET lock_timeout")

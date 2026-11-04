@@ -85,8 +85,9 @@ async def for_each_tenant(
 ) -> SweepResult:
     """Run `work(tenant_id)` for every tenant inside its context; a failure does not stop others.
 
-    A failing tenant is logged and counted (`tenant_sweep_failures`) and the loop goes on, so
-    one tenant cannot starve the rest; the next pass retries it. Cancellation propagates.
+    A failing tenant is logged and counted (`trustbridge.tenants.sweep_failures`) and the loop
+    goes on, so one tenant cannot starve the rest; the next pass retries it. Cancellation
+    propagates.
     """
     succeeded = 0
     failed: list[UUID] = []
