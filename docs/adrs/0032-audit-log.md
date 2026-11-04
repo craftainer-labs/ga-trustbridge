@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed. The user's G-api answers (2026-11-03) are recorded below; no code is written yet. It becomes Accepted
-when the implementation (NG6c, with the emitters in NG6f) merges. Builds on
+Accepted (2026-11-04). The user's G-api answers (2026-11-03) are recorded below. The implementation
+merged: the table, grants, triggers and purge path in NG6c, the emitters in NG6f. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (database roles, source address
 behind `TRUSTED_PROXIES`, N-1 migrations) and
 [0031](0031-tenancy-and-row-level-security.md) (tenant context and RLS), and is used by
