@@ -10,6 +10,7 @@ foreign key) so they never see each other's rows.
 """
 
 import asyncio
+import importlib.util
 import json
 import os
 import subprocess
@@ -22,10 +23,13 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext
 from sqlalchemy import text
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, Connection
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
@@ -35,17 +39,32 @@ from sqlalchemy.pool import NullPool
 
 from app.config import Settings
 from app.db import build_engine
+from trustbridge.adapters.interface import CredentialSlot, CredentialState
+from trustbridge.adapters.store import (
+    Operation,
+    OperationKind,
+    OperationStatus,
+    ScopeId,
+    StoredCredential,
+)
 from trustbridge.audit import (
+    Action,
     ActorType,
+    AuditDenials,
     AuditEvent,
     AuditQuery,
+    AuditWriter,
     Outcome,
+    SystemActor,
+    TenantSyncAudit,
     append,
     export_ndjson,
     list_events,
     purge_batch,
     purge_expired,
 )
+from trustbridge.audit.credentials import CredentialAuditObserver
+from trustbridge.audit.denial import Denial
 from trustbridge.tenancy import install_tenant_hook, tenant_session
 
 pytestmark = pytest.mark.integration
@@ -652,3 +671,316 @@ async def test_the_export_stops_before_the_first_event_inside_the_lag(
     )
     lines = await _export(db, scope, 60.0)
     assert [json.loads(line)["id"] for line in lines] == [str(first), str(second), str(third)]
+
+
+# --- emitters (NG6f): ADR 0032 invariants 5, 6, 9, 10 against the real table ----------------
+
+CANARY = "canary-secret-7f3a9c1e"
+
+
+async def _tenant_events(db: Db, tenant: UUID) -> list[Any]:
+    async with tenant_session(db.app, tenant) as session:
+        page = await list_events(session, AuditQuery(limit=100), tenant_id=tenant)
+    return page.items
+
+
+async def test_the_writer_stores_an_event_in_its_tenants_context(db: Db) -> None:
+    """A tenant event is inserted in the tenant context and seen only by that tenant."""
+    tenant, other = uuid4(), uuid4()
+    await AuditWriter(db.app).record(
+        _event(tenant, actor_type=ActorType.SYSTEM, actor_sub="worker", actor_iss=None)
+    )
+    (record,) = await _tenant_events(db, tenant)
+    assert (record.actor_sub, record.tenant_id) == ("worker", tenant)
+    assert await _tenant_events(db, other) == []
+
+
+async def test_a_denial_is_a_null_tenant_row_that_only_instance_scope_reads(db: Db) -> None:
+    """Inv. 3a, 10: the app role writes it with no context; a tenant never sees it."""
+    sub = f"denied-{uuid4()}"
+    requested = str(uuid4())
+    denial = Denial(
+        sub=sub,
+        iss="https://idp.example",
+        reason="tenant_not_granted",
+        required_role="operator",
+        scope="tenant",
+        tenant_id=requested,
+        source_ip="203.0.113.4",
+        request_id="req-9",
+    )
+    await AuditDenials(AuditWriter(db.app)).denied(denial)
+    async with db.app() as session:
+        page = await list_events(session, AuditQuery(actor_sub=sub), instance_scope=True)
+    (record,) = page.items
+    assert record.tenant_id is None
+    assert (record.action, record.outcome) == (Action.AUTHZ_DENIED, Outcome.DENIED)
+    assert (record.resource_type, record.resource_id) == ("tenant", requested)
+    assert (record.actor_sub, record.actor_iss) == (sub, "https://idp.example")
+    assert (record.source_ip, record.request_id) == ("203.0.113.4", "req-9")
+    assert record.after == {
+        "reason": "tenant_not_granted",
+        "required_role": "operator",
+        "scope": "tenant",
+    }
+    assert await _tenant_events(db, UUID(requested)) == []
+
+
+async def test_a_tenant_sync_event_records_the_state_and_the_sender(db: Db) -> None:
+    """The system actor `github-webhook`, the state after the sync and the sender, no login."""
+    tenant = uuid4()
+    await TenantSyncAudit(AuditWriter(db.app)).tenant_synced(
+        tenant_id=tenant, state="suspended", delivery_id="d-77", sender_id=583231
+    )
+    (record,) = await _tenant_events(db, tenant)
+    assert (record.actor_type, record.actor_sub, record.actor_iss) == (
+        ActorType.SYSTEM,
+        "github-webhook",
+        None,
+    )
+    assert (record.action, record.resource_id) == (Action.TENANT_SYNC, str(tenant))
+    assert record.after == {"state": "suspended"}
+    assert record.on_behalf_of == {"github_sender_id": 583231, "delivery_id": "d-77"}
+    assert record.source_ip is None
+
+
+async def test_a_tenant_sync_without_a_sender_stores_a_null_on_behalf_of(db: Db) -> None:
+    """No numeric sender: the column is SQL null, not a JSON null or an empty object."""
+    tenant = uuid4()
+    await TenantSyncAudit(AuditWriter(db.app)).tenant_synced(
+        tenant_id=tenant, state="active", delivery_id="d-78", sender_id=None
+    )
+    (record,) = await _tenant_events(db, tenant)
+    assert record.on_behalf_of is None
+    is_null = await _scalar(
+        db.owner,
+        "SELECT on_behalf_of IS NULL FROM audit_events WHERE tenant_id = CAST(:t AS uuid)",
+        t=tenant,
+    )
+    assert is_null is True
+
+
+async def test_on_behalf_of_is_a_jsonb_column(db: Db) -> None:
+    """The migration chain ends with `on_behalf_of` as jsonb, holding the object as written."""
+    assert (
+        await _admin_scalar(
+            db,
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = 'audit_events' AND column_name = 'on_behalf_of'",
+        )
+        == "jsonb"
+    )
+    tenant = uuid4()
+    await _write(db, tenant, on_behalf_of={"github_sender_id": 7, "delivery_id": "d"})
+    sender = await _scalar(
+        db.owner,
+        "SELECT on_behalf_of->>'github_sender_id' FROM audit_events "
+        "WHERE tenant_id = CAST(:t AS uuid)",
+        t=tenant,
+    )
+    assert sender == "7"
+
+
+def _run_migration(sync_conn: Connection, direction: str) -> None:
+    """Run the `on_behalf_of` revision's `upgrade` or `downgrade` on `sync_conn`."""
+    path = next((ROOT / "alembic" / "versions").glob("f6d2b8c14a39_*.py"))
+    spec = importlib.util.spec_from_file_location("audit_on_behalf_of_revision", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with Operations.context(MigrationContext.configure(sync_conn)):
+        getattr(module, direction)()
+
+
+_COLUMN_TYPE = (
+    "SELECT data_type FROM information_schema.columns "
+    "WHERE table_name = 'audit_events' AND column_name = 'on_behalf_of'"
+)
+_SNAPSHOT = (
+    "SELECT actor_sub, on_behalf_of FROM audit_events "
+    "WHERE actor_sub LIKE 'migration-%' ORDER BY actor_sub"
+)
+_OBJECT_INSERT = (
+    "INSERT INTO audit_events (id, actor_type, actor_sub, action, resource_type, outcome, "
+    "on_behalf_of) VALUES (gen_random_uuid(), 'system', 'migration-obj', 'tenant.sync', "
+    "'tenant', 'success', CAST(:v AS jsonb))"
+)
+_LEGACY_INSERT = (
+    "INSERT INTO audit_events (id, actor_type, actor_sub, action, resource_type, outcome, "
+    "on_behalf_of) VALUES (gen_random_uuid(), 'system', :sub, 'tenant.sync', 'tenant', "
+    "'success', :v)"
+)
+
+
+async def _snapshot(conn: AsyncConnection, step: str) -> dict[str, object]:
+    """Every migration-test row's `on_behalf_of`, by `actor_sub`.
+
+    The comment makes each call a distinct statement: asyncpg's prepared statement for the same
+    text is invalid after the column's type changes.
+    """
+    rows = (await conn.execute(text(f"/* {step} */ {_SNAPSHOT}"))).all()
+    return {row[0]: row[1] for row in rows}
+
+
+async def _migration_steps(conn: AsyncConnection) -> dict[str, object]:
+    """Walk the revision down and up with legacy and object rows; each step's full snapshot."""
+    steps: dict[str, object] = {}
+    await conn.run_sync(_run_migration, "downgrade")
+    steps["column before"] = (await conn.execute(text(_COLUMN_TYPE))).scalar_one()
+    for suffix, value in (("a", "sender=1;delivery=d"), ("b", None), ("c", "garbage")):
+        await conn.execute(text(_LEGACY_INSERT), {"sub": f"migration-{suffix}", "v": value})
+    await conn.run_sync(_run_migration, "upgrade")
+    steps["upgraded"] = await _snapshot(conn, "upgraded")
+    await conn.execute(
+        text(_OBJECT_INSERT), {"v": json.dumps({"github_sender_id": 9, "delivery_id": "d-9"})}
+    )
+    steps["with object"] = await _snapshot(conn, "with object")
+    await conn.run_sync(_run_migration, "downgrade")
+    steps["downgraded"] = await _snapshot(conn, "downgraded")
+    await conn.run_sync(_run_migration, "upgrade")
+    steps["re-upgraded"] = await _snapshot(conn, "re-upgraded")
+    return steps
+
+
+async def test_the_on_behalf_of_revision_converts_legacy_text_and_round_trips_losslessly(
+    fresh_db: Db,
+) -> None:
+    """Up turns legacy text into the object (garbage into null); down writes the legacy text back.
+
+    Going up again restores every row exactly: nothing is lost and nothing becomes null.
+    """
+    try:
+        async with fresh_db.admin.connect() as conn:
+            steps = await _migration_steps(conn)
+            await conn.rollback()
+    except DBAPIError as exc:
+        if "permission" in str(exc) or "must be owner" in str(exc):
+            pytest.skip("the test database user cannot alter the re-owned table")
+        raise
+    first = {
+        "migration-a": {"github_sender_id": 1, "delivery_id": "d"},
+        "migration-b": None,
+        "migration-c": None,
+    }
+    both = {**first, "migration-obj": {"github_sender_id": 9, "delivery_id": "d-9"}}
+    assert steps == {
+        "column before": "text",
+        "upgraded": first,
+        "with object": both,
+        "downgraded": {
+            "migration-a": "sender=1;delivery=d",
+            "migration-b": None,
+            "migration-c": None,
+            "migration-obj": "sender=9;delivery=d-9",
+        },
+        "re-upgraded": both,
+    }
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        '"a bare string"',
+        "[1, 2]",
+        "{}",
+        '{"github_sender_id": 1}',
+        '{"github_sender_id": "1", "delivery_id": "d"}',
+        '{"github_sender_id": 1, "delivery_id": 5}',
+    ],
+)
+async def test_the_database_refuses_an_on_behalf_of_of_the_wrong_shape(db: Db, bad: str) -> None:
+    """The CHECK holds for every insert path, not only the application's validation."""
+    with pytest.raises(DBAPIError, match="ck_audit_events_on_behalf_of"):
+        await _run_owner(
+            db,
+            "INSERT INTO audit_events (id, actor_type, actor_sub, action, resource_type, outcome, "
+            "on_behalf_of) VALUES (gen_random_uuid(), 'system', 'worker', 'tenant.sync', "
+            "'tenant', 'success', CAST(:v AS jsonb))",
+            v=bad,
+        )
+
+
+def _rotation(tenant: UUID) -> tuple[StoredCredential, Operation]:
+    scope = ScopeId(repository_id=10, repository_owner_id=5, environment="prod", permission="push")
+    slot = CredentialSlot(
+        generation=2, name=f"tb-{CANARY}-g2", ref={"robot_id": CANARY}, delivered=True
+    )
+    credential = StoredCredential(
+        tenant_id=tenant,
+        adapter="ghcr",
+        scope_key="k1",
+        scope=scope,
+        kind="secret",
+        state=CredentialState(current=slot),
+    )
+    operation = Operation(
+        id=uuid4(),
+        tenant_id=tenant,
+        adapter="ghcr",
+        scope_key="k1",
+        kind=OperationKind.ROTATE,
+        status=OperationStatus.INTENT,
+        oidc_offered=False,
+        base_state=CredentialState(current=slot),
+        base_kind="secret",
+        error=f"adapter said token={CANARY}",
+    )
+    return credential, operation
+
+
+async def test_a_credential_event_commits_with_its_change_and_not_without_it(db: Db) -> None:
+    """Inv. 9: the observer appends in the save's session; a rollback leaves no event."""
+    tenant = uuid4()
+    credential, operation = _rotation(tenant)
+    observer = CredentialAuditObserver(AuditWriter(db.app), SystemActor.RECONCILER)
+    with pytest.raises(RuntimeError, match="change failed"):
+        async with tenant_session(db.app, tenant) as session, session.begin():
+            await observer.saved(
+                session,
+                previous_kind="secret",
+                previous_status=None,
+                credential=credential,
+                operation=operation,
+            )
+            raise RuntimeError("change failed")
+    assert await _tenant_events(db, tenant) == []
+    async with tenant_session(db.app, tenant) as session, session.begin():
+        await observer.saved(
+            session,
+            previous_kind="secret",
+            previous_status=None,
+            credential=credential,
+            operation=operation,
+        )
+    (record,) = await _tenant_events(db, tenant)
+    assert (record.action, record.actor_sub, record.resource_id) == (
+        Action.CREDENTIAL_ROTATE_BEGIN,
+        "reconciler",
+        "k1",
+    )
+    assert record.after is not None
+    assert record.after["operation_id"] == str(operation.id)
+
+
+async def test_a_canary_in_a_credential_name_reference_or_error_reaches_no_row(db: Db) -> None:
+    """Inv. 6: the canary appears in no column of any row (save events and the sweep's)."""
+    tenant = uuid4()
+    credential, operation = _rotation(tenant)
+    observer = CredentialAuditObserver(AuditWriter(db.app), SystemActor.WORKER)
+    async with tenant_session(db.app, tenant) as session, session.begin():
+        await observer.saved(
+            session,
+            previous_kind=None,
+            previous_status=None,
+            credential=credential,
+            operation=operation,
+        )
+    await observer.orphan_deleted(tenant, "ghcr", "tb-orphan-k1-g1")
+    assert len(await _tenant_events(db, tenant)) == 2  # rotate begin and the orphan sweep
+    leaked = await _admin_scalar(
+        db,
+        "SELECT count(*) FROM audit_events "
+        "WHERE row_to_json(audit_events)::text LIKE '%canary-secret-7f3a9c1e%'",
+    )
+    assert leaked == 0

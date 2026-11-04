@@ -30,8 +30,10 @@ from trustbridge.adapters.store import (
     Operation,
     OperationKind,
     OperationStatus,
+    SaveObserver,
     StoredCredential,
 )
+from trustbridge.tenancy.context import tenant_context
 
 SessionFactory = Callable[[], AsyncSession]
 
@@ -95,9 +97,15 @@ def _operation_from_row(row: CredentialOperationRow) -> Operation:
 class SqlCredentialStore:
     """`CredentialStore` over the `adapter_*` and `credential_operations` tables."""
 
-    def __init__(self, session_factory: SessionFactory) -> None:
-        """Use `session_factory` for a short-lived session per call."""
+    def __init__(
+        self, session_factory: SessionFactory, observer: SaveObserver | None = None
+    ) -> None:
+        """Use `session_factory` for a short-lived session per call.
+
+        `observer` sees each `save` inside its transaction (the audit log appends there).
+        """
         self._sf = session_factory
+        self._observer = observer
 
     async def get_credential(
         self, tenant_id: UUID, adapter: str, scope_key: str
@@ -152,7 +160,11 @@ class SqlCredentialStore:
     async def save(
         self, lease: Lease, credential: StoredCredential, operation: Operation | None
     ) -> None:
-        """Upsert the credential row and the operation row in one transaction, guarded."""
+        """Upsert the credential row and the operation row in one transaction, guarded.
+
+        The transaction opens in the credential's tenant context (ADR 0031), so an observer's
+        tenant-scoped insert, such as an audit event, passes the row-level security policy.
+        """
         guard = lease.guard()
         cred_values: dict[str, Any] = {
             "tenant_id": credential.tenant_id,
@@ -164,45 +176,89 @@ class SqlCredentialStore:
             "outputs": codec.outputs_to_json(credential.outputs),
             "updated_at": func.now(),
         }
-        async with self._sf() as session, session.begin():
-            result = await session.execute(
-                _guarded_upsert(
-                    _table(AdapterCredentialRow),
-                    cred_values,
-                    ["tenant_id", "adapter", "scope_key"],
-                    guard,
+        with tenant_context(credential.tenant_id):
+            async with self._sf() as session, session.begin():
+                previous_kind, previous_status = (
+                    await self._previous(session, credential, operation)
+                    if self._observer is not None
+                    else (None, None)
                 )
-            )
-            if _rowcount(result) != 1:
-                raise LeaseLostError
-            if operation is not None:
-                op_values: dict[str, Any] = {
-                    "id": operation.id,
-                    "tenant_id": operation.tenant_id,
-                    "adapter": operation.adapter,
-                    "scope_key": operation.scope_key,
-                    "kind": operation.kind.value,
-                    "status": operation.status.value,
-                    "oidc_offered": operation.oidc_offered,
-                    "base_state": (
-                        codec.state_to_json(operation.base_state) if operation.base_state else None
-                    ),
-                    "base_kind": operation.base_kind,
-                    "attempts": operation.attempts,
-                    "error": operation.error,
-                    "manual_action": operation.manual_action,
-                    "updated_at": func.now(),
-                }
-                op_result = await session.execute(
+                result = await session.execute(
                     _guarded_upsert(
-                        _table(CredentialOperationRow),
-                        op_values,
-                        ["id"],
+                        _table(AdapterCredentialRow),
+                        cred_values,
+                        ["tenant_id", "adapter", "scope_key"],
                         guard,
                     )
                 )
-                if _rowcount(op_result) != 1:
+                if _rowcount(result) != 1:
                     raise LeaseLostError
+                if operation is not None:
+                    op_values: dict[str, Any] = {
+                        "id": operation.id,
+                        "tenant_id": operation.tenant_id,
+                        "adapter": operation.adapter,
+                        "scope_key": operation.scope_key,
+                        "kind": operation.kind.value,
+                        "status": operation.status.value,
+                        "oidc_offered": operation.oidc_offered,
+                        "base_state": (
+                            codec.state_to_json(operation.base_state)
+                            if operation.base_state
+                            else None
+                        ),
+                        "base_kind": operation.base_kind,
+                        "attempts": operation.attempts,
+                        "error": operation.error,
+                        "manual_action": operation.manual_action,
+                        "updated_at": func.now(),
+                    }
+                    op_result = await session.execute(
+                        _guarded_upsert(
+                            _table(CredentialOperationRow),
+                            op_values,
+                            ["id"],
+                            guard,
+                        )
+                    )
+                    if _rowcount(op_result) != 1:
+                        raise LeaseLostError
+                if self._observer is not None:
+                    await self._observer.saved(
+                        session,
+                        previous_kind=previous_kind,
+                        previous_status=previous_status,
+                        credential=credential,
+                        operation=operation,
+                    )
+
+    @staticmethod
+    async def _previous(
+        session: AsyncSession, credential: StoredCredential, operation: Operation | None
+    ) -> tuple[CredentialKind | None, OperationStatus | None]:
+        """The credential kind and the operation status the rows hold before this save."""
+        kind = await session.scalar(
+            select(AdapterCredentialRow.kind)
+            .where(
+                AdapterCredentialRow.tenant_id == credential.tenant_id,
+                AdapterCredentialRow.adapter == credential.adapter,
+                AdapterCredentialRow.scope_key == credential.scope_key,
+            )
+            .with_for_update()
+        )
+        status = (
+            None
+            if operation is None
+            else await session.scalar(
+                select(CredentialOperationRow.status)
+                .where(CredentialOperationRow.id == operation.id)
+                .with_for_update()
+            )
+        )
+        return (
+            cast("CredentialKind | None", kind),
+            None if status is None else OperationStatus(status),
+        )
 
     async def count_slots(self, tenant_id: UUID, adapter: str) -> int:
         """Count current and previous slots (in-flight ones included)."""

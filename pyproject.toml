@@ -163,6 +163,12 @@ source_modules = ["trustbridge.adapters"]
 forbidden_modules = ["trustbridge.github"]
 
 [[tool.importlinter.contracts]]
+name = "audit never imports rbac"
+type = "forbidden"
+source_modules = ["trustbridge.audit"]
+forbidden_modules = ["trustbridge.rbac"]
+
+[[tool.importlinter.contracts]]
 name = "signers never import the GitHub core"
 type = "forbidden"
 source_modules = ["trustbridge.signer"]

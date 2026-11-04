@@ -16,6 +16,7 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 from sqlalchemy import ColumnElement
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from trustbridge.adapters.interface import (
     AdapterConfig,
@@ -208,6 +209,35 @@ class CredentialStore(Protocol):
         state: ResourceState | None,
     ) -> None:
         """Store (or with None, forget) a resource's state, guarded by the lease."""
+        ...
+
+
+class SaveObserver(Protocol):
+    """Sees each guarded `save` inside its transaction (the audit log, ADR 0032).
+
+    Called after both rows were written and before the commit, with the session that wrote them,
+    so whatever it appends commits with the change or not at all. `previous_kind` and
+    `previous_status` are what the rows held before this save (None when absent).
+    """
+
+    async def saved(
+        self,
+        session: AsyncSession,
+        *,
+        previous_kind: CredentialKind | None,
+        previous_status: OperationStatus | None,
+        credential: StoredCredential,
+        operation: Operation | None,
+    ) -> None:
+        """Record the change. A failure rolls the save back."""
+        ...
+
+
+class OrphanObserver(Protocol):
+    """Told by the core when it deleted a platform credential no slot accounted for."""
+
+    async def orphan_deleted(self, tenant_id: UUID, adapter: str, name: str) -> None:
+        """Record the deletion (the credential's platform name, never a value)."""
         ...
 
 

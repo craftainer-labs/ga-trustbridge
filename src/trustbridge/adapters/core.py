@@ -52,6 +52,7 @@ from trustbridge.adapters.store import (
     Operation,
     OperationKind,
     OperationStatus,
+    OrphanObserver,
     OutputError,
     OutputWriter,
     ScopeId,
@@ -140,6 +141,7 @@ class CoreDeps:
     inspector: EnvironmentInspector
     tenants: TenantResolver
     clock: Callable[[], datetime] = now_utc_default
+    orphans: OrphanObserver | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +289,7 @@ class CredentialCore:
             known = await self._d.store.known_names(tenant.id, adapter)
             prefix = tenant_prefix(tenant.id)
             deleted: list[str] = []
+            audit_failure: Exception | None = None
             for item in listed:
                 if not item.name.startswith(prefix) or item.name in known:
                     continue
@@ -295,6 +298,21 @@ class CredentialCore:
                     bound.adapter.delete_credential(scope, CredentialState(current=slot))
                 )
                 deleted.append(item.name)
+                if self._d.orphans is not None:
+                    try:
+                        await self._d.orphans.orphan_deleted(tenant.id, adapter, item.name)
+                    except Exception as exc:
+                        # The credential is already gone and the next sweep will not list it:
+                        # keep sweeping, log what is unaudited, then fail the duty.
+                        _log.error(
+                            "orphan %s of tenant %s (%s) deleted but not audited",
+                            item.name,
+                            tenant.id,
+                            adapter,
+                        )
+                        audit_failure = audit_failure or exc
+            if audit_failure is not None:
+                raise audit_failure
             return deleted
 
     async def sweep_parked_values(self) -> int:

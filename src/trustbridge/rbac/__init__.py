@@ -3,6 +3,8 @@
 from trustbridge.rbac.claims import PERSONA_ALIASES, build_principal, parse_grants
 from trustbridge.rbac.deps import (
     Authorized,
+    Denial,
+    DenialSink,
     RbacConfig,
     RbacRuntime,
     TenantAccess,
@@ -22,6 +24,8 @@ from trustbridge.rbac.model import (
 __all__ = [
     "PERSONA_ALIASES",
     "Authorized",
+    "Denial",
+    "DenialSink",
     "Grant",
     "Principal",
     "RbacConfig",

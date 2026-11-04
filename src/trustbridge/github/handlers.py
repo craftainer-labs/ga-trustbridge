@@ -15,6 +15,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
+from uuid import UUID
 
 from trustbridge.github.installations import InstallationInfo
 from trustbridge.github.ports import InstallationStore, ReconcileScheduler
@@ -67,6 +68,16 @@ class InstallationLookup(Protocol):
         ...
 
 
+class TenantAudit(Protocol):
+    """Records the tenant state an installation sync left behind (ADR 0032 `tenant.sync`)."""
+
+    async def tenant_synced(
+        self, *, tenant_id: UUID, state: str, delivery_id: str, sender_id: int | None
+    ) -> None:
+        """Write the event. A failure propagates, so the delivery is retried."""
+        ...
+
+
 class InstallationHandlers:
     """Keeps tenants and their repositories in step with installation events.
 
@@ -82,12 +93,17 @@ class InstallationHandlers:
         scheduler: ReconcileScheduler,
         lookup: InstallationLookup,
         on_installation_changed: Callable[[str, int], None] | None = None,
+        audit: TenantAudit | None = None,
     ) -> None:
-        """`on_installation_changed(host, installation_id)` drops cached installation tokens."""
+        """`on_installation_changed(host, installation_id)` drops cached installation tokens.
+
+        `audit`, when given, records a `tenant.sync` event after each applied sync.
+        """
         self._store = store
         self._scheduler = scheduler
         self._lookup = lookup
         self._changed = on_installation_changed
+        self._audit = audit
 
     @staticmethod
     def _installation(payload: Mapping[str, Any]) -> tuple[int, str, int]:
@@ -118,8 +134,10 @@ class InstallationHandlers:
         """Apply the installation's state as GitHub reports it now, whatever the event was."""
         info = await self._lookup.fetch(ctx.host, installation_id)
         if info is None:  # gone: never create or re-activate a tenant for it
-            await self._store.set_installation_state(ctx.host, installation_id, "deleted")
-            self._notify(ctx.host, installation_id)
+            gone = await self._store.set_installation_state(ctx.host, installation_id, "deleted")
+            self._notify(ctx.host, installation_id)  # before the audit write: never gated on it
+            if gone is not None:
+                await self._record(ctx, gone, "deleted")
             return
         tenant_id = await self._store.upsert_installation(
             ctx.host,
@@ -132,9 +150,24 @@ class InstallationHandlers:
             await self._store.apply_repository_changes(
                 tenant_id, self._repos(ctx.payload.get("repositories")), []
             )
-        self._notify(ctx.host, installation_id)
+        self._notify(ctx.host, installation_id)  # before the audit write: never gated on it
+        await self._record(ctx, tenant_id, "suspended" if info.suspended else "active")
         if not info.suspended:
             await self._scheduler.schedule(tenant_id)
+
+    async def _record(self, ctx: EventContext, tenant_id: UUID, state: str) -> None:
+        """Audit the state this sync applied (`sender` is the GitHub user's numeric id)."""
+        if self._audit is None:
+            return
+        sender = ctx.payload.get("sender") or {}
+        raw_id = sender.get("id")
+        sender_id = raw_id if isinstance(raw_id, int) and not isinstance(raw_id, bool) else None
+        await self._audit.tenant_synced(
+            tenant_id=tenant_id,
+            state=state,
+            delivery_id=ctx.delivery_id,
+            sender_id=sender_id,
+        )
 
     def _notify(self, host: str, installation_id: int) -> None:
         if self._changed is not None:

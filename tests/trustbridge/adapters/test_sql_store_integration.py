@@ -28,9 +28,11 @@ from trustbridge.adapters.store import (
     Operation,
     OperationKind,
     OperationStatus,
+    SaveObserver,
     StoredCredential,
 )
 from trustbridge.github.models import HostRegistrationRow, Registration, SqlRegistrationStore
+from trustbridge.tenancy import current_tenant
 
 pytestmark = pytest.mark.integration
 
@@ -68,14 +70,14 @@ async def engine() -> AsyncIterator[AsyncEngine]:
     await eng.dispose()
 
 
-def make_store(engine: AsyncEngine) -> SqlCredentialStore:
+def make_store(engine: AsyncEngine, observer: SaveObserver | None = None) -> SqlCredentialStore:
     """A store using short-lived sessions on `engine`."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     def session() -> AsyncSession:
         return factory()
 
-    return SqlCredentialStore(session)
+    return SqlCredentialStore(session, observer)
 
 
 def stored(tenant_id: UUID, state: CredentialState) -> StoredCredential:
@@ -228,3 +230,68 @@ async def test_a_guard_that_fails_between_the_two_upserts_rolls_everything_back(
             operation(tenant, OperationStatus.INTENT),
         )
     assert await store.get_credential(tenant, "fake", "k1") is None
+
+
+class RecordingObserver:
+    """A `SaveObserver` that notes what it was given, and fails when told to."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        """Choose whether `saved` raises after the rows were written."""
+        self.calls: list[tuple[object, ...]] = []
+        self.fail = fail
+
+    async def saved(
+        self,
+        session: AsyncSession,
+        *,
+        previous_kind: str | None,
+        previous_status: OperationStatus | None,
+        credential: StoredCredential,
+        operation: Operation | None,
+    ) -> None:
+        """Record the previous rows, the tenant context and whether a transaction is open."""
+        self.calls.append(
+            (
+                previous_kind,
+                previous_status,
+                credential.kind,
+                None if operation is None else operation.status,
+                current_tenant.get(),
+                session.in_transaction(),
+            )
+        )
+        if self.fail:
+            raise RuntimeError("observer failed")
+
+
+async def test_an_observer_sees_the_previous_rows_inside_the_tenant_transaction(
+    engine: AsyncEngine,
+) -> None:
+    """The observer runs in the save's transaction, in the credential's tenant context."""
+    observer, tenant = RecordingObserver(), uuid4()
+    store, lease = make_store(engine, observer), GuardLease(live=True)
+    state = CredentialState(current=CredentialSlot(1, "n"))
+    op = operation(tenant, OperationStatus.INTENT)
+    await store.save(lease, stored(tenant, state), op)
+    oidc = replace(stored(tenant, state), kind="oidc")
+    await store.save(lease, oidc, replace(op, status=OperationStatus.FINISHED))
+    await store.save(lease, oidc, None)
+    assert observer.calls == [
+        (None, None, "secret", OperationStatus.INTENT, tenant, True),
+        ("secret", OperationStatus.INTENT, "oidc", OperationStatus.FINISHED, tenant, True),
+        ("oidc", None, "oidc", None, tenant, True),
+    ]
+    assert current_tenant.get() is None
+
+
+async def test_an_observer_failure_rolls_the_whole_save_back(engine: AsyncEngine) -> None:
+    """Same transaction: if the audit append fails, neither row is written."""
+    tenant = uuid4()
+    state = CredentialState(current=CredentialSlot(1, "n"))
+    op = operation(tenant, OperationStatus.INTENT)
+    failing = make_store(engine, RecordingObserver(fail=True))
+    with pytest.raises(RuntimeError, match="observer failed"):
+        await failing.save(GuardLease(live=True), stored(tenant, state), op)
+    plain = make_store(engine)
+    assert await plain.get_credential(tenant, "fake", "k1") is None
+    assert await plain.get_operation(op.id) is None
