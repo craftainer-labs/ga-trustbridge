@@ -31,6 +31,7 @@ from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.models import SqlRegistrationStore
 from trustbridge.github.runtime import HostRuntime, RuntimeDeps, build_host_runtime
 from trustbridge.settings import TrustbridgeSettings, load_trustbridge_settings
+from trustbridge.tenancy import install_tenant_hook
 from trustbridge.worker.deliveries import DeliveryStore, InMemoryDeliveryStore, PgDeliveryStore
 from trustbridge.worker.lease import InMemoryLeaseStore, LeaseManager, LeaseStore, PgLeaseStore
 from trustbridge.worker.ports import (
@@ -96,7 +97,10 @@ def build_core(
 
     `readd_on_ready` (the worker) makes a host that turns `ready` re-add its waiting rows to
     the stream (ADR 0030 invariant 8). `checker` replaces the network host checks (tests).
+    Installs the tenant-context `after_begin` hook (idempotent, ADR 0031) so every session this
+    process opens sets `app.tenant_id` per transaction.
     """
+    install_tenant_hook()
     store: DeliveryStore
     lease_store: LeaseStore
     tenants: SqlTenants | MemoryTenants
