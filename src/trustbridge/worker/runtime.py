@@ -137,7 +137,9 @@ def build_core(
                 extra={"host": host.name, "count": count},
             )
 
-    tenant_audit = None if session_factory is None else TenantSyncAudit(AuditWriter(session_factory))
+    tenant_audit = None
+    if session_factory is not None:
+        tenant_audit = TenantSyncAudit(AuditWriter(session_factory))
     runtime = build_host_runtime(
         settings,
         RuntimeDeps(

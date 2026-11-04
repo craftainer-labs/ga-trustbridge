@@ -84,6 +84,13 @@ class AuditEvent:
             raise ValueError(f"action {self.action!r} is not a known audit action") from None
         for name, limit in TEXT_LIMITS.items():
             _check_text(name, getattr(self, name), limit)
+        self._check_actor()
+        self._check_ids_and_version()
+        _check_payload("before", self.before)
+        _check_payload("after", self.after)
+
+    def _check_actor(self) -> None:
+        """The actor columns agree with the actor type (and the table's check constraint)."""
         if not self.actor_sub:
             raise ValueError("actor_sub is required")
         if not self.resource_type:
@@ -95,6 +102,9 @@ class AuditEvent:
                 raise ValueError("a system actor has no actor_iss")
             if self.actor_sub not in {a.value for a in SystemActor}:
                 raise ValueError(f"{self.actor_sub!r} is not a system actor name")
+
+    def _check_ids_and_version(self) -> None:
+        """Ids are UUIDs, the address is an IP without a scope id, the version is known."""
         for name in ("tenant_id", "id"):
             value = getattr(self, name)
             if not isinstance(value, UUID) and not (name == "tenant_id" and value is None):
@@ -109,8 +119,6 @@ class AuditEvent:
             or not 1 <= self.schema_version <= SCHEMA_VERSION
         ):
             raise ValueError(f"schema_version must be an integer from 1 to {SCHEMA_VERSION}")
-        _check_payload("before", self.before)
-        _check_payload("after", self.after)
 
 
 def _check_text(name: str, value: object, limit: int) -> None:

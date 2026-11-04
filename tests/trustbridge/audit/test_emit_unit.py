@@ -66,7 +66,7 @@ class FakeSession:
         """Record opens and commits in `log`."""
         self.log = log
 
-    async def __aenter__(self) -> "FakeSession":
+    async def __aenter__(self) -> FakeSession:
         """Record the tenant context the session was opened in."""
         self.log.append(f"open:{current_tenant.get()}")
         return self
@@ -75,7 +75,7 @@ class FakeSession:
         """Record the close."""
         self.log.append("close")
 
-    def begin(self) -> "FakeSession":
+    def begin(self) -> FakeSession:
         """The same object doubles as the transaction context."""
         return self
 
@@ -101,7 +101,7 @@ async def test_the_writer_inserts_in_its_own_transaction_inside_the_tenant_conte
     assert seen == [event]
     assert current_tenant.get() is None
     await AuditWriter(factory).record(_event())  # a null-tenant event opens with no context
-    assert log.count("open:None") == 1
+    assert log.count("open:None") == 2  # the session and its transaction context
 
 
 class FakeWriter:
