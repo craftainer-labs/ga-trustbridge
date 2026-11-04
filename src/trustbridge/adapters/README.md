@@ -22,6 +22,12 @@ is a separate package under `adapters/<name>/` (NG5) that registers itself in th
   store, GitHub writer, config and tenant resolvers). `sql_store.py` + `models.py` + `codec.py` are
   the Postgres implementation (guard predicate in every write statement); `memory.py` is the
   in-memory one for unit tests and `MODE=mock`.
+- Audit hooks (ADR 0032): `SqlCredentialStore(session_factory, observer)` calls a `SaveObserver`
+  inside each `save` transaction (opened in the credential's tenant context) with what the rows held
+  before, so the audit event commits with the credential state; `CoreDeps.orphans` (an
+  `OrphanObserver`) is told about each platform credential the orphan sweep deletes. Both are
+  optional; `trustbridge.audit.credentials.CredentialAuditObserver` implements them. The adapters
+  package does not import `trustbridge.audit`.
 - `fake.py` — a contract-following fake adapter and fake platform for NG5 and the core tests.
 
 ## Rules

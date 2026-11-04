@@ -15,6 +15,12 @@ Tests for the instance package `src/trustbridge/` (instance-added files under th
   owner and app roles); `tenancy/test_tenancy_unit.py` needs no service.
 - `audit/test_audit_integration.py` is marked `integration` (it needs the stack's Postgres, with the
   owner and app roles); `audit/test_audit_unit.py` needs no service.
+- `audit/test_validation_unit.py`, `test_emit_unit.py` and `test_credentials_unit.py` need no
+  service (value validation, redaction, the sinks and the credential event derivation);
+  `audit/test_audit_integration.py` also holds the emitter tests that need the real table
+  (null-tenant denial rows, same-transaction credential events, the canary check).
+  `rbac/test_denial_audit.py`, `github/test_tenant_sync_audit.py` and
+  `adapters/test_orphan_audit.py` cover the three call-site hooks with fake sinks.
 - `test_main.py` runs the real `trustbridge.main:app` in a subprocess (the entrypoint mutates the
   template app at import, which must not leak into the template's own tests).
 

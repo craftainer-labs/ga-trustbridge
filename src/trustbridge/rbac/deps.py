@@ -10,11 +10,13 @@ is closed before `TenantAccess.tenant_context` is entered; a handler's session o
 thin adapter.
 """
 
+import ipaddress
 import logging
+import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
@@ -24,6 +26,7 @@ from trustbridge.rbac.claims import build_principal
 from trustbridge.rbac.model import Principal, Role, TenantRef, instance_roles, tenant_roles
 
 logger = logging.getLogger(__name__)
+_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
 
 class TenantAccess(Protocol):
@@ -42,6 +45,32 @@ class TenantAccess(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class Denial:
+    """An authorization denial of an authenticated principal, as the audit log needs it.
+
+    `tenant_id` is the requested tenant id when the route is tenant-scoped and the path value is
+    a canonical UUID, else None. `source_ip` and `request_id` are None when absent or malformed.
+    """
+
+    sub: str
+    iss: str | None
+    reason: Literal["role_missing", "tenant_not_granted"]
+    required_role: Role
+    scope: Literal["instance", "tenant"]
+    tenant_id: str | None
+    source_ip: str | None
+    request_id: str | None
+
+
+class DenialSink(Protocol):
+    """Where denials go (`trustbridge.audit.emit.AuditDenials`); the dependency awaits it."""
+
+    async def denied(self, denial: Denial) -> None:
+        """Record the denial. A failure propagates: the request ends in an error, not a pass."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
 class RbacConfig:
     """The RBAC settings the dependency reads (`TrustbridgeSettings` + `OIDC_CLIENT_ID`)."""
 
@@ -56,6 +85,7 @@ class RbacRuntime:
 
     config: RbacConfig
     access: TenantAccess
+    denials: DenialSink | None = None
 
 
 def get_runtime(request: Request) -> RbacRuntime:
@@ -95,6 +125,21 @@ class Authorized:
     tenant_id: UUID | None = None
 
 
+def _source_ip(request: Request) -> str | None:
+    """The ASGI client address (already rewritten for trusted proxies), if it is an IP."""
+    host = request.client.host if request.client else None
+    try:
+        return None if host is None or "%" in host else str(ipaddress.ip_address(host))
+    except ValueError:
+        return None
+
+
+def _request_id(request: Request) -> str | None:
+    """The caller's `X-Request-ID` when it is a short, plain token; anything else is dropped."""
+    value = request.headers.get("x-request-id")
+    return value if value is not None and _REQUEST_ID.fullmatch(value) else None
+
+
 def _deny(request: Request, principal: Principal, role: Role) -> HTTPException:
     logger.warning(
         "Denied role check for %s: sub=%r lacks %s", request.url.path, principal.sub, role.value
@@ -121,6 +166,10 @@ def require_role(
     counts. A tenant that is unknown, unparsable or carries no grant for the caller is a 404
     with the same body; a grant that is too weak is a 403. Only after the check passes is the
     tenant context entered, for the rest of the request.
+
+    Each denial of an authenticated principal is first handed to `RbacRuntime.denials` (the
+    `authz.denied` audit event, ADR 0032), which runs before the response is chosen; if it
+    fails, the request fails with it.
     """
 
     async def _dependency(
@@ -128,18 +177,39 @@ def require_role(
         principal: Annotated[Principal, Depends(get_principal)],
         runtime: Annotated[RbacRuntime, Depends(get_runtime)],
     ) -> AsyncIterator[Authorized]:
+        async def audit(
+            reason: Literal["role_missing", "tenant_not_granted"], tenant_id: str | None
+        ) -> None:
+            if runtime.denials is not None:
+                await runtime.denials.denied(
+                    Denial(
+                        sub=principal.sub,
+                        iss=principal.iss,
+                        reason=reason,
+                        required_role=role,
+                        scope="instance" if tenant_param is None else "tenant",
+                        tenant_id=tenant_id,
+                        source_ip=_source_ip(request),
+                        request_id=_request_id(request),
+                    )
+                )
+
         if tenant_param is None:
             if role not in instance_roles(principal):
+                await audit("role_missing", None)
                 raise _deny(request, principal, role)
             yield Authorized(principal)
             return
         if tenant_param not in request.path_params:
             raise RuntimeError(f"route has no path parameter {tenant_param!r}")
-        tenant = await _find_tenant(request.path_params[tenant_param], runtime)
+        requested = _parse_tenant_id(request.path_params[tenant_param])
+        tenant = None if requested is None else await runtime.access.get_tenant(requested)
         held = tenant_roles(principal, tenant) if tenant is not None else frozenset()
         if tenant is None or not held:
+            await audit("tenant_not_granted", None if requested is None else str(requested))
             raise _tenant_not_found(request, principal)
         if role not in held:
+            await audit("role_missing", str(tenant.id))
             raise _deny(request, principal, role)
         with runtime.access.tenant_context(tenant.id):
             yield Authorized(principal, tenant.id)
@@ -147,19 +217,21 @@ def require_role(
     return _dependency
 
 
-async def _find_tenant(raw: object, runtime: RbacRuntime) -> TenantRef | None:
-    """The tenant row for a path value (its own closed session), or None."""
+def _parse_tenant_id(raw: object) -> UUID | None:
+    """The tenant id of a path value, or None when it is not the canonical spelling."""
     try:
         tenant_id = UUID(str(raw))
     except ValueError:
         return None
     if str(raw).lower() != str(tenant_id):  # one spelling per tenant: no braces, urn: or bare hex
         return None
-    return await runtime.access.get_tenant(tenant_id)
+    return tenant_id
 
 
 __all__ = [
     "Authorized",
+    "Denial",
+    "DenialSink",
     "RbacConfig",
     "RbacRuntime",
     "TenantAccess",

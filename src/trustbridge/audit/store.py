@@ -84,7 +84,7 @@ async def append(session: AsyncSession, event: AuditEvent) -> UUID:
             "actor_iss": event.actor_iss,
             "on_behalf_of": event.on_behalf_of,
             "source_ip": event.source_ip,
-            "action": event.action,
+            "action": event.action.value,
             "resource_type": event.resource_type,
             "resource_id": event.resource_id,
             "outcome": event.outcome.value,

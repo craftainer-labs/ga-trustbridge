@@ -27,6 +27,7 @@ from redis.asyncio import from_url as redis_from_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters.interface import GitHubHost
+from trustbridge.audit.emit import AuditWriter, TenantSyncAudit
 from trustbridge.github.availability import HostChecker
 from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.models import SqlRegistrationStore
@@ -136,6 +137,7 @@ def build_core(
                 extra={"host": host.name, "count": count},
             )
 
+    tenant_audit = None if session_factory is None else TenantSyncAudit(AuditWriter(session_factory))
     runtime = build_host_runtime(
         settings,
         RuntimeDeps(
@@ -145,6 +147,7 @@ def build_core(
             registrations=registrations,
             on_ready=readd if readd_on_ready else None,
             checker=checker,
+            audit=tenant_audit,
         ),
     )
     return Core(

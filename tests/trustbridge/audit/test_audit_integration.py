@@ -35,17 +35,32 @@ from sqlalchemy.pool import NullPool
 
 from app.config import Settings
 from app.db import build_engine
+from trustbridge.adapters.interface import CredentialSlot, CredentialState
+from trustbridge.adapters.store import (
+    Operation,
+    OperationKind,
+    OperationStatus,
+    ScopeId,
+    StoredCredential,
+)
 from trustbridge.audit import (
+    Action,
     ActorType,
+    AuditDenials,
     AuditEvent,
     AuditQuery,
+    AuditWriter,
     Outcome,
+    SystemActor,
+    TenantSyncAudit,
     append,
     export_ndjson,
     list_events,
     purge_batch,
     purge_expired,
 )
+from trustbridge.audit.credentials import CredentialAuditObserver
+from trustbridge.rbac import Denial, Role
 from trustbridge.tenancy import install_tenant_hook, tenant_session
 
 pytestmark = pytest.mark.integration
@@ -652,3 +667,159 @@ async def test_the_export_stops_before_the_first_event_inside_the_lag(
     )
     lines = await _export(db, scope, 60.0)
     assert [json.loads(line)["id"] for line in lines] == [str(first), str(second), str(third)]
+
+
+# --- emitters (NG6f): ADR 0032 invariants 5, 6, 9, 10 against the real table ----------------
+
+CANARY = "canary-secret-7f3a9c1e"
+
+
+async def _tenant_events(db: Db, tenant: UUID) -> list[Any]:
+    async with tenant_session(db.app, tenant) as session:
+        page = await list_events(session, AuditQuery(limit=100), tenant_id=tenant)
+    return page.items
+
+
+async def test_the_writer_stores_an_event_in_its_tenants_context(db: Db) -> None:
+    """A tenant event is inserted in the tenant context and seen only by that tenant."""
+    tenant, other = uuid4(), uuid4()
+    await AuditWriter(db.app).record(
+        _event(tenant, actor_type=ActorType.SYSTEM, actor_sub="worker", actor_iss=None)
+    )
+    (record,) = await _tenant_events(db, tenant)
+    assert (record.actor_sub, record.tenant_id) == ("worker", tenant)
+    assert await _tenant_events(db, other) == []
+
+
+async def test_a_denial_is_a_null_tenant_row_that_only_instance_scope_reads(db: Db) -> None:
+    """Inv. 3a, 10: the app role writes it with no context; a tenant never sees it."""
+    sub = f"denied-{uuid4()}"
+    requested = str(uuid4())
+    denial = Denial(
+        sub=sub,
+        iss="https://idp.example",
+        reason="tenant_not_granted",
+        required_role=Role.OPERATOR,
+        scope="tenant",
+        tenant_id=requested,
+        source_ip="203.0.113.4",
+        request_id="req-9",
+    )
+    await AuditDenials(AuditWriter(db.app)).denied(denial)
+    async with db.app() as session:
+        page = await list_events(session, AuditQuery(actor_sub=sub), instance_scope=True)
+    (record,) = page.items
+    assert record.tenant_id is None
+    assert (record.action, record.outcome) == (Action.AUTHZ_DENIED, Outcome.DENIED)
+    assert (record.resource_type, record.resource_id) == ("tenant", requested)
+    assert (record.actor_sub, record.actor_iss) == (sub, "https://idp.example")
+    assert (record.source_ip, record.request_id) == ("203.0.113.4", "req-9")
+    assert record.after == {
+        "reason": "tenant_not_granted",
+        "required_role": "operator",
+        "scope": "tenant",
+    }
+    assert await _tenant_events(db, UUID(requested)) == []
+
+
+async def test_a_tenant_sync_event_records_the_state_and_the_sender(db: Db) -> None:
+    """The system actor `github-webhook`, the state after the sync and the sender, no login."""
+    tenant = uuid4()
+    await TenantSyncAudit(AuditWriter(db.app)).tenant_synced(
+        tenant_id=tenant, state="suspended", delivery_id="d-77", sender_id=583231
+    )
+    (record,) = await _tenant_events(db, tenant)
+    assert (record.actor_type, record.actor_sub, record.actor_iss) == (
+        ActorType.SYSTEM,
+        "github-webhook",
+        None,
+    )
+    assert (record.action, record.resource_id) == (Action.TENANT_SYNC, str(tenant))
+    assert record.after == {"state": "suspended"}
+    assert record.on_behalf_of == "sender=583231;delivery=d-77"
+    assert record.source_ip is None
+
+
+def _rotation(tenant: UUID) -> tuple[StoredCredential, Operation]:
+    scope = ScopeId(repository_id=10, repository_owner_id=5, environment="prod", permission="push")
+    slot = CredentialSlot(
+        generation=2, name=f"tb-{CANARY}-g2", ref={"robot_id": CANARY}, delivered=True
+    )
+    credential = StoredCredential(
+        tenant_id=tenant,
+        adapter="ghcr",
+        scope_key="k1",
+        scope=scope,
+        kind="secret",
+        state=CredentialState(current=slot),
+    )
+    operation = Operation(
+        id=uuid4(),
+        tenant_id=tenant,
+        adapter="ghcr",
+        scope_key="k1",
+        kind=OperationKind.ROTATE,
+        status=OperationStatus.INTENT,
+        oidc_offered=False,
+        base_state=CredentialState(current=slot),
+        base_kind="secret",
+        error=f"adapter said token={CANARY}",
+    )
+    return credential, operation
+
+
+async def test_a_credential_event_commits_with_its_change_and_not_without_it(db: Db) -> None:
+    """Inv. 9: the observer appends in the save's session; a rollback leaves no event."""
+    tenant = uuid4()
+    credential, operation = _rotation(tenant)
+    observer = CredentialAuditObserver(AuditWriter(db.app), SystemActor.RECONCILER)
+    with pytest.raises(RuntimeError, match="change failed"):
+        async with tenant_session(db.app, tenant) as session, session.begin():
+            await observer.saved(
+                session,
+                previous_kind="secret",
+                previous_status=None,
+                credential=credential,
+                operation=operation,
+            )
+            raise RuntimeError("change failed")
+    assert await _tenant_events(db, tenant) == []
+    async with tenant_session(db.app, tenant) as session, session.begin():
+        await observer.saved(
+            session,
+            previous_kind="secret",
+            previous_status=None,
+            credential=credential,
+            operation=operation,
+        )
+    (record,) = await _tenant_events(db, tenant)
+    assert (record.action, record.actor_sub, record.resource_id) == (
+        Action.CREDENTIAL_ROTATE_BEGIN,
+        "reconciler",
+        "k1",
+    )
+    assert record.after is not None
+    assert record.after["operation_id"] == str(operation.id)
+
+
+async def test_a_canary_in_a_credential_name_reference_or_error_reaches_no_row(db: Db) -> None:
+    """Inv. 6: the canary appears in no column of any row (save events and the sweep's)."""
+    tenant = uuid4()
+    credential, operation = _rotation(tenant)
+    observer = CredentialAuditObserver(AuditWriter(db.app), SystemActor.WORKER)
+    async with tenant_session(db.app, tenant) as session, session.begin():
+        await observer.saved(
+            session,
+            previous_kind=None,
+            previous_status=None,
+            credential=credential,
+            operation=operation,
+        )
+    await observer.orphan_deleted(tenant, "ghcr", "tb-orphan-k1-g1")
+    assert len(await _tenant_events(db, tenant)) == 2  # rotate begin and the orphan sweep
+    leaked = await _admin_scalar(
+        db,
+        "SELECT count(*) FROM audit_events "
+        "WHERE row_to_json(audit_events)::text LIKE '%canary-secret-7f3a9c1e%'",
+    )
+    assert leaked == 0

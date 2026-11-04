@@ -52,6 +52,7 @@ from trustbridge.adapters.store import (
     Operation,
     OperationKind,
     OperationStatus,
+    OrphanObserver,
     OutputError,
     OutputWriter,
     ScopeId,
@@ -140,6 +141,7 @@ class CoreDeps:
     inspector: EnvironmentInspector
     tenants: TenantResolver
     clock: Callable[[], datetime] = now_utc_default
+    orphans: OrphanObserver | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +296,8 @@ class CredentialCore:
                 await self._bounded(
                     bound.adapter.delete_credential(scope, CredentialState(current=slot))
                 )
+                if self._d.orphans is not None:
+                    await self._d.orphans.orphan_deleted(tenant.id, adapter, item.name)
                 deleted.append(item.name)
             return deleted
 

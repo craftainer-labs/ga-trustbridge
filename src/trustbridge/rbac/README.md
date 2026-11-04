@@ -40,5 +40,17 @@ because Keycloak's documentation does not confirm that `:` is accepted in client
 
 ## Not here
 
-The `authz.denied` audit event (ADR 0033 invariants 3 and 5), the router-walk test (invariant 1)
-and the `/me` endpoint belong to NG6d, which owns the router.
+The router-walk test (invariant 1) and the `/me` endpoint belong to NG6d, which owns the router.
+
+## Denials and the audit log
+
+`RbacRuntime.denials` (a `DenialSink`, optional) receives a `Denial` for every denial of an
+authenticated principal, before the 403 or 404 is raised: a role that is missing (instance or
+tenant route) and a tenant that is unknown, malformed or not granted. The sink is
+`trustbridge.audit.AuditDenials` (ADR 0032: a row with a null `tenant_id`, its own transaction;
+ADR 0033 invariants 3 and 5). It is awaited, so a sink failure fails the request rather than
+answering as if the denial were recorded. A rejected, unauthenticated request never reaches it
+(logs and metrics only). `Denial.tenant_id` is the requested id only when the path value is the
+canonical UUID spelling; `source_ip` is the ASGI client address when it is a plain IP, and
+`request_id` the caller's `X-Request-ID` when it is up to 128 of `[A-Za-z0-9._:-]`; anything else
+is dropped, not stored. NG6d sets the sink when it builds `app.state.rbac`.

@@ -22,6 +22,7 @@ from trustbridge.github.gateway import GatewayDeps, TenantGateway
 from trustbridge.github.handlers import (
     HandlerRegistry,
     InstallationHandlers,
+    TenantAudit,
     register_core_handlers,
 )
 from trustbridge.github.hook_deliveries import GitHubHookDeliveries
@@ -46,6 +47,7 @@ class RuntimeDeps:
     state_source: DeploymentStateSource | None = None
     checker: HostChecker | None = None
     api_factory: Callable[[GitHubHostConfig], GitHubRequester] | None = None
+    audit: TenantAudit | None = None
 
 
 @dataclass(slots=True)
@@ -91,6 +93,7 @@ def build_host_runtime(settings: TrustbridgeSettings, deps: RuntimeDeps) -> Host
             deps.scheduler,
             AppInstallationLookup(monitor, signers, deps.api_factory),
             tokens.invalidate,
+            deps.audit,
         ),
     )
     argocd = (

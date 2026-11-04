@@ -23,8 +23,9 @@ The instance package of the trustbridge GitHub App, a sibling of the template's 
 - `signer/`: the `file` and `vault-transit` App-key signers. See its `README.md`.
 - `rbac/`: role-based access for the admin API (claims to grants, `require_role`). See its
   `README.md`.
-- `audit/`: the append-only audit log's storage layer (ADR 0032): append, list, NDJSON export,
-  retention purge. See its `README.md`.
+- `audit/`: the append-only audit log (ADR 0032): storage (append, list, NDJSON export,
+  retention purge), event validation, redaction and the emitters for the flows that exist. See
+  its `README.md`.
 - `tenancy/`: the per-session tenant context and the Postgres hook that sets it (ADR 0031). See its
   `README.md`.
 - `reconciler/`, `migrations/`: one-line `__main__` shims so the commands keep the names in the

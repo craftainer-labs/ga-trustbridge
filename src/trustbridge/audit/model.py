@@ -2,18 +2,29 @@
 
 import ipaddress
 import json
-import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
+from trustbridge.audit.actions import Action, SystemActor
+
 SCHEMA_VERSION = 1
 MAX_PAGE_SIZE = 1000
-# A dotted verb such as `tenant.disable` or `host.registration.start`. The closed set of
-# actions lives with the emitters (NG6f); storage only guards the shape.
-_ACTION = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
+MAX_PAYLOAD_BYTES = 16384
+"""Bound on the serialized `before` and on the serialized `after`."""
+TEXT_LIMITS: dict[str, int] = {
+    "actor_sub": 255,
+    "actor_iss": 512,
+    "on_behalf_of": 255,
+    "source_ip": 64,
+    "resource_type": 64,
+    "resource_id": 255,
+    "request_id": 128,
+    "trace_id": 128,
+}
+"""Longest accepted length of each free-text column (printable characters only)."""
 
 
 class ActorType(StrEnum):
@@ -37,12 +48,12 @@ class AuditEvent:
 
     `id` is generated here because an insert never uses `RETURNING` (a null-tenant row is not
     selectable by the app role). `before` and `after` must already be redacted by the emitter's
-    allow-list; this layer does not inspect them.
+    allow-list (`trustbridge.audit.redact`); this layer checks only their shape and size.
     """
 
     actor_type: ActorType
     actor_sub: str
-    action: str
+    action: Action
     resource_type: str
     outcome: Outcome
     actor_iss: str | None = None
@@ -58,19 +69,76 @@ class AuditEvent:
     id: UUID = field(default_factory=uuid4)
 
     def __post_init__(self) -> None:
-        """Reject a shape the table's constraints would reject, with a clearer message."""
+        """Validate every value (types, enums, lengths, shapes); a bad one raises `ValueError`.
+
+        Fail closed: an event that cannot be validated is never built, so it is never written.
+        `action` may be given as the string value of an `Action` and is stored as the member.
+        """
+        if not isinstance(self.actor_type, ActorType):
+            raise ValueError("actor_type must be an ActorType")
+        if not isinstance(self.outcome, Outcome):
+            raise ValueError("outcome must be an Outcome")
+        try:
+            object.__setattr__(self, "action", Action(self.action))
+        except ValueError:
+            raise ValueError(f"action {self.action!r} is not a known audit action") from None
+        for name, limit in TEXT_LIMITS.items():
+            _check_text(name, getattr(self, name), limit)
         if not self.actor_sub:
             raise ValueError("actor_sub is required")
-        if self.actor_type is ActorType.USER and not self.actor_iss:
-            raise ValueError("a user actor needs actor_iss")
-        if self.actor_type is ActorType.SYSTEM and self.actor_iss is not None:
-            raise ValueError("a system actor has no actor_iss")
-        if not _ACTION.match(self.action):
-            raise ValueError(f"action {self.action!r} is not a dotted verb")
         if not self.resource_type:
             raise ValueError("resource_type is required")
+        if self.actor_type is ActorType.USER and not self.actor_iss:
+            raise ValueError("a user actor needs actor_iss")
+        if self.actor_type is ActorType.SYSTEM:
+            if self.actor_iss is not None:
+                raise ValueError("a system actor has no actor_iss")
+            if self.actor_sub not in {a.value for a in SystemActor}:
+                raise ValueError(f"{self.actor_sub!r} is not a system actor name")
+        for name in ("tenant_id", "id"):
+            value = getattr(self, name)
+            if not isinstance(value, UUID) and not (name == "tenant_id" and value is None):
+                raise ValueError(f"{name} must be a UUID")
         if self.source_ip is not None:
+            if "%" in self.source_ip:
+                raise ValueError("source_ip must not carry a scope id")
             ipaddress.ip_address(self.source_ip)  # raises ValueError
+        if (
+            not isinstance(self.schema_version, int)
+            or isinstance(self.schema_version, bool)
+            or not 1 <= self.schema_version <= SCHEMA_VERSION
+        ):
+            raise ValueError(f"schema_version must be an integer from 1 to {SCHEMA_VERSION}")
+        _check_payload("before", self.before)
+        _check_payload("after", self.after)
+
+
+def _check_text(name: str, value: object, limit: int) -> None:
+    """A text column is a printable string of at most `limit` characters, or None."""
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    if len(value) > limit:
+        raise ValueError(f"{name} is longer than {limit} characters")
+    if not value.isprintable():
+        raise ValueError(f"{name} contains a control character")
+
+
+def _check_payload(name: str, value: object) -> None:
+    """`before` and `after` are None or a JSON object that Postgres `jsonb` accepts, bounded."""
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    try:
+        dumped = json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} is not serializable as JSON") from None
+    if len(dumped.encode()) > MAX_PAYLOAD_BYTES:
+        raise ValueError(f"{name} is larger than {MAX_PAYLOAD_BYTES} bytes")
+    if "\\u0000" in dumped:
+        raise ValueError(f"{name} contains a NUL character")
 
 
 @dataclass(frozen=True, slots=True)
