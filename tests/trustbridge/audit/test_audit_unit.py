@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.trustbridge.helpers import host, make_settings
 from trustbridge.audit import (
@@ -23,6 +23,7 @@ from trustbridge.audit import (
     Outcome,
     export_ndjson,
     list_events,
+    purge_expired,
 )
 
 COLUMNS = [
@@ -190,3 +191,11 @@ async def test_export_ndjson_enforces_the_same_scope_rules() -> None:
             NO_SESSION, AuditQuery(), tenant_id=uuid4(), instance_scope=True, lag_seconds=0
         )
         [line async for line in stream]
+
+
+@pytest.mark.parametrize("batch_size", [0, -1, 10001])
+async def test_purge_expired_rejects_an_out_of_range_batch_size(batch_size: int) -> None:
+    """The database's 1..10000 ceiling is checked client-side, before a transaction opens."""
+    factory = cast(async_sessionmaker[AsyncSession], None)
+    with pytest.raises(ValueError, match="batch_size"):
+        await purge_expired(factory, retention_days=365, min_days=90, batch_size=batch_size)
