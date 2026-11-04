@@ -111,6 +111,7 @@ SLOT = CredentialSlot(2, CRED)
 DELIVERED_SLOT = CredentialSlot(2, CRED, {}, True)
 BY_ID_SLOT = CredentialSlot(2, CRED, {"kind": "robot", "robot_id": "11", "project": PROJECT}, True)
 PREV_SLOT = CredentialSlot(1, PREV, {"kind": "robot", "robot_id": "10", "project": PROJECT}, True)
+PREV_SLOT_NO_ID = CredentialSlot(1, PREV)
 TARGET = WebhookTarget(TENANT, HOOK_URL, (), "hook-secret")
 
 
@@ -229,7 +230,7 @@ async def test_ensure_project_looks_up_by_name_before_creating() -> None:
     """A3: an existing project is found by name; no POST is sent."""
     replay, adapter = build("projects.json", "exists")
     await adapter.ensure_project(TENANT, ProjectSpec("default"), None)
-    assert [r.method for r in replay.seen] == ["GET"]
+    assert {r.method for r in replay.seen} == {"GET"}
 
 
 async def test_ensure_project_tolerates_a_creation_race() -> None:
@@ -400,7 +401,7 @@ async def test_a_recorded_robot_id_in_another_project_is_never_deleted() -> None
     left = await adapter.delete_credential(PUSH, CredentialState(current=None, previous=PREV_SLOT))
     replay.assert_exhausted()
     assert left.change.state is ChangeState.UNCHANGED
-    assert [r.method for r in replay.seen] == ["GET"]
+    assert {r.method for r in replay.seen} == {"GET"}
 
 
 async def test_ensure_webhook_uses_the_project_in_its_prior_ref() -> None:
@@ -579,11 +580,13 @@ async def test_a_robot_of_another_project_does_not_count() -> None:
 async def test_a_robot_without_the_marker_is_never_adopted_or_deleted() -> None:
     """Ownership: a same-named robot that trustbridge did not create is not touched."""
     for call in ("ensure", "rotate"):
-        _, adapter = build("credentials.json", "foreign_robot")
+        replay, adapter = build("credentials.json", "foreign_robot")
         action = adapter.ensure_credential if call == "ensure" else adapter.rotate_begin
         with pytest.raises(AdapterError) as info:
             await action(PUSH, state_of(DELIVERED_SLOT))
+        replay.assert_exhausted()
         assert not info.value.retryable
+        assert {r.method for r in replay.seen} == {"GET"}
     replay, adapter = build("credentials.json", "foreign_robot")
     outcome = await adapter.delete_credential(PUSH, state_of(SLOT))
     replay.assert_exhausted()
@@ -790,11 +793,49 @@ async def test_a_project_robot_listing_carries_the_project_id() -> None:
     assert dict(replay.seen[1].url.params)["q"] == f"Level=project,ProjectID=7,name=~{CRED}"
 
 
-async def test_an_absent_credential_project_has_no_robots() -> None:
-    """A 404 for the project means an empty listing, without a robot request."""
+@pytest.mark.parametrize("call", ["list", "ensure", "rotate"])
+async def test_an_absent_credential_project_is_a_retryable_error_or_empty(call: str) -> None:
+    """Ensure/rotate: a retryable error naming the project (a later reconcile may create it).
+
+    List: no robots, since they went with the project, so the orphan sweep is not stuck.
+    """
     replay, adapter = build("credentials.json", "list_project_missing")
-    assert await adapter.list_credentials(TENANT) == []
+    if call == "list":
+        assert await adapter.list_credentials(TENANT) == []
+        replay.assert_exhausted()
+        assert {r.method for r in replay.seen} == {"GET"}
+        return
+    with pytest.raises(AdapterError) as info:
+        if call == "ensure":
+            await adapter.ensure_credential(PUSH, state_of())
+        else:
+            await adapter.rotate_begin(PUSH, state_of())
     replay.assert_exhausted()
+    assert info.value.retryable
+    assert PROJECT in info.value.message
+    assert {r.method for r in replay.seen} == {"GET"}
+
+
+async def test_deletes_tolerate_an_absent_credential_project() -> None:
+    """The project took its robots with it: already gone, and no DELETE is sent."""
+    replay, adapter = build("fallback.json", "delete_project_missing")
+    done = await adapter.rotate_finish(PUSH, state_of(SLOT, PREV_SLOT_NO_ID))
+    replay.assert_exhausted()
+    assert done.change.state is ChangeState.UNCHANGED
+    replay, adapter = build("fallback.json", "delete_project_missing")
+    gone = await adapter.delete_credential(PUSH, CredentialState(current=SLOT))
+    replay.assert_exhausted()
+    assert gone.change.state is ChangeState.UNCHANGED
+    assert {r.method for r in replay.seen} == {"GET"}
+
+
+async def test_a_missing_project_is_read_once_for_a_multi_slot_delete() -> None:
+    """The 404 is cached for the session: two slots, one `GET /projects/{name}`, no DELETE."""
+    replay, adapter = build("fallback.json", "delete_project_missing")
+    outcome = await adapter.delete_credential(PUSH, state_of(SLOT, PREV_SLOT_NO_ID))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UNCHANGED
+    assert [r.url.path for r in replay.seen] == [f"/api/v2.0/projects/{PROJECT}"]
 
 
 async def test_a_project_without_an_id_is_an_error() -> None:
@@ -833,12 +874,71 @@ async def test_an_unknown_robot_id_falls_back_to_the_project_listing() -> None:
     assert outcome.change.state is ChangeState.UNCHANGED
 
 
+async def test_a_mismatched_id_falls_back_to_the_name_lookup() -> None:
+    """A renamed or moved robot at the recorded id: the right robot is found by name instead."""
+    replay, adapter = build("fallback.json", "mismatch_ensure")
+    outcome = await adapter.ensure_credential(PUSH, state_of(BY_ID_SLOT))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.UNCHANGED
+    replay, adapter = build("fallback.json", "mismatch_rotate")
+    rotated = await adapter.rotate_begin(PUSH, state_of(BY_ID_SLOT))
+    replay.assert_exhausted()
+    assert rotated.change.state is ChangeState.UPDATED
+    assert rotated.state.current is not None
+    assert rotated.state.current.ref["robot_id"] == "12"
+    assert [r.method for r in replay.seen] == ["GET", "GET", "GET", "PATCH"]
+    assert replay.seen[-1].url.path.endswith("/robots/12")
+
+
+async def test_a_mismatch_with_nothing_found_creates_exactly_once() -> None:
+    """No 409 loop: the foreign robot at the id is skipped, the lookup is empty, one POST."""
+    for scenario in ("unmarked_create", "by_id_moved"):
+        file = "fallback.json" if scenario == "unmarked_create" else "credentials.json"
+        replay, adapter = build(file, scenario)
+        outcome = await adapter.ensure_credential(PUSH, state_of(BY_ID_SLOT))
+        replay.assert_exhausted()
+        assert outcome.change.state is ChangeState.CREATED
+        assert [r.method for r in replay.seen].count("POST") == 1
+        assert not {"PATCH", "DELETE", "PUT"} & {r.method for r in replay.seen}
+
+
+async def test_delete_falls_back_to_the_name_lookup() -> None:
+    """A moved robot at the recorded id: the marked robot of the credential project is deleted."""
+    replay, adapter = build("fallback.json", "finish_fallback")
+    done = await adapter.rotate_finish(PUSH, state_of(SLOT, PREV_SLOT))
+    replay.assert_exhausted()
+    assert done.change.state is ChangeState.DELETED
+    assert replay.seen[-1].method == "DELETE"
+    assert replay.seen[-1].url.path.endswith("/robots/12")
+
+
+async def test_a_robot_failing_the_checks_is_never_deleted_after_a_fallback() -> None:
+    """The fallback keeps the marker check: an unmarked robot is left alone."""
+    replay, adapter = build("fallback.json", "finish_fallback_foreign")
+    done = await adapter.rotate_finish(PUSH, state_of(SLOT, PREV_SLOT))
+    replay.assert_exhausted()
+    assert done.change.state is ChangeState.UNCHANGED
+    assert {r.method for r in replay.seen} == {"GET"}
+
+
+async def test_the_project_id_is_read_once_per_operation() -> None:
+    """Two slots of one delete share one `GET /projects/{name}`; the next call reads it again."""
+    replay, adapter = build("fallback.json", "delete_two_by_listing")
+    outcome = await adapter.delete_credential(PUSH, state_of(SLOT, PREV_SLOT_NO_ID))
+    replay.assert_exhausted()
+    assert outcome.change.state is ChangeState.DELETED
+    project_reads = [r for r in replay.seen if r.url.path == f"/api/v2.0/projects/{PROJECT}"]
+    assert len(project_reads) == 1
+
+
 async def test_a_robot_found_by_id_without_the_marker_is_refused() -> None:
     """Ownership also applies to the id path."""
-    _, adapter = build("credentials.json", "by_id_foreign")
+    replay, adapter = build("credentials.json", "by_id_foreign")
     with pytest.raises(AdapterError) as info:
         await adapter.ensure_credential(PUSH, state_of(BY_ID_SLOT))
+    replay.assert_exhausted()
     assert not info.value.retryable
+    assert {r.method for r in replay.seen} == {"GET"}
 
 
 async def test_a_project_creation_race_applies_the_privacy_check() -> None:

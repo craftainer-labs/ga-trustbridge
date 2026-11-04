@@ -694,6 +694,8 @@ async def test_the_release_n_schema_has_policies_but_rls_is_off_so_nothing_is_fi
         [(t, "tenant_isolation") for t in KEYED]
         + [(t, "owner_all") for t in SIX]
         + [("tenants", "tenant_isolation_select"), ("tenants", "tenant_isolation_update")]
+        # audit_events (NG6c, ADR 0032) is created with its policies and RLS forced.
+        + [("audit_events", p) for p in ("audit_insert", "audit_select", "owner_all")]
     )
     assert names == expected
     for name in SIX:

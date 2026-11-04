@@ -56,16 +56,23 @@ webhook is `STATIC_HEADER` in `Authorization`, trigger-only.
   (`PATCH /robots/{id}`); the old secret stops working at once. `rotate_finish` deletes only a
   `previous` slot whose name differs from `current`.
 - **Robot lookup.** A recorded `robot_id` is read directly (`GET /robots/{id}`) by ensure, rotate,
-  `rotate_finish` and delete; the robot counts only if its full name (`<prefix><project>+<name>`,
-  default prefix `robot$`) still ends in `<credential project>+<slot name>`, so a renamed or moved
-  robot is never matched. Only an id Harbor no longer knows (404) or a slot without an id falls
-  back to the project listing, where the name is matched exactly on the client. The listing is
+  `rotate_finish` and delete; the robot counts only if it still carries the tenant's name prefix,
+  its full name (`<prefix><project>+<name>`, default prefix `robot$`) still ends in
+  `<credential project>+<slot name>` and it has the marker. An id Harbor no longer knows (404),
+  one that now names a robot failing any of those checks (renamed, moved, foreign) and a slot
+  without an id all fall back to the project listing, where the same checks apply (exact name, project,
+  tenant prefix, marker). A robot failing them, found by id or by listing, is never adopted,
+  refreshed or deleted; a fallback is logged at debug level. The listing is
   `q=Level=project,ProjectID=<id>,name=~<name>`: the swagger does not document the `Level` and
   `ProjectID` keys (its `ListRobot` text only says "with the specified level and project"), but
   the handler requires `ProjectID` with `Level=project` (a 400 otherwise): `ListRobot` in
   <https://github.com/goharbor/harbor/blob/main/src/server/v2.0/handler/robot.go>. The id is
-  `Project.project_id` from `GET /projects/{name}` (swagger `Project`); an absent project has no
-  robots.
+  `Project.project_id` from `GET /projects/{name}` (swagger `Project`), read once per adapter
+  operation (a 404 is cached too; nothing is cached across calls). A credential project that does
+  not exist (404) is a retryable error naming it for ensure and rotate (it is operator
+  configuration, created by a later reconcile or fixed by the operator); list returns an empty
+  list and the delete paths treat it as already gone (Harbor removes a project's robots with it),
+  sending no DELETE.
 - **Webhook.** Harbor sends `auth_header` verbatim as the `Authorization` request header, so the
   inbound check is a static-header comparison, never an HMAC; the payload is only a trigger.
   Default event `PUSH_ARTIFACT`. Harbor masks `auth_header`, so the state ref keeps `auth`, an
@@ -149,6 +156,15 @@ No primary-documentation statement exists for these; the fixtures encode best-ef
   similar name never counts. A robot is deleted by recorded id only if it sits in the credential
   project and carries the marker; one elsewhere is left alone. Harbor projects have no free-form field: only a project named
   `tb<20 hex digits>` (derived from tenant and key) is deleted.
+- After a `project_key` change, robots in the old project are not cleaned up: the credential
+  project is the settled scope, so `delete_credential` and the orphan sweep only see the current
+  one. Remove them by hand in Harbor.
+- A project switched to public fails every reconcile until it is made private again by hand (as
+  designed). The delete path has no visibility check.
+- **Candidates (pre-existing, not fixed here).** `expires_at` is `None` when a secret-refresh
+  `GET` lacks it; `_webhook_matches` ignores `skip_cert_verify`, `payload_format` and extra
+  targets; `project_key` is not validated before it goes into `q=` filters; `_pages` returns a
+  partial list when a later page answers 404.
 - Robots are created with a 90-day duration. A secret refresh does not extend it, and the adapter
   does not renew an expiring robot; recreate it (delete the credential) before it lapses.
 - An existing project, robot or policy is not compared on permissions or secret, only on the
