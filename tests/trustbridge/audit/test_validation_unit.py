@@ -129,7 +129,7 @@ def test_project_converts_scalars_and_bounds_strings() -> None:
     """Datetimes become UTC strings with a Z, ids strings, long strings are cut and marked."""
     when = datetime(2026, 11, 4, 9, 30, tzinfo=timezone(timedelta(hours=2)))
     op = uuid4()
-    long_value = "x" * 1000
+    long_value = "word " * 200
     out = project(
         "credential",
         {

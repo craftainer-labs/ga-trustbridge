@@ -238,7 +238,8 @@ class SqlCredentialStore:
     ) -> tuple[CredentialKind | None, OperationStatus | None]:
         """The credential kind and the operation status the rows hold before this save."""
         kind = await session.scalar(
-            select(AdapterCredentialRow.kind).where(
+            select(AdapterCredentialRow.kind)
+            .where(
                 AdapterCredentialRow.tenant_id == credential.tenant_id,
                 AdapterCredentialRow.adapter == credential.adapter,
                 AdapterCredentialRow.scope_key == credential.scope_key,
@@ -249,9 +250,9 @@ class SqlCredentialStore:
             None
             if operation is None
             else await session.scalar(
-                select(CredentialOperationRow.status).where(
-                    CredentialOperationRow.id == operation.id
-                ).with_for_update()
+                select(CredentialOperationRow.status)
+                .where(CredentialOperationRow.id == operation.id)
+                .with_for_update()
             )
         )
         return (

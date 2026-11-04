@@ -92,7 +92,7 @@ class TenantSyncAudit:
 
 
 class AuditDenials:
-    """Records `authz.denied` for an authenticated principal (`trustbridge.audit.denial.DenialSink`).
+    """Records `authz.denied` for an authenticated principal (a `DenialSink`).
 
     The row has a **null** `tenant_id` (no tenant context exists yet and only instance-scoped
     auditors see denials) and its own transaction. A tenant route puts the requested tenant id

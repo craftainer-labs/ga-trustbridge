@@ -3,7 +3,8 @@
 Events are built from an **allow-list per resource shape**: `project` copies only the named
 fields of a source mapping, so a new column is absent from the audit until someone adds it here.
 Values are scalars only (nested data is refused) and every string goes through `scrub_text`
-(control characters dropped, secret shapes masked, length bounded). An unknown shape is an error (fail closed), never an unfiltered dump.
+(control characters dropped, secret shapes masked, length bounded). An unknown shape is an error
+(fail closed), never an unfiltered dump.
 """
 
 import math
