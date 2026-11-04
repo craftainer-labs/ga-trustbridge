@@ -29,6 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import URL, Connection
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
@@ -792,57 +793,56 @@ def _run_migration(sync_conn: Connection, direction: str) -> None:
         getattr(module, direction)()
 
 
+_COLUMN_TYPE = (
+    "SELECT data_type FROM information_schema.columns "
+    "WHERE table_name = 'audit_events' AND column_name = 'on_behalf_of'"
+)
+_LEGACY_ROWS = (
+    "SELECT actor_sub, on_behalf_of, jsonb_typeof(on_behalf_of) FROM audit_events "
+    "WHERE actor_sub LIKE 'migration-%' ORDER BY actor_sub"
+)
+_LEGACY_INSERT = (
+    "INSERT INTO audit_events (id, actor_type, actor_sub, action, resource_type, outcome, "
+    "on_behalf_of) VALUES (gen_random_uuid(), 'system', :sub, 'tenant.sync', 'tenant', "
+    "'success', :v)"
+)
+
+
+async def _migration_steps(conn: AsyncConnection) -> list[object]:
+    """Downgrade, insert legacy rows, upgrade, read them, downgrade again; what each step saw."""
+    seen: list[object] = []
+    await conn.run_sync(_run_migration, "downgrade")
+    seen.append((await conn.execute(text(_COLUMN_TYPE))).scalar_one())
+    for suffix, value in (("a", "sender=1;delivery=d"), ("b", None)):
+        await conn.execute(text(_LEGACY_INSERT), {"sub": f"migration-{suffix}", "v": value})
+    await conn.run_sync(_run_migration, "upgrade")
+    seen.append([tuple(r) for r in (await conn.execute(text(_LEGACY_ROWS))).all()])
+    await conn.run_sync(_run_migration, "downgrade")
+    legacy = text("SELECT on_behalf_of FROM audit_events WHERE actor_sub = 'migration-a'")
+    seen.append((await conn.execute(legacy)).scalar_one())
+    return seen
+
+
 async def test_the_on_behalf_of_migration_keeps_legacy_strings_and_nulls_and_reverses(
     db: Db,
 ) -> None:
     """text -> jsonb keeps null as null and a legacy string as a JSON string; down reverses."""
     try:
         async with db.admin.connect() as conn:
-            await conn.run_sync(_run_migration, "downgrade")
-            assert (
-                await conn.execute(
-                    text(
-                        "SELECT data_type FROM information_schema.columns "
-                        "WHERE table_name = 'audit_events' AND column_name = 'on_behalf_of'"
-                    )
-                )
-            ).scalar_one() == "text"
-            for suffix, value in (("a", "sender=1;delivery=d"), ("b", None)):
-                await conn.execute(
-                    text(
-                        "INSERT INTO audit_events (id, actor_type, actor_sub, action, "
-                        "resource_type, outcome, on_behalf_of) VALUES (gen_random_uuid(), "
-                        "'system', :sub, 'tenant.sync', 'tenant', 'success', :v)"
-                    ),
-                    {"sub": f"migration-{suffix}", "v": value},
-                )
-            await conn.run_sync(_run_migration, "upgrade")
-            rows = (
-                await conn.execute(
-                    text(
-                        "SELECT actor_sub, on_behalf_of, jsonb_typeof(on_behalf_of) FROM "
-                        "audit_events WHERE actor_sub LIKE 'migration-%' ORDER BY actor_sub"
-                    )
-                )
-            ).all()
-            assert [tuple(r) for r in rows] == [
-                ("migration-a", "sender=1;delivery=d", "string"),
-                ("migration-b", None, None),
-            ]
-            await conn.run_sync(_run_migration, "downgrade")
-            legacy = (
-                await conn.execute(
-                    text(
-                        "SELECT on_behalf_of FROM audit_events WHERE actor_sub = 'migration-a'"
-                    )
-                )
-            ).scalar_one()
-            assert legacy == "sender=1;delivery=d"
+            seen = await _migration_steps(conn)
             await conn.rollback()
     except DBAPIError as exc:
         if "permission" in str(exc) or "must be owner" in str(exc):
             pytest.skip("the test database user cannot alter the re-owned table")
         raise
+    assert seen == [
+        "text",
+        [
+            ("migration-a", "sender=1;delivery=d", "string"),
+            ("migration-b", None, None),
+        ],
+        "sender=1;delivery=d",
+    ]
 
 
 def _rotation(tenant: UUID) -> tuple[StoredCredential, Operation]:
