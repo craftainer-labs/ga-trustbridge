@@ -29,9 +29,11 @@ and tenant deletion (NG6h). SIEM push is a follow-up.
      be a `SystemActor` name and has no `actor_iss`; a `user` actor needs `actor_sub` and
      `actor_iss` (the token's, never email, login or display name).
    - Text columns are printable strings within `TEXT_LIMITS` (`actor_sub` 255, `actor_iss` 512,
-     `on_behalf_of` 255, `resource_type` 64, `resource_id` 255, `request_id` 128, `trace_id` 128,
+     `resource_type` 64, `resource_id` 255, `request_id` 128, `trace_id` 128,
      `source_ip` 64); `source_ip` is an IP address without a scope id; `tenant_id` and `id` are
      UUIDs; `schema_version` is an integer from 1 to `SCHEMA_VERSION`.
+   - `on_behalf_of` is `None` or exactly `{"github_sender_id": <non-negative int, not bool>,
+     "delivery_id": "<printable string, at most MAX_DELIVERY_ID = 100>"}` (user decision).
    - `before` and `after` are `None` or a JSON object that `jsonb` accepts (no NaN, no NUL),
      at most `MAX_PAYLOAD_BYTES` serialized.
 2. **Build `before` and `after` with `project(shape, source)`**, never by dumping a row. The
@@ -54,7 +56,7 @@ null `tenant_id` (`authz.denied`, instance-level events) is written with no cont
 
 | Action | Where | Actor | Transaction |
 | --- | --- | --- | --- |
-| `tenant.sync` | `github.handlers.InstallationHandlers` (`created`, `deleted`, `suspend`, `unsuspend`) through `TenantSyncAudit`, wired in `worker.runtime.build_core` | `github-webhook`, `on_behalf_of` = `sender=<numeric id>;delivery=<id>` | Own, after the tenant change and the repository changes. A failure fails the handler, the worker retries, and the sync repeats (a retry may add a second event; a change is never left without one). `after` = `{"state"}`; `before` is not recorded (the sync overwrites the state from GitHub's current view). |
+| `tenant.sync` | `github.handlers.InstallationHandlers` (`created`, `deleted`, `suspend`, `unsuspend`) through `TenantSyncAudit`, wired in `worker.runtime.build_core` | `github-webhook`, `on_behalf_of` = `{"github_sender_id": <numeric id>, "delivery_id": "<id>"}` (JSON object; null, not an empty object, when the payload has no numeric sender) | Own, after the tenant change and the repository changes. A failure fails the handler, the worker retries, and the sync repeats (a retry may add a second event; a change is never left without one). `after` = `{"state"}`; `before` is not recorded (the sync overwrites the state from GitHub's current view). |
 | `authz.denied` | `rbac.deps.require_role` through `RbacRuntime.denials` (`AuditDenials`), for a role that is missing and for a tenant that is unknown, malformed or not granted (answered 404) | the denied user (`sub`, `iss`), `source_ip` from the ASGI client, `request_id` from a plain `X-Request-ID` | Own, null `tenant_id`. Instance route: `resource_type=role`, `resource_id=<required role>`. Tenant route: `resource_type=tenant`, `resource_id=<requested tenant id>` (none if the path value is not a canonical UUID). If the sink fails the request fails. Unauthenticated rejections are never rows. |
 | `credential.rotate.begin`, `credential.rotate.finish`, `credential.issue`, `credential.revoke`, `credential.operation.abandoned`, `oidc_trust.create`, `oidc_trust.remove` | `adapters.sql_store.SqlCredentialStore.save` through its `observer` (`credentials.CredentialAuditObserver`) | `worker` or `reconciler` (chosen at construction) | The save's own, so the event commits with the credential state. See `credentials.py` for the transition table. |
 | `credential.orphan.delete` | `adapters.core.CredentialCore.sweep_orphans` through `CoreDeps.orphans` | as above | Own; one event per platform credential deleted. If the write fails the sweep still finishes, logs each unaudited orphan at error level, then raises. `resource_id` is the platform name. |
@@ -109,10 +111,16 @@ of the lag against it is deferred (see "Deferred events").
 **NDJSON shape.** One compact JSON object per line, `\n`-terminated, keys in column order:
 `id, seq, occurred_at, recorded_at, tenant_id, actor_type, actor_sub, actor_iss, on_behalf_of,
 source_ip, action, resource_type, resource_id, outcome, before, after, request_id, trace_id,
-schema_version`. Timestamps are UTC with a `Z`; ids and `source_ip` are strings. The route sets
+schema_version`. Timestamps are UTC with a `Z`; ids and `source_ip` are strings; `on_behalf_of`,
+`before` and `after` are nested JSON objects (or null). The route sets
 `application/x-ndjson` and writes the export's own audit event.
 
-## Database side (migration `e5c9a37d2b18`)
+## Database side (migrations `e5c9a37d2b18`, `f6d2b8c14a39`)
+
+`f6d2b8c14a39` changes `on_behalf_of` from `text` to `jsonb` (user decision: structured, not a
+`key=value` string). It is N-1 compatible because the previous release never touches
+`audit_events` and nothing wrote the column before this release (no backfill needed; a stray
+string value is kept as a JSON string). It only alters the column: no roles, no grants.
 
 - `audit_events` with indexes `(tenant_id, seq)`, `(occurred_at)`, `(actor_sub, seq)` and, added
   here, `(recorded_at)` (the lag bound looks up the first recent event).

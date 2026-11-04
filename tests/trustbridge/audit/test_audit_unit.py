@@ -140,6 +140,14 @@ def test_ndjson_line_shape() -> None:  # inv. 12 (shape)
     assert (body["before"], body["after"]) == ({"state": "a"}, None)
 
 
+def test_on_behalf_of_is_exported_as_a_json_object_or_null() -> None:
+    """User decision: structured, so the NDJSON line nests it rather than quoting a string."""
+    who = {"github_sender_id": 583231, "delivery_id": "d-1"}
+    assert _record(on_behalf_of=who).to_json()["on_behalf_of"] == who
+    assert json.loads(_record(on_behalf_of=who).to_ndjson_line())["on_behalf_of"] == who
+    assert _record().to_json()["on_behalf_of"] is None
+
+
 def test_a_null_tenant_is_exported_as_null() -> None:
     """An `authz.denied` row has no tenant."""
     assert _record(tenant_id=None).to_json()["tenant_id"] is None

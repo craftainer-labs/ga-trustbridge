@@ -135,7 +135,7 @@ async def test_a_tenant_sync_event_names_the_system_actor_the_sender_and_the_del
     assert (event.resource_type, event.resource_id) == ("tenant", str(tenant))
     assert event.after == {"state": "suspended"}
     assert event.before is None
-    assert event.on_behalf_of == "sender=583231;delivery=d-1forged"
+    assert event.on_behalf_of == {"github_sender_id": 583231, "delivery_id": "d-1forged"}
 
 
 async def test_a_tenant_sync_without_a_sender_has_no_on_behalf_of() -> None:

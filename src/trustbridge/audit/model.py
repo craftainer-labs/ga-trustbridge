@@ -17,7 +17,6 @@ MAX_PAYLOAD_BYTES = 16384
 TEXT_LIMITS: dict[str, int] = {
     "actor_sub": 255,
     "actor_iss": 512,
-    "on_behalf_of": 255,
     "source_ip": 64,
     "resource_type": 64,
     "resource_id": 255,
@@ -58,7 +57,7 @@ class AuditEvent:
     outcome: Outcome
     actor_iss: str | None = None
     tenant_id: UUID | None = None
-    on_behalf_of: str | None = None
+    on_behalf_of: dict[str, Any] | None = None
     source_ip: str | None = None
     resource_id: str | None = None
     before: dict[str, Any] | None = None
@@ -88,6 +87,7 @@ class AuditEvent:
         self._check_ids_and_version()
         _check_payload("before", self.before)
         _check_payload("after", self.after)
+        _check_on_behalf_of(self.on_behalf_of)
 
     def _check_actor(self) -> None:
         """The actor columns agree with the actor type (and the table's check constraint)."""
@@ -133,6 +133,24 @@ def _check_text(name: str, value: object, limit: int) -> None:
         raise ValueError(f"{name} contains a control character")
 
 
+MAX_DELIVERY_ID = 100
+"""Longest `delivery_id` in `on_behalf_of`."""
+
+
+def _check_on_behalf_of(value: object) -> None:
+    """`on_behalf_of` is None or `{"github_sender_id": int, "delivery_id": str}` (user decision)."""
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != {"github_sender_id", "delivery_id"}:
+        raise ValueError("on_behalf_of must be an object with github_sender_id and delivery_id")
+    sender, delivery = value["github_sender_id"], value["delivery_id"]
+    if not isinstance(sender, int) or isinstance(sender, bool) or sender < 0:
+        raise ValueError("on_behalf_of.github_sender_id must be a non-negative integer")
+    _check_text("on_behalf_of.delivery_id", delivery, MAX_DELIVERY_ID)
+    if delivery is None:
+        raise ValueError("on_behalf_of.delivery_id must be a string")
+
+
 def _check_payload(name: str, value: object) -> None:
     """`before` and `after` are None or a JSON object that Postgres `jsonb` accepts, bounded."""
     if value is None:
@@ -161,7 +179,7 @@ class AuditRecord:
     actor_type: ActorType
     actor_sub: str
     actor_iss: str | None
-    on_behalf_of: str | None
+    on_behalf_of: dict[str, Any] | None
     source_ip: str | None
     action: str
     resource_type: str

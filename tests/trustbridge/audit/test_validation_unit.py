@@ -24,6 +24,7 @@ from trustbridge.audit import (
     scrub_text,
     truncate,
 )
+from trustbridge.audit.model import MAX_DELIVERY_ID
 
 CANARY = "canary-secret-7f3a9c1e"
 PEM_KIND = "PRIVATE " + "KEY"  # split so secret scanners ignore this file
@@ -79,6 +80,22 @@ def test_every_system_actor_name_is_accepted() -> None:
         ({"schema_version": 2}, "schema_version"),
         ({"schema_version": "1"}, "schema_version"),
         ({"before": ["not", "an", "object"]}, "before must be an object"),
+        ({"on_behalf_of": "sender=1;delivery=d"}, "on_behalf_of must be an object"),
+        ({"on_behalf_of": {"github_sender_id": 1}}, "on_behalf_of must be an object"),
+        (
+            {"on_behalf_of": {"github_sender_id": 1, "delivery_id": "d", "login": "x"}},
+            "on_behalf_of must be an object",
+        ),
+        ({"on_behalf_of": {"github_sender_id": True, "delivery_id": "d"}}, "github_sender_id"),
+        ({"on_behalf_of": {"github_sender_id": "1", "delivery_id": "d"}}, "github_sender_id"),
+        ({"on_behalf_of": {"github_sender_id": -1, "delivery_id": "d"}}, "github_sender_id"),
+        ({"on_behalf_of": {"github_sender_id": 1, "delivery_id": 5}}, "delivery_id"),
+        ({"on_behalf_of": {"github_sender_id": 1, "delivery_id": None}}, "delivery_id"),
+        ({"on_behalf_of": {"github_sender_id": 1, "delivery_id": "a\nb"}}, "control character"),
+        (
+            {"on_behalf_of": {"github_sender_id": 1, "delivery_id": "d" * (MAX_DELIVERY_ID + 1)}},
+            "longer than",
+        ),
         ({"after": {"x": object()}}, "not serializable"),
         ({"after": {"x": math.nan}}, "not serializable"),
         ({"after": {"x": "nul\x00"}}, "NUL"),
@@ -97,6 +114,13 @@ def test_each_text_column_has_a_length_bound(field: str) -> None:
     _event(**{field: "a" * TEXT_LIMITS[field]})
     with pytest.raises(ValueError, match="longer than"):
         _event(**{field: "a" * (TEXT_LIMITS[field] + 1)})
+
+
+def test_on_behalf_of_is_null_or_the_structured_object() -> None:
+    """User decision: `{"github_sender_id": int, "delivery_id": str}` or null."""
+    assert _event().on_behalf_of is None
+    who = {"github_sender_id": 583231, "delivery_id": "d" * MAX_DELIVERY_ID}
+    assert _event(on_behalf_of=who).on_behalf_of == who
 
 
 def test_a_payload_at_the_bound_is_accepted() -> None:

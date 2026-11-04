@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.audit.actions import Action, SystemActor
 from trustbridge.audit.denial import Denial
-from trustbridge.audit.model import TEXT_LIMITS, ActorType, AuditEvent, Outcome
+from trustbridge.audit.model import MAX_DELIVERY_ID, TEXT_LIMITS, ActorType, AuditEvent, Outcome
 from trustbridge.audit.redact import project
 from trustbridge.audit.store import append
 from trustbridge.tenancy.context import tenant_context
@@ -61,9 +61,9 @@ class TenantSyncAudit:
 
     The sync re-reads GitHub and overwrites the state, so the event records the resulting
     state (`after`) and who asked: the system actor `github-webhook`, on behalf of the GitHub
-    sender's numeric id and the delivery id (never the login). It runs after the tenant change
-    in its own transaction; a failure raises, the delivery is retried and the sync repeats, so
-    the change is never left without an event (a retry may add a second one).
+    sender's numeric id and the delivery id (never the login), as a JSON object. It runs after
+    the tenant change in its own transaction; a failure raises, the delivery is retried and the
+    sync repeats, so the change is never left without an event (a retry may add a second one).
     """
 
     def __init__(self, writer: AuditWriter) -> None:
@@ -74,8 +74,14 @@ class TenantSyncAudit:
         self, *, tenant_id: UUID, state: str, delivery_id: str, sender_id: int | None
     ) -> None:
         """Write one `tenant.sync` event in the tenant's context."""
-        delivery = "".join(c for c in delivery_id if c.isprintable())[:100]
-        on_behalf_of = None if sender_id is None else f"sender={sender_id};delivery={delivery}"
+        on_behalf_of = (
+            None
+            if sender_id is None
+            else {
+                "github_sender_id": sender_id,
+                "delivery_id": _printable(delivery_id, MAX_DELIVERY_ID),
+            }
+        )
         await self._writer.record(
             AuditEvent(
                 actor_type=ActorType.SYSTEM,

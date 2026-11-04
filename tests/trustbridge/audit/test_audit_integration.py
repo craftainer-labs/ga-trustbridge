@@ -10,6 +10,7 @@ foreign key) so they never see each other's rows.
 """
 
 import asyncio
+import importlib.util
 import json
 import os
 import subprocess
@@ -22,8 +23,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext
 from sqlalchemy import text
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, Connection
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -736,8 +739,111 @@ async def test_a_tenant_sync_event_records_the_state_and_the_sender(db: Db) -> N
     )
     assert (record.action, record.resource_id) == (Action.TENANT_SYNC, str(tenant))
     assert record.after == {"state": "suspended"}
-    assert record.on_behalf_of == "sender=583231;delivery=d-77"
+    assert record.on_behalf_of == {"github_sender_id": 583231, "delivery_id": "d-77"}
     assert record.source_ip is None
+
+
+async def test_a_tenant_sync_without_a_sender_stores_a_null_on_behalf_of(db: Db) -> None:
+    """No numeric sender: the column is SQL null, not a JSON null or an empty object."""
+    tenant = uuid4()
+    await TenantSyncAudit(AuditWriter(db.app)).tenant_synced(
+        tenant_id=tenant, state="active", delivery_id="d-78", sender_id=None
+    )
+    (record,) = await _tenant_events(db, tenant)
+    assert record.on_behalf_of is None
+    assert (
+        await _admin_scalar(
+            db, f"SELECT on_behalf_of IS NULL FROM audit_events WHERE tenant_id = '{tenant}'"
+        )
+        is True
+    )
+
+
+async def test_on_behalf_of_is_a_jsonb_column(db: Db) -> None:
+    """The migration chain ends with `on_behalf_of` as jsonb, holding the object as written."""
+    assert (
+        await _admin_scalar(
+            db,
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = 'audit_events' AND column_name = 'on_behalf_of'",
+        )
+        == "jsonb"
+    )
+    tenant = uuid4()
+    await _write(db, tenant, on_behalf_of={"github_sender_id": 7, "delivery_id": "d"})
+    assert (
+        await _admin_scalar(
+            db,
+            "SELECT on_behalf_of->>'github_sender_id' FROM audit_events "
+            f"WHERE tenant_id = '{tenant}'",
+        )
+        == "7"
+    )
+
+
+def _run_migration(sync_conn: Connection, direction: str) -> None:
+    """Run the `on_behalf_of` revision's `upgrade` or `downgrade` on `sync_conn`."""
+    path = next((ROOT / "alembic" / "versions").glob("f6d2b8c14a39_*.py"))
+    spec = importlib.util.spec_from_file_location("audit_on_behalf_of_revision", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with Operations.context(MigrationContext.configure(sync_conn)):
+        getattr(module, direction)()
+
+
+async def test_the_on_behalf_of_migration_keeps_legacy_strings_and_nulls_and_reverses(
+    db: Db,
+) -> None:
+    """text -> jsonb keeps null as null and a legacy string as a JSON string; down reverses."""
+    try:
+        async with db.admin.connect() as conn:
+            await conn.run_sync(_run_migration, "downgrade")
+            assert (
+                await conn.execute(
+                    text(
+                        "SELECT data_type FROM information_schema.columns "
+                        "WHERE table_name = 'audit_events' AND column_name = 'on_behalf_of'"
+                    )
+                )
+            ).scalar_one() == "text"
+            for suffix, value in (("a", "sender=1;delivery=d"), ("b", None)):
+                await conn.execute(
+                    text(
+                        "INSERT INTO audit_events (id, actor_type, actor_sub, action, "
+                        "resource_type, outcome, on_behalf_of) VALUES (gen_random_uuid(), "
+                        "'system', :sub, 'tenant.sync', 'tenant', 'success', :v)"
+                    ),
+                    {"sub": f"migration-{suffix}", "v": value},
+                )
+            await conn.run_sync(_run_migration, "upgrade")
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT actor_sub, on_behalf_of, jsonb_typeof(on_behalf_of) FROM "
+                        "audit_events WHERE actor_sub LIKE 'migration-%' ORDER BY actor_sub"
+                    )
+                )
+            ).all()
+            assert [tuple(r) for r in rows] == [
+                ("migration-a", "sender=1;delivery=d", "string"),
+                ("migration-b", None, None),
+            ]
+            await conn.run_sync(_run_migration, "downgrade")
+            legacy = (
+                await conn.execute(
+                    text(
+                        "SELECT on_behalf_of FROM audit_events WHERE actor_sub = 'migration-a'"
+                    )
+                )
+            ).scalar_one()
+            assert legacy == "sender=1;delivery=d"
+            await conn.rollback()
+    except DBAPIError as exc:
+        if "permission" in str(exc) or "must be owner" in str(exc):
+            pytest.skip("the test database user cannot alter the re-owned table")
+        raise
 
 
 def _rotation(tenant: UUID) -> tuple[StoredCredential, Operation]:

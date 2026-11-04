@@ -33,14 +33,16 @@ MAX_PURGE_BATCH = 10000  # the ceiling `tb_audit_purge` enforces
 DEFAULT_EXPORT_PAGE = 500
 _COLUMNS = (
     "id, seq, occurred_at, recorded_at, tenant_id, actor_type, actor_sub, actor_iss, "
-    "on_behalf_of, host(source_ip) AS source_ip, action, resource_type, resource_id, outcome, "
-    '"before"::text AS "before", "after"::text AS "after", request_id, trace_id, schema_version'
+    "on_behalf_of::text AS on_behalf_of, host(source_ip) AS source_ip, action, resource_type, "
+    'resource_id, outcome, "before"::text AS "before", "after"::text AS "after", request_id, '
+    "trace_id, schema_version"
 )
 _INSERT = text(
     "INSERT INTO audit_events (id, tenant_id, actor_type, actor_sub, actor_iss, on_behalf_of, "
     'source_ip, action, resource_type, resource_id, outcome, "before", "after", request_id, '
     "trace_id, schema_version) VALUES (CAST(:id AS uuid), CAST(:tenant_id AS uuid), :actor_type, "
-    ":actor_sub, :actor_iss, :on_behalf_of, CAST(CAST(:source_ip AS text) AS inet), :action, "
+    ":actor_sub, :actor_iss, CAST(CAST(:on_behalf_of AS text) AS jsonb), "
+    "CAST(CAST(:source_ip AS text) AS inet), :action, "
     ":resource_type, :resource_id, :outcome, CAST(CAST(:before AS text) AS jsonb), "
     "CAST(CAST(:after AS text) AS jsonb), :request_id, :trace_id, :schema_version)"
 )
@@ -82,7 +84,7 @@ async def append(session: AsyncSession, event: AuditEvent) -> UUID:
             "actor_type": event.actor_type.value,
             "actor_sub": event.actor_sub,
             "actor_iss": event.actor_iss,
-            "on_behalf_of": event.on_behalf_of,
+            "on_behalf_of": _dump(event.on_behalf_of),
             "source_ip": event.source_ip,
             "action": event.action.value,
             "resource_type": event.resource_type,
@@ -108,7 +110,7 @@ def _record(row: RowMapping) -> AuditRecord:
         actor_type=ActorType(row["actor_type"]),
         actor_sub=row["actor_sub"],
         actor_iss=row["actor_iss"],
-        on_behalf_of=row["on_behalf_of"],
+        on_behalf_of=_load(row["on_behalf_of"]),
         source_ip=row["source_ip"],
         action=row["action"],
         resource_type=row["resource_type"],
