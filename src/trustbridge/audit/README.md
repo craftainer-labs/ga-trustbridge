@@ -11,6 +11,9 @@ and tenant deletion (NG6h). SIEM push is a follow-up.
   the `seq` cursor), `AuditPage`.
 - `actions.py`: `Action`, the closed set of actions, and `SystemActor`, the fixed system names.
 - `redact.py`: `project` (allow-list per shape), `scrub_text`, `truncate`.
+- `denial.py`: `Denial` and `DenialSink`, a dependency-free leaf. `trustbridge.rbac` imports them
+  from here (re-exporting them); `audit` never imports `rbac` (an import-linter contract), so the
+  worker, which imports `audit`, does not load the FastAPI app.
 - `emit.py`: `AuditWriter`, `with_trace`, `current_trace_id` and the sinks `TenantSyncAudit` and
   `AuditDenials`.
 - `credentials.py`: `credential_events` and `CredentialAuditObserver` (imported by name, not
@@ -54,7 +57,7 @@ null `tenant_id` (`authz.denied`, instance-level events) is written with no cont
 | `tenant.sync` | `github.handlers.InstallationHandlers` (`created`, `deleted`, `suspend`, `unsuspend`) through `TenantSyncAudit`, wired in `worker.runtime.build_core` | `github-webhook`, `on_behalf_of` = `sender=<numeric id>;delivery=<id>` | Own, after the tenant change and the repository changes. A failure fails the handler, the worker retries, and the sync repeats (a retry may add a second event; a change is never left without one). `after` = `{"state"}`; `before` is not recorded (the sync overwrites the state from GitHub's current view). |
 | `authz.denied` | `rbac.deps.require_role` through `RbacRuntime.denials` (`AuditDenials`), for a role that is missing and for a tenant that is unknown, malformed or not granted (answered 404) | the denied user (`sub`, `iss`), `source_ip` from the ASGI client, `request_id` from a plain `X-Request-ID` | Own, null `tenant_id`. Instance route: `resource_type=role`, `resource_id=<required role>`. Tenant route: `resource_type=tenant`, `resource_id=<requested tenant id>` (none if the path value is not a canonical UUID). If the sink fails the request fails. Unauthenticated rejections are never rows. |
 | `credential.rotate.begin`, `credential.rotate.finish`, `credential.issue`, `credential.revoke`, `credential.operation.abandoned`, `oidc_trust.create`, `oidc_trust.remove` | `adapters.sql_store.SqlCredentialStore.save` through its `observer` (`credentials.CredentialAuditObserver`) | `worker` or `reconciler` (chosen at construction) | The save's own, so the event commits with the credential state. See `credentials.py` for the transition table. |
-| `credential.orphan.delete` | `adapters.core.CredentialCore.sweep_orphans` through `CoreDeps.orphans` | as above | Own; one event per platform credential deleted. `resource_id` is the platform name. |
+| `credential.orphan.delete` | `adapters.core.CredentialCore.sweep_orphans` through `CoreDeps.orphans` | as above | Own; one event per platform credential deleted. If the write fails the sweep still finishes, logs each unaudited orphan at error level, then raises. `resource_id` is the platform name. |
 | `audit.purge` | written by `tb_audit_purge` itself (actor `reconciler`) | | The purge's. |
 
 `CredentialCore` is not instantiated by any process yet (NG5/NG6), so the credential events are

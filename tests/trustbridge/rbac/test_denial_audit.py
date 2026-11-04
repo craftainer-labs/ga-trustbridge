@@ -110,7 +110,7 @@ def test_an_instance_role_denial_is_recorded_with_the_sub_the_role_and_the_addre
         sub="u1",
         iss="https://idp.example",
         reason="role_missing",
-        required_role=Role.ADMIN,
+        required_role="admin",
         scope="instance",
         tenant_id=None,
         source_ip="203.0.113.9",
@@ -130,7 +130,7 @@ def test_an_ungranted_tenant_is_a_404_and_records_the_requested_id() -> None:
         "tenant",
         str(ACME.id),
     )
-    assert denial.required_role is Role.OPERATOR
+    assert denial.required_role == "operator"
 
 
 def test_an_unknown_tenant_records_the_id_but_a_malformed_one_records_none() -> None:

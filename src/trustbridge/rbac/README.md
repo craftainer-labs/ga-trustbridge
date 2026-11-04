@@ -44,7 +44,9 @@ The router-walk test (invariant 1) and the `/me` endpoint belong to NG6d, which 
 
 ## Denials and the audit log
 
-`RbacRuntime.denials` (a `DenialSink`, optional) receives a `Denial` for every denial of an
+`RbacRuntime.denials` (a `DenialSink`, optional; `Denial` and `DenialSink` live in
+`trustbridge.audit.denial` and are re-exported here, so `rbac` depends on `audit`, never the
+reverse) receives a `Denial` for every denial of an
 authenticated principal, before the 403 or 404 is raised: a role that is missing (instance or
 tenant route) and a tenant that is unknown, malformed or not granted. The sink is
 `trustbridge.audit.AuditDenials` (ADR 0032: a row with a null `tenant_id`, its own transaction;

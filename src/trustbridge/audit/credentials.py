@@ -42,6 +42,11 @@ from trustbridge.audit.store import append
 _MAX_RESOURCE_ID = 255
 
 
+def _bounded_id(value: str) -> str:
+    """`value` as an event `resource_id`: printable characters only, within the column limit."""
+    return "".join(c for c in value if c.isprintable())[:_MAX_RESOURCE_ID]
+
+
 @dataclass(frozen=True, slots=True)
 class CredentialEvent:
     """One event implied by a save, before it gets an actor."""
@@ -119,8 +124,13 @@ def credential_events(
         action: Action | None = None
         outcome = Outcome.SUCCESS
         if previous_status is None and operation.kind is OperationKind.ROTATE:
-            action = Action.CREDENTIAL_ROTATE_BEGIN
-        elif operation.status is OperationStatus.FINISHED:
+            events.append(
+                CredentialEvent(
+                    Action.CREDENTIAL_ROTATE_BEGIN, Outcome.SUCCESS, "credential", before, after
+                )
+            )
+        # An operation first saved already terminal still gets its closing event.
+        if operation.status is OperationStatus.FINISHED:
             action = _operation_action(operation)
         elif operation.status is OperationStatus.ABANDONED:
             action, outcome = Action.CREDENTIAL_OPERATION_ABANDONED, Outcome.FAILURE
@@ -186,12 +196,12 @@ class CredentialAuditObserver:
             credential=credential,
             operation=operation,
         ):
-            event = self._event(credential.tenant_id, credential.scope_key, implied)
+            event = self._event(credential.tenant_id, _bounded_id(credential.scope_key), implied)
             await append(session, with_trace(event))
 
     async def orphan_deleted(self, tenant_id: UUID, adapter: str, name: str) -> None:
         """Write `credential.orphan.delete`; `name` is the platform credential name."""
-        printable = "".join(c for c in name if c.isprintable())[:_MAX_RESOURCE_ID]
+        printable = _bounded_id(name)
         implied = CredentialEvent(
             Action.CREDENTIAL_ORPHAN_DELETE,
             Outcome.SUCCESS,

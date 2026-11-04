@@ -60,7 +60,7 @@ from trustbridge.audit import (
     purge_expired,
 )
 from trustbridge.audit.credentials import CredentialAuditObserver
-from trustbridge.rbac import Denial, Role
+from trustbridge.audit.denial import Denial
 from trustbridge.tenancy import install_tenant_hook, tenant_session
 
 pytestmark = pytest.mark.integration
@@ -699,7 +699,7 @@ async def test_a_denial_is_a_null_tenant_row_that_only_instance_scope_reads(db: 
         sub=sub,
         iss="https://idp.example",
         reason="tenant_not_granted",
-        required_role=Role.OPERATOR,
+        required_role="operator",
         scope="tenant",
         tenant_id=requested,
         source_ip="203.0.113.4",

@@ -26,7 +26,7 @@ from trustbridge.audit import (
     emit,
     with_trace,
 )
-from trustbridge.rbac import Denial, Role
+from trustbridge.audit.denial import Denial
 from trustbridge.tenancy import current_tenant
 
 TRACE = 0x0AF7651916CD43DD8448EB211C80319C
@@ -152,7 +152,7 @@ def _denial(**overrides: Any) -> Denial:  # noqa: ANN401
         "sub": "sub-9",
         "iss": "https://idp.example",
         "reason": "role_missing",
-        "required_role": Role.OPERATOR,
+        "required_role": "operator",
         "scope": "instance",
         "tenant_id": None,
         "source_ip": "203.0.113.4",
@@ -195,6 +195,18 @@ async def test_a_tenant_denial_names_the_requested_tenant_in_resource_id() -> No
     assert (event.resource_type, event.resource_id, event.tenant_id) == ("tenant", requested, None)
     assert event.after is not None
     assert event.after["reason"] == "tenant_not_granted"
+
+
+async def test_a_hostile_sub_and_iss_are_cleaned_so_the_denial_is_still_recorded() -> None:
+    """An oversized or control-character claim must not turn the 403 into an invalid event."""
+    writer = FakeWriter()
+    await AuditDenials(cast("AuditWriter", writer)).denied(
+        _denial(sub="a\x00" + "s" * 400, iss="https://" + "i" * 700)
+    )
+    (event,) = writer.events
+    assert event.actor_sub == "a" + "s" * 254
+    assert event.actor_iss is not None
+    assert len(event.actor_iss) == 512
 
 
 async def test_a_tenant_denial_for_a_malformed_id_records_no_resource_id() -> None:

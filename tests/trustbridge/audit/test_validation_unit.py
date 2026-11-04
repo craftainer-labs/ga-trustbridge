@@ -193,6 +193,27 @@ def test_scrub_text_masks_credential_shapes(text: str) -> None:
     assert "[REDACTED]" in scrubbed
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "access_token=hunter2",
+        "client_secret=hunter2",
+        '{"token": "hunter2"}',
+        '"password":"hunter2"',
+    ],
+)
+def test_scrub_text_masks_short_values_behind_compound_and_quoted_keys(text: str) -> None:
+    """The key may be part of a longer word or quoted, and the value may be short."""
+    assert "hunter2" not in scrub_text(text)
+
+
+def test_project_scrubs_string_values() -> None:
+    """Every allow-listed string goes through `scrub_text`, not just a length cut."""
+    got = project("tenant", {"state": "bad\x00 token=hunter2"})
+    assert "hunter2" not in got["state"]
+    assert "\x00" not in got["state"]
+
+
 def test_scrub_text_drops_control_characters_and_bounds_length() -> None:
     """Newlines would forge log-style lines; length is bounded."""
     assert scrub_text("one\ntwo\x00three") == "one two three"

@@ -2,8 +2,8 @@
 
 Events are built from an **allow-list per resource shape**: `project` copies only the named
 fields of a source mapping, so a new column is absent from the audit until someone adds it here.
-Values are scalars only (nested data is refused), strings are bounded, and free text goes through
-`scrub_text` first. An unknown shape is an error (fail closed), never an unfiltered dump.
+Values are scalars only (nested data is refused) and every string goes through `scrub_text`
+(control characters dropped, secret shapes masked, length bounded). An unknown shape is an error (fail closed), never an unfiltered dump.
 """
 
 import math
@@ -20,8 +20,8 @@ REDACTED = "[REDACTED]"
 
 # Credential-shaped `key=value` / `key: value` pairs and long opaque runs, masked in free text.
 _SECRET_PAIR = re.compile(
-    r"(?i)\b(token|password|passwd|secret|authorization|credential|api[_-]?key|private[_-]?key)"
-    r"(\s*[=:]\s*|\s+)(?:(?:bearer|basic)\s+)?\S+"
+    r"(?i)(token|password|passwd|secret|authorization|credential|api[_-]?key|private[_-]?key)"
+    r"[\"']?(\s*[=:]\s*|\s+)[\"']?(?:(?:bearer|basic)\s+)?\S+"
 )
 _OPAQUE_RUN = re.compile(r"[A-Za-z0-9+/_=-]{40,}")
 
@@ -74,7 +74,7 @@ def _scalar(key: str, value: Any) -> Any:  # noqa: ANN401 -- a JSON scalar of an
             raise ValueError(f"{key} is not a finite number")
         return value
     if isinstance(value, str):
-        return truncate(str(value))
+        return scrub_text(value)
     if isinstance(value, datetime):
         return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     if isinstance(value, UUID):

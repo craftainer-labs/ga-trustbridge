@@ -135,9 +135,9 @@ class InstallationHandlers:
         info = await self._lookup.fetch(ctx.host, installation_id)
         if info is None:  # gone: never create or re-activate a tenant for it
             gone = await self._store.set_installation_state(ctx.host, installation_id, "deleted")
+            self._notify(ctx.host, installation_id)  # before the audit write: never gated on it
             if gone is not None:
                 await self._record(ctx, gone, "deleted")
-            self._notify(ctx.host, installation_id)
             return
         tenant_id = await self._store.upsert_installation(
             ctx.host,
@@ -150,8 +150,8 @@ class InstallationHandlers:
             await self._store.apply_repository_changes(
                 tenant_id, self._repos(ctx.payload.get("repositories")), []
             )
+        self._notify(ctx.host, installation_id)  # before the audit write: never gated on it
         await self._record(ctx, tenant_id, "suspended" if info.suspended else "active")
-        self._notify(ctx.host, installation_id)
         if not info.suspended:
             await self._scheduler.schedule(tenant_id)
 
@@ -160,12 +160,13 @@ class InstallationHandlers:
         if self._audit is None:
             return
         sender = ctx.payload.get("sender") or {}
-        sender_id = sender.get("id")
+        raw_id = sender.get("id")
+        sender_id = raw_id if isinstance(raw_id, int) and not isinstance(raw_id, bool) else None
         await self._audit.tenant_synced(
             tenant_id=tenant_id,
             state=state,
             delivery_id=ctx.delivery_id,
-            sender_id=sender_id if isinstance(sender_id, int) else None,
+            sender_id=sender_id,
         )
 
     def _notify(self, host: str, installation_id: int) -> None:

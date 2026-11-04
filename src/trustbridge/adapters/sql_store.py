@@ -243,6 +243,7 @@ class SqlCredentialStore:
                 AdapterCredentialRow.adapter == credential.adapter,
                 AdapterCredentialRow.scope_key == credential.scope_key,
             )
+            .with_for_update()
         )
         status = (
             None
@@ -250,7 +251,7 @@ class SqlCredentialStore:
             else await session.scalar(
                 select(CredentialOperationRow.status).where(
                     CredentialOperationRow.id == operation.id
-                )
+                ).with_for_update()
             )
         )
         return (

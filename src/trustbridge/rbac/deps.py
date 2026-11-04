@@ -22,6 +22,7 @@ from uuid import UUID
 from fastapi import Depends, HTTPException, Request, status
 
 from app.oidc import bearer_challenge, get_current_claims
+from trustbridge.audit.denial import Denial, DenialSink
 from trustbridge.rbac.claims import build_principal
 from trustbridge.rbac.model import Principal, Role, TenantRef, instance_roles, tenant_roles
 
@@ -41,32 +42,6 @@ class TenantAccess(Protocol):
 
     def tenant_context(self, tenant_id: UUID) -> AbstractContextManager[None]:
         """`trustbridge.tenancy.tenant_context(tenant_id)`."""
-        ...
-
-
-@dataclass(frozen=True, slots=True)
-class Denial:
-    """An authorization denial of an authenticated principal, as the audit log needs it.
-
-    `tenant_id` is the requested tenant id when the route is tenant-scoped and the path value is
-    a canonical UUID, else None. `source_ip` and `request_id` are None when absent or malformed.
-    """
-
-    sub: str
-    iss: str | None
-    reason: Literal["role_missing", "tenant_not_granted"]
-    required_role: Role
-    scope: Literal["instance", "tenant"]
-    tenant_id: str | None
-    source_ip: str | None
-    request_id: str | None
-
-
-class DenialSink(Protocol):
-    """Where denials go (`trustbridge.audit.emit.AuditDenials`); the dependency awaits it."""
-
-    async def denied(self, denial: Denial) -> None:
-        """Record the denial. A failure propagates: the request ends in an error, not a pass."""
         ...
 
 
@@ -186,7 +161,7 @@ def require_role(
                         sub=principal.sub,
                         iss=principal.iss,
                         reason=reason,
-                        required_role=role,
+                        required_role=role.value,
                         scope="instance" if tenant_param is None else "tenant",
                         tenant_id=tenant_id,
                         source_ip=_source_ip(request),

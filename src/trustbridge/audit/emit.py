@@ -17,11 +17,16 @@ from opentelemetry import trace
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.audit.actions import Action, SystemActor
-from trustbridge.audit.model import ActorType, AuditEvent, Outcome
+from trustbridge.audit.denial import Denial
+from trustbridge.audit.model import TEXT_LIMITS, ActorType, AuditEvent, Outcome
 from trustbridge.audit.redact import project
 from trustbridge.audit.store import append
-from trustbridge.rbac.deps import Denial
 from trustbridge.tenancy.context import tenant_context
+
+
+def _printable(value: str, limit: int) -> str:
+    """`value` without non-printable characters, cut to `limit` (a hostile claim stays valid)."""
+    return "".join(c for c in value if c.isprintable())[:limit]
 
 
 def current_trace_id() -> str | None:
@@ -87,7 +92,7 @@ class TenantSyncAudit:
 
 
 class AuditDenials:
-    """Records `authz.denied` for an authenticated principal (`trustbridge.rbac.DenialSink`).
+    """Records `authz.denied` for an authenticated principal (`trustbridge.audit.denial.DenialSink`).
 
     The row has a **null** `tenant_id` (no tenant context exists yet and only instance-scoped
     auditors see denials) and its own transaction. A tenant route puts the requested tenant id
@@ -104,12 +109,14 @@ class AuditDenials:
         if denial.scope == "tenant":
             resource_type, resource_id = "tenant", denial.tenant_id
         else:
-            resource_type, resource_id = "role", denial.required_role.value
+            resource_type, resource_id = "role", denial.required_role
         await self._writer.record(
             AuditEvent(
                 actor_type=ActorType.USER,
-                actor_sub=denial.sub,
-                actor_iss=denial.iss,
+                actor_sub=_printable(denial.sub, TEXT_LIMITS["actor_sub"]),
+                actor_iss=None
+                if denial.iss is None
+                else _printable(denial.iss, TEXT_LIMITS["actor_iss"]),
                 action=Action.AUTHZ_DENIED,
                 resource_type=resource_type,
                 outcome=Outcome.DENIED,
@@ -120,7 +127,7 @@ class AuditDenials:
                     "authz_denial",
                     {
                         "reason": denial.reason,
-                        "required_role": denial.required_role.value,
+                        "required_role": denial.required_role,
                         "scope": denial.scope,
                     },
                 ),

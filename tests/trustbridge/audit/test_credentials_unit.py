@@ -126,6 +126,14 @@ def test_a_new_rotate_operation_is_a_begin_event_with_before_and_after() -> None
     }
 
 
+def test_a_rotate_first_saved_already_finished_gets_begin_and_finish() -> None:
+    """An operation seen first in a terminal status still opens and closes in the log."""
+    op = _op(OperationKind.ROTATE, OperationStatus.FINISHED, base_kind="secret", base=OLD)
+    assert _actions(
+        previous_kind="secret", previous_status=None, credential=SECRET_NOW, operation=op
+    ) == [Action.CREDENTIAL_ROTATE_BEGIN, Action.CREDENTIAL_ROTATE_FINISH]
+
+
 def test_a_begin_without_a_base_state_has_no_before() -> None:
     """The first operation on a scope has nothing before it."""
     op = _op(OperationKind.ROTATE, OperationStatus.INTENT)
