@@ -46,6 +46,8 @@ class HarborClient:
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         """Build the session; nothing is sent until `call`."""
+        # Numeric project ids resolved during this session: one operation, one lookup per project.
+        self.project_ids: dict[str, int] = {}
         self._base = base_url.rstrip("/")
         self._http = httpx.AsyncClient(
             auth=httpx.BasicAuth(username, password.get_secret_value()),

@@ -470,7 +470,7 @@ class HarborAdapter:
 
     @staticmethod
     async def _pages(c: HarborClient, path: str, query: str) -> list[JsonObj]:
-        """Read every page of a listing; a 404 (an absent project) is an empty listing."""
+        """Read every page of a listing; a 404 (an absent project) ends it with what was read."""
         items: list[JsonObj] = []
         for page in range(1, MAX_PAGES + 1):
             params = {"q": query, "page_size": PAGE_SIZE, "page": str(page)}
@@ -485,47 +485,82 @@ class HarborAdapter:
         raise AdapterError(False, msg)
 
     @staticmethod
-    async def _project_id(c: HarborClient, project: str) -> int | None:
-        """Return the numeric id of a project (`Project.project_id`), or None when absent."""
+    async def _project_id(c: HarborClient, project: str, *, required: bool = True) -> int | None:
+        """Return the numeric id of a project (`Project.project_id`), read once per session.
+
+        An absent project is a non-retryable error naming it: the credential project is operator
+        and tenant configuration, so a 404 is a setup problem, not an empty listing. Deletes pass
+        `required=False` and get None instead (Harbor deletes a project's robots with it).
+        """
+        cached = c.project_ids.get(project)
+        if cached is not None:
+            return cached
         found = await c.call("GET", f"{API}/projects/{seg(project)}", accept=NOT_FOUND)
         if found.status_code == HTTP_NOT_FOUND:
-            return None
+            if not required:
+                return None
+            msg = (
+                f"Harbor credential project {project!r} does not exist; create it "
+                "(or fix the connection's project_key) and reconcile again"
+            )
+            raise AdapterError(False, msg)
         project_id = json_object(found).get("project_id")
         if not isinstance(project_id, int) or isinstance(project_id, bool) or project_id <= 0:
             raise AdapterError(False, "Harbor returned a project without a project_id")
+        c.project_ids[project] = project_id
         return project_id
 
     @staticmethod
-    async def _robots(c: HarborClient, project: str, name_part: str) -> list[JsonObj]:
+    async def _robots(
+        c: HarborClient, project: str, name_part: str, *, required: bool = True
+    ) -> list[JsonObj]:
         """List the robots of one project whose name contains `name_part`.
 
         Harbor's ListRobot handler requires `ProjectID` next to `Level=project` (a missing one is
-        a 400); an absent project has no robots.
+        a 400), so the project id is read first (and must exist unless `required` is False, which
+        gives an empty listing).
         """
-        project_id = await HarborAdapter._project_id(c, project)
+        project_id = await HarborAdapter._project_id(c, project, required=required)
         if project_id is None:
             return []
         query = f"Level=project,ProjectID={project_id},name=~{name_part}"
         return await HarborAdapter._pages(c, f"{API}/robots", query)
 
     async def _find_robot(
-        self, c: HarborClient, project: str, name: str, robot_id: str | None = None
+        self,
+        c: HarborClient,
+        project: str,
+        name: str,
+        robot_id: str | None = None,
+        *,
+        required: bool = True,
     ) -> JsonObj | None:
         """Return the robot `name` of `project`; its full name is `<prefix><project>+<name>`.
 
         A recorded `robot_id` is read directly (`GET /robots/{id}`); that robot counts only when
-        its name and project still match (a renamed or moved one is not ours). Only an id Harbor
-        no longer knows falls back to the project listing. Callers check the marker.
+        it still passes every ownership check (tenant prefix, name, project, marker). An id
+        Harbor no longer knows, or one that now names another robot, falls back to the project
+        listing, which applies the name and project checks. A robot found by id that fails the
+        checks is never returned. Callers check the marker of a listed robot.
         """
         if robot_id is not None:
             got = await c.call("GET", f"{API}/robots/{seg(robot_id)}", accept=NOT_FOUND)
             if got.status_code != HTTP_NOT_FOUND:
                 robot = json_object(got)
-                return robot if self._robot_matches(robot, project, name) else None
-        for robot in await self._robots(c, project, name):
+                if self._recorded_robot_ok(robot, project, name):
+                    return robot
+        for robot in await self._robots(c, project, name, required=required):
             if self._robot_matches(robot, project, name):
                 return robot
         return None
+
+    def _recorded_robot_ok(self, robot: JsonObj, project: str, name: str) -> bool:
+        """Whether the robot a recorded id names is still the tenant's marked robot `name`."""
+        return (
+            name.startswith(tenant_prefix(self._config.tenant.id))
+            and self._robot_matches(robot, project, name)
+            and robot.get("description") == MARKER
+        )
 
     @staticmethod
     def _robot_matches(robot: JsonObj, project: str, name: str) -> bool:
@@ -630,14 +665,18 @@ class HarborAdapter:
     async def _delete_slot(self, c: HarborClient, slot: CredentialSlot) -> bool:
         """Delete the robot a slot names, only inside the credential project. True if it went.
 
-        The slot's recorded id is read first, but the robot must carry this tenant's name prefix,
-        sit in the project this tenant owns (the derived `default` project or the operator's
-        `project_key`) and carry the marker; anything else is left alone.
+        The slot's recorded id is read first. When it no longer names this tenant's marked robot
+        in the credential project, the name lookup in that project is used instead. The robot must
+        carry this tenant's name prefix, sit in the project this tenant owns (the derived
+        `default` project or the operator's `project_key`) and carry the marker; anything else is
+        left alone.
         """
         if not slot.name.startswith(tenant_prefix(self._config.tenant.id)):
             return False
         project = self._project_for_credentials()
-        robot = await self._find_robot(c, project, slot.name, slot.ref.get("robot_id"))
+        robot = await self._find_robot(
+            c, project, slot.name, slot.ref.get("robot_id"), required=False
+        )
         if robot is None or robot.get("description") != MARKER:
             return False
         gone = await c.call("DELETE", f"{API}/robots/{self._robot_id(robot)}", accept=NOT_FOUND)

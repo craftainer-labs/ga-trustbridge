@@ -1,0 +1,180 @@
+{
+ "source": "Recorded-id mismatch fallbacks (NG5bg). Built from Harbor's published swagger like credentials.json: GET /robots/{id} answers a Robot, GET /projects/{name} a Project, and the project robot listing needs Level=project,ProjectID=<id>.",
+ "scenarios": {
+  "mismatch_ensure": {
+   "exchanges": [
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/robots/11"},
+     "response": {"status": 200, "json": {"id": 11, "name": "robot$${project}+renamed-slot", "description": "managed by trustbridge"}}
+    },
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/projects/${project}"},
+     "response": {"status": 200, "json": {"project_id": 7, "name": "${project}", "metadata": {"public": "false"}}}
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/robots",
+      "query": {"q": "Level=project,ProjectID=7,name=~${cred}", "page_size": "100", "page": "1"}
+     },
+     "response": {"status": 200, "json": [{"id": 12, "name": "robot$${project}+${cred}", "description": "managed by trustbridge"}]}
+    }
+   ]
+  },
+  "mismatch_rotate": {
+   "exchanges": [
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/robots/11"},
+     "response": {"status": 200, "json": {"id": 11, "name": "robot$other+${cred}", "description": "managed by trustbridge"}}
+    },
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/projects/${project}"},
+     "response": {"status": 200, "json": {"project_id": 7, "name": "${project}", "metadata": {"public": "false"}}}
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/robots",
+      "query": {"q": "Level=project,ProjectID=7,name=~${cred}", "page_size": "100", "page": "1"}
+     },
+     "response": {"status": 200, "json": [{"id": 12, "name": "robot$${project}+${cred}", "description": "managed by trustbridge"}]}
+    },
+    {
+     "request": {"method": "PATCH", "path": "/api/v2.0/robots/12", "json": {"secret": ""}},
+     "response": {"status": 200, "json": {"secret": "refreshed-secret-value"}}
+    }
+   ]
+  },
+  "unmarked_create": {
+   "exchanges": [
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/robots/11"},
+     "response": {"status": 200, "json": {"id": 11, "name": "robot$other+${cred}", "description": "someone else's"}}
+    },
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/projects/${project}"},
+     "response": {"status": 200, "json": {"project_id": 7, "name": "${project}", "metadata": {"public": "false"}}}
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/robots",
+      "query": {"q": "Level=project,ProjectID=7,name=~${cred}", "page_size": "100", "page": "1"}
+     },
+     "response": {"status": 200, "json": []}
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/api/v2.0/robots",
+      "json": {
+       "name": "${cred}",
+       "description": "managed by trustbridge",
+       "level": "project",
+       "duration": 90,
+       "disable": false,
+       "permissions": [
+        {
+         "kind": "project",
+         "namespace": "${project}",
+         "access": [
+          {"resource": "repository", "action": "pull", "effect": "allow"},
+          {"resource": "repository", "action": "push", "effect": "allow"}
+         ]
+        }
+       ]
+      }
+     },
+     "response": {
+      "status": 201,
+      "json": {"id": 13, "name": "robot$${project}+${cred}", "secret": "robot-secret-value", "expires_at": 1801310400}
+     }
+    }
+   ]
+  },
+  "finish_fallback": {
+   "exchanges": [
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/robots/10"},
+     "response": {"status": 200, "json": {"id": 10, "name": "robot$moved+${prev}", "description": "managed by trustbridge"}}
+    },
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/projects/${project}"},
+     "response": {"status": 200, "json": {"project_id": 7, "name": "${project}", "metadata": {"public": "false"}}}
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/robots",
+      "query": {"q": "Level=project,ProjectID=7,name=~${prev}", "page_size": "100", "page": "1"}
+     },
+     "response": {"status": 200, "json": [{"id": 12, "name": "robot$${project}+${prev}", "description": "managed by trustbridge"}]}
+    },
+    {
+     "request": {"method": "DELETE", "path": "/api/v2.0/robots/12"},
+     "response": {"status": 200}
+    }
+   ]
+  },
+  "finish_fallback_foreign": {
+   "exchanges": [
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/robots/10"},
+     "response": {"status": 200, "json": {"id": 10, "name": "robot$moved+${prev}", "description": "managed by trustbridge"}}
+    },
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/projects/${project}"},
+     "response": {"status": 200, "json": {"project_id": 7, "name": "${project}", "metadata": {"public": "false"}}}
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/robots",
+      "query": {"q": "Level=project,ProjectID=7,name=~${prev}", "page_size": "100", "page": "1"}
+     },
+     "response": {"status": 200, "json": [{"id": 12, "name": "robot$${project}+${prev}", "description": "someone else's"}]}
+    }
+   ]
+  },
+  "delete_two_by_listing": {
+   "exchanges": [
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/projects/${project}"},
+     "response": {"status": 200, "json": {"project_id": 7, "name": "${project}", "metadata": {"public": "false"}}}
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/robots",
+      "query": {"q": "Level=project,ProjectID=7,name=~${cred}", "page_size": "100", "page": "1"}
+     },
+     "response": {"status": 200, "json": [{"id": 11, "name": "robot$${project}+${cred}", "description": "managed by trustbridge"}]}
+    },
+    {
+     "request": {"method": "DELETE", "path": "/api/v2.0/robots/11"},
+     "response": {"status": 200}
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/api/v2.0/robots",
+      "query": {"q": "Level=project,ProjectID=7,name=~${prev}", "page_size": "100", "page": "1"}
+     },
+     "response": {"status": 200, "json": [{"id": 10, "name": "robot$${project}+${prev}", "description": "managed by trustbridge"}]}
+    },
+    {
+     "request": {"method": "DELETE", "path": "/api/v2.0/robots/10"},
+     "response": {"status": 200}
+    }
+   ]
+  },
+  "delete_project_missing": {
+   "exchanges": [
+    {
+     "request": {"method": "GET", "path": "/api/v2.0/projects/${project}"},
+     "response": {"status": 404, "json": {"errors": [{"code": "NOT_FOUND", "message": "project not found"}]}}
+    }
+   ]
+  }
+ }
+}
