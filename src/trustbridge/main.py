@@ -17,6 +17,7 @@ extension point: `install` fails loudly if it is missing, and the smoke test gua
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ from trustbridge.github.availability import HostChecker
 from trustbridge.github.ports import SecretReader
 from trustbridge.github.webhook_secrets import WebhookSecretResolver
 from trustbridge.settings import TrustbridgeSettings, get_trustbridge_settings
-from trustbridge.tenancy import install_tenant_hook, register_role_check
+from trustbridge.tenancy import budget_left, install_tenant_hook, register_role_check
 from trustbridge.webhooks.argocd import router as argocd_router
 from trustbridge.webhooks.ingress import ArgocdRuntime, WebhookRuntime
 from trustbridge.webhooks.ingress import router as webhook_router
@@ -103,14 +104,20 @@ def install(
     return app
 
 
-async def wait_gates(core: Core, settings: TrustbridgeSettings) -> None:
-    """Wait for the schema, then check the database role (ADR 0031; the role check needs it)."""
+async def wait_gates(
+    core: Core, settings: TrustbridgeSettings, monotonic: Callable[[], float] = time.monotonic
+) -> None:
+    """Wait for the schema, then check the database role (ADR 0031; the role check needs it).
+
+    Both waits share one `SCHEMA_WAIT_SECONDS` budget counted from here.
+    """
+    started = monotonic()
     await core.gate.wait_or_exit(
         timeout=settings.schema_wait_seconds, poll=settings.schema_poll_seconds
     )
     await core.roles.background(
         production=settings.production,
-        timeout=settings.schema_wait_seconds,
+        timeout=budget_left(settings.schema_wait_seconds, started, monotonic),
         poll=settings.schema_poll_seconds,
     )
 

@@ -65,5 +65,11 @@ schema wait (`main.wait_gates`); the worker and the reconciler share `worker.run
 | `MODE=production` | `/ready` not ready with the reason; exits 1 after `SCHEMA_WAIT_SECONDS` | waits, then exits 1 after `SCHEMA_WAIT_SECONDS` |
 | otherwise | `/ready` not ready with the reason, a warning is logged, polling continues, never exits | one check, a warning is logged, processing continues |
 
+The seven RLS tables are looked up schema-qualified (`role_check.APP_SCHEMA`, `public`) with
+`to_regclass`, as plain or partitioned tables, never through the `search_path`. An expected table
+that cannot be found is itself not ready (the reason names it), so a superuser is never passed by
+not seeing the tables. The schema wait and the role wait share one `SCHEMA_WAIT_SECONDS` budget
+counted from start-up.
+
 Dev databases are often reached as a superuser, so outside production the check only reports.
 `MODE=mock` is always ready and touches no database.

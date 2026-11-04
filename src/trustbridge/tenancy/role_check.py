@@ -3,14 +3,18 @@
 A superuser, or a role with `BYPASSRLS`, ignores every row-level-security policy. Once any RLS
 table is forced (the six tenant-owned tables from release N+1, `audit_events` from its release),
 the api, the worker and the reconciler must not run as such a role. This module reads the
-process's `current_user` attributes and whether a table is forced, and decides.
+process's `current_user` attributes and whether a table is forced, and decides. The tables are
+looked up schema-qualified (`APP_SCHEMA`), never through the `search_path`; once the schema gate is
+satisfied an expected table that cannot be found (or is not a table) is itself unsafe, never
+"not forced", so the check cannot pass a superuser by failing to see the tables.
 
 The decision is the pure function `evaluate`. `RoleGate` mirrors `worker.schema.SchemaGate`
 (`current`, `refresh`, `wait`) and `RoleCheck` is the readiness check the api registers next to
 the schema check. A process whose role is unsafe reports not ready with the reason; **in
-production** it exits non-zero after `SCHEMA_WAIT_SECONDS`, and **outside production** it only
-reports (and logs a warning): a dev database is often reached as a superuser and processing
-continues. The check is skipped (ready) while no RLS table is forced yet.
+production** it exits non-zero once `SCHEMA_WAIT_SECONDS` (one budget shared with the schema wait,
+counted from start-up) have passed. **Outside production** the worker and the reconciler log a
+warning and continue, and the api stays not ready with the reason: a dev database is often reached
+as a superuser. The check is skipped (ready) while no RLS table is forced yet.
 """
 
 import asyncio
@@ -38,11 +42,18 @@ RLS_TABLES = (
     "credential_operations",
     "audit_events",
 )
+# The schema the app's tables live in (the migrations create them unqualified, in `public`).
+APP_SCHEMA = "public"
 UNREADABLE_REASON = "the database role's attributes could not be read"
+# `to_regclass` is NULL for a name it cannot find; 'r' and 'p' are plain and partitioned tables.
 _FACTS = text(
     "SELECT r.rolname, r.rolsuper, r.rolbypassrls, EXISTS ("
-    "SELECT 1 FROM pg_class c WHERE c.relforcerowsecurity AND c.relkind = 'r' "
-    "AND pg_table_is_visible(c.oid) AND c.relname::text = ANY(CAST(:tables AS text[]))) "
+    "SELECT 1 FROM unnest(CAST(:tables AS text[])) t JOIN pg_class c "
+    "ON c.oid = to_regclass(format('%I.%I', CAST(:schema AS text), t))::oid "
+    "WHERE c.relforcerowsecurity AND c.relkind IN ('r', 'p')), ARRAY("
+    "SELECT t::text FROM unnest(CAST(:tables AS text[])) t LEFT JOIN pg_class c "
+    "ON c.oid = to_regclass(format('%I.%I', CAST(:schema AS text), t))::oid "
+    "WHERE c.oid IS NULL OR c.relkind NOT IN ('r', 'p') ORDER BY t) "
     "FROM pg_roles r WHERE r.rolname = current_user"
 )
 
@@ -55,6 +66,7 @@ class RoleFacts:
     superuser: bool
     bypassrls: bool
     forced: bool  # whether any RLS table is forced
+    missing: tuple[str, ...] = ()  # expected tables not found as tables in `APP_SCHEMA`
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +78,15 @@ class RoleVerdict:
 
 
 def evaluate(facts: RoleFacts) -> RoleVerdict:
-    """Unsafe only when an RLS table is forced and the role is a superuser or has BYPASSRLS."""
+    """Unsafe when an RLS table is missing, or one is forced and the role bypasses RLS."""
+    if facts.missing:
+        return RoleVerdict(
+            ok=False,
+            reason=(
+                f"RLS table(s) {', '.join(facts.missing)} not found in schema {APP_SCHEMA}; "
+                "the database role cannot be checked"
+            ),
+        )
     if not facts.forced:
         return RoleVerdict(ok=True)
     problems = [
@@ -83,6 +103,16 @@ def evaluate(facts: RoleFacts) -> RoleVerdict:
             "row-level security; run as a role that is neither"
         ),
     )
+
+
+def budget_left(
+    timeout: float, started: float, monotonic: Callable[[], float] = time.monotonic
+) -> float:
+    """What is left of `timeout` seconds counted from `started` (never negative).
+
+    The schema wait and the role wait share one `SCHEMA_WAIT_SECONDS` budget from start-up.
+    """
+    return max(0.0, timeout - (monotonic() - started))
 
 
 class RoleCheckTimeout(Exception):  # noqa: N818 -- a terminal condition, named for what it says
@@ -107,9 +137,12 @@ class RoleGate:
             return None
         try:
             async with self._sf() as session:
-                row = (await session.execute(_FACTS, {"tables": list(RLS_TABLES)})).one()
-            user, superuser, bypassrls, forced = row
-            return RoleFacts(str(user), bool(superuser), bool(bypassrls), bool(forced))
+                params = {"tables": list(RLS_TABLES), "schema": APP_SCHEMA}
+                row = (await session.execute(_FACTS, params)).one()
+            user, superuser, bypassrls, forced, missing = row
+            return RoleFacts(
+                str(user), bool(superuser), bool(bypassrls), bool(forced), tuple(map(str, missing))
+            )
         except Exception:
             logger.warning("database role attributes unreadable", exc_info=True)
             return None

@@ -14,6 +14,7 @@ import asyncio
 import logging
 import signal
 import socket
+import time
 import uuid
 from collections.abc import Callable, Coroutine
 from contextlib import AsyncExitStack
@@ -31,7 +32,7 @@ from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.models import SqlRegistrationStore
 from trustbridge.github.runtime import HostRuntime, RuntimeDeps, build_host_runtime
 from trustbridge.settings import TrustbridgeSettings, load_trustbridge_settings
-from trustbridge.tenancy import RoleGate, install_tenant_hook
+from trustbridge.tenancy import RoleGate, budget_left, install_tenant_hook
 from trustbridge.worker.deliveries import DeliveryStore, InMemoryDeliveryStore, PgDeliveryStore
 from trustbridge.worker.lease import InMemoryLeaseStore, LeaseManager, LeaseStore, PgLeaseStore
 from trustbridge.worker.ports import (
@@ -211,6 +212,7 @@ async def run_process(
         )
         if core.queue is None or core.relay is None:  # pragma: no cover -- a client was given
             raise RuntimeError("the stream queue is not configured")
+        started = time.monotonic()
         try:
             await core.gate.wait(
                 timeout=settings.schema_wait_seconds, poll=settings.schema_poll_seconds
@@ -221,7 +223,7 @@ async def run_process(
         # ADR 0031: production waits for a safe database role and exits; elsewhere it only warns
         if not await core.roles.startup(
             production=settings.production,
-            timeout=settings.schema_wait_seconds,
+            timeout=budget_left(settings.schema_wait_seconds, started),
             poll=settings.schema_poll_seconds,
         ):
             return 1

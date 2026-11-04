@@ -19,6 +19,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import Settings
 from trustbridge.tenancy import RoleGate
+from trustbridge.tenancy.role_check import RLS_TABLES
 
 pytestmark = pytest.mark.integration
 
@@ -50,7 +51,7 @@ def _url(user: str, password: str, database: str) -> URL:
 
 @pytest.fixture
 async def scratch() -> AsyncIterator[Scratch]:
-    """A scratch database with an unforced `audit_events` table and two login roles."""
+    """A scratch database with the seven unforced RLS tables and two login roles."""
     s = Settings()
     suffix = uuid4().hex[:10]
     name, bypass, normal = f"tb_role_{suffix}", f"tb_rb_{suffix}", f"tb_rn_{suffix}"
@@ -76,8 +77,9 @@ async def scratch() -> AsyncIterator[Scratch]:
     )
     try:
         async with admin.begin() as conn:
-            await conn.execute(text("CREATE TABLE audit_events (tenant_id uuid)"))
-            await conn.execute(text("ALTER TABLE audit_events ENABLE ROW LEVEL SECURITY"))
+            for table in RLS_TABLES:
+                await conn.execute(text(f"CREATE TABLE {table} (tenant_id uuid)"))
+                await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
         yield Scratch(name, bypass, normal, admin, server)
     finally:
         await admin.dispose()
@@ -150,3 +152,50 @@ async def test_a_superuser_is_not_ready_once_a_table_is_forced(scratch: Scratch)
     assert not await gate.refresh()
     assert gate.reason is not None
     assert "a superuser" in gate.reason
+
+
+async def test_a_missing_table_is_not_ready_even_for_a_normal_role(scratch: Scratch) -> None:
+    """A table the check expects but cannot find fails closed and is named."""
+    async with scratch.admin.begin() as conn:
+        await conn.execute(text("DROP TABLE scope_leases"))
+    gate, engine = await _gate(scratch, scratch.normal)
+    try:
+        assert not await gate.refresh()
+        assert gate.reason is not None
+        assert "scope_leases" in gate.reason
+    finally:
+        await engine.dispose()
+
+
+async def test_tables_in_another_schema_are_not_found(scratch: Scratch) -> None:
+    """Tables outside `APP_SCHEMA` (even if on the search_path) are not seen: not ready."""
+    async with scratch.admin.begin() as conn:
+        await conn.execute(text("CREATE SCHEMA other"))
+        await conn.execute(text("ALTER TABLE audit_events SET SCHEMA other"))
+        await conn.execute(text("ALTER TABLE other.audit_events FORCE ROW LEVEL SECURITY"))
+        await conn.execute(text(f"ALTER ROLE {scratch.bypass} SET search_path = other, public"))
+    gate, engine = await _gate(scratch, scratch.bypass)
+    try:
+        assert not await gate.refresh()
+        assert gate.reason is not None
+        assert "audit_events" in gate.reason
+    finally:
+        await engine.dispose()
+
+
+async def test_a_forced_partitioned_table_arms_the_check(scratch: Scratch) -> None:
+    """A partitioned table (relkind 'p') counts: a BYPASSRLS role is refused."""
+    async with scratch.admin.begin() as conn:
+        await conn.execute(text("DROP TABLE audit_events"))
+        await conn.execute(
+            text("CREATE TABLE audit_events (tenant_id uuid) PARTITION BY LIST (tenant_id)")
+        )
+        await conn.execute(text("ALTER TABLE audit_events ENABLE ROW LEVEL SECURITY"))
+        await conn.execute(text("ALTER TABLE audit_events FORCE ROW LEVEL SECURITY"))
+    gate, engine = await _gate(scratch, scratch.bypass)
+    try:
+        assert not await gate.refresh()
+        assert gate.reason is not None
+        assert "BYPASSRLS" in gate.reason
+    finally:
+        await engine.dispose()

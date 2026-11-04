@@ -107,21 +107,53 @@ def test_audit_events_counts_as_an_rls_table() -> None:
     assert len(role_module.RLS_TABLES) == 7
 
 
+def test_a_missing_table_is_unsafe_even_for_a_plain_role() -> None:
+    """An expected table that cannot be found fails closed and names the table."""
+    for forced in (True, False):
+        verdict = evaluate(RoleFacts("app", False, False, forced, ("audit_events",)))
+        assert not verdict.ok
+        assert verdict.reason is not None
+        assert "audit_events" in verdict.reason
+        assert role_module.APP_SCHEMA in verdict.reason
+
+
+def test_a_superuser_is_not_passed_by_not_seeing_the_tables() -> None:
+    """All tables missing (wrong schema) reads as unsafe, never as 'nothing forced'."""
+    facts = RoleFacts("postgres", True, False, False, role_module.RLS_TABLES)
+    assert not evaluate(facts).ok
+
+
+def test_the_query_is_schema_qualified_and_accepts_partitioned_tables() -> None:
+    """Tables are resolved with `to_regclass(schema.table)`, never the search_path; 'p' counts."""
+    sql = str(role_module._FACTS)
+    assert "to_regclass" in sql
+    assert "pg_table_is_visible" not in sql
+    assert "('r', 'p')" in sql
+
+
 # --- the gate ------------------------------------------------------------------------------
 
 
 async def test_the_gate_reads_the_row_and_holds_the_verdict() -> None:
     """A safe row makes the gate current; an unsafe one keeps it not ready with the reason."""
-    safe = _gate(("trustbridge_app", False, False, True))
+    safe = _gate(("trustbridge_app", False, False, True, []))
     assert not _current(safe)
     assert await safe.refresh()
     assert _current(safe)
     assert safe.reason is None
-    unsafe = _gate(("postgres", True, False, True))
+    unsafe = _gate(("postgres", True, False, True, []))
     assert not await unsafe.refresh()
     assert not unsafe.current
     assert unsafe.reason is not None
     assert "postgres" in unsafe.reason
+
+
+async def test_a_missing_table_row_makes_the_gate_not_ready_naming_it() -> None:
+    """The query's `missing` column reaches the verdict."""
+    gate = _gate(("trustbridge_app", False, False, False, ["scope_leases"]))
+    assert not await gate.refresh()
+    assert gate.reason is not None
+    assert "scope_leases" in gate.reason
 
 
 async def test_an_unreadable_role_fails_closed() -> None:
@@ -140,25 +172,25 @@ async def test_mock_mode_is_always_ready_and_touches_no_database() -> None:
 
 async def test_wait_returns_when_the_role_is_safe_and_raises_after_the_timeout() -> None:
     """`wait` polls; it raises `RoleCheckTimeout` once the deadline passes."""
-    await _gate(("trustbridge_app", False, False, True)).wait(timeout=1, poll=0)
+    await _gate(("trustbridge_app", False, False, True, [])).wait(timeout=1, poll=0)
     clock = iter([0.0, 0.5, 2.0])
     with pytest.raises(role_module.RoleCheckTimeout, match="superuser"):
-        await _gate(("postgres", True, False, True)).wait(
+        await _gate(("postgres", True, False, True, [])).wait(
             timeout=1, poll=0, monotonic=lambda: next(clock)
         )
 
 
 async def test_production_startup_waits_and_then_says_to_exit() -> None:
     """Production: an unsafe role yields False (exit non-zero) after the timeout."""
-    unsafe = _gate(("postgres", True, False, True))
+    unsafe = _gate(("postgres", True, False, True, []))
     assert not await unsafe.startup(production=True, timeout=0.02, poll=0.005)
-    safe = _gate(("trustbridge_app", False, False, True))
+    safe = _gate(("trustbridge_app", False, False, True, []))
     assert await safe.startup(production=True, timeout=0.02, poll=0.005)
 
 
 async def test_development_startup_only_reports_and_never_blocks() -> None:
     """Outside production an unsafe role is reported not ready, and the process carries on."""
-    unsafe = _gate(("postgres", True, False, True))
+    unsafe = _gate(("postgres", True, False, True, []))
     assert await unsafe.startup(production=False, timeout=0.02, poll=0.005)
     assert not unsafe.current
     assert unsafe.reason is not None
@@ -167,13 +199,13 @@ async def test_development_startup_only_reports_and_never_blocks() -> None:
 async def test_the_api_background_task_exits_only_in_production() -> None:
     """Production exits with 1 after the wait; development keeps polling and never exits."""
     exits: list[int] = []
-    unsafe = _gate(("postgres", True, False, True))
+    unsafe = _gate(("postgres", True, False, True, []))
     await unsafe.background(production=True, timeout=0.02, poll=0.005, exit_process=exits.append)
     assert exits == [1]
-    safe = _gate(("trustbridge_app", False, False, True))
+    safe = _gate(("trustbridge_app", False, False, True, []))
     await safe.background(production=True, timeout=0.02, poll=0.005, exit_process=exits.append)
     assert exits == [1]
-    dev_session = _Session(("postgres", True, False, True))
+    dev_session = _Session(("postgres", True, False, True, []))
     dev = RoleGate(dev_session, mock=False)  # type: ignore[arg-type]
     task = asyncio.create_task(
         dev.background(production=False, timeout=0.02, poll=0.005, exit_process=exits.append)
@@ -181,7 +213,7 @@ async def test_the_api_background_task_exits_only_in_production() -> None:
     await asyncio.sleep(0.05)
     assert not task.done()  # still polling, not ready, not exited
     assert not _current(dev)
-    dev_session.row = ("trustbridge_app", False, False, True)  # the operator fixes the role
+    dev_session.row = ("trustbridge_app", False, False, True, [])  # the operator fixes the role
     await asyncio.wait_for(task, timeout=1)
     assert _current(dev)
     assert exits == [1]
@@ -193,7 +225,7 @@ async def test_the_api_background_task_exits_only_in_production() -> None:
 async def test_the_readiness_check_carries_the_reason() -> None:
     """Unbound or unsafe: unhealthy with a detail; safe: healthy; registering twice is fine."""
     assert not (await RoleCheck().check()).healthy
-    unsafe = _gate(("postgres", True, False, True))
+    unsafe = _gate(("postgres", True, False, True, []))
     await unsafe.refresh()
     registry = HealthRegistry()
     assert register_role_check(registry, unsafe)
@@ -202,7 +234,7 @@ async def test_the_readiness_check_carries_the_reason() -> None:
     assert not result.healthy
     assert result.detail is not None
     assert "postgres" in result.detail
-    safe = _gate(("trustbridge_app", False, False, True))
+    safe = _gate(("trustbridge_app", False, False, True, []))
     await safe.refresh()
     assert not register_role_check(registry, safe)  # already registered: rebinds
     [result] = await registry.run_all()
@@ -228,6 +260,50 @@ async def test_the_api_waits_for_the_schema_then_checks_the_role() -> None:
     settings = make_settings(schema_wait_seconds=3.0, schema_poll_seconds=0.5)
     await main_module.wait_gates(core, settings)  # type: ignore[arg-type]
     assert calls == ["schema:3.0:0.5", "roles:False:3.0:0.5"]
+
+
+async def test_the_schema_and_role_waits_share_one_budget() -> None:
+    """The role wait gets only what the schema wait left of SCHEMA_WAIT_SECONDS."""
+    seen: list[float] = []
+    clock = iter([100.0, 107.0])  # started, then after the schema wait took 7 s
+
+    class Schema:
+        async def wait_or_exit(self, *, timeout: float, poll: float) -> None:
+            return None
+
+    class Roles:
+        async def background(self, *, production: bool, timeout: float, poll: float) -> None:
+            seen.append(timeout)
+
+    core = types.SimpleNamespace(gate=Schema(), roles=Roles())
+    settings = make_settings(schema_wait_seconds=10.0)
+    await main_module.wait_gates(core, settings, lambda: next(clock))  # type: ignore[arg-type]
+    assert seen == [pytest.approx(3.0)]
+    assert role_module.budget_left(10.0, 0.0, lambda: 99.0) == 0.0
+
+
+async def test_the_worker_role_wait_gets_what_the_schema_wait_left(
+    monkeypatch: pytest.MonkeyPatch, key_signers: None
+) -> None:
+    """`run_process` hands the role startup the remaining budget, never a fresh one."""
+    seen: list[float] = []
+
+    async def slow_schema(*_a: object, **_k: object) -> None:
+        await asyncio.sleep(0.2)
+
+    async def capture(_self: RoleGate, *, timeout: float, **_k: object) -> bool:
+        seen.append(timeout)
+        return False
+
+    monkeypatch.setattr(runtime.SchemaGate, "wait", slow_schema)
+    monkeypatch.setattr(RoleGate, "startup", capture)
+    overrides = ProcessOverrides(
+        redis=as_redis(FakeRedis()), checker=FakeHostChecker(), stop=asyncio.Event()
+    )
+    settings = make_settings(schema_wait_seconds=5.0)
+    assert await runtime.run_process("worker", settings, overrides) == 1
+    assert seen
+    assert seen[0] <= 5.0 - 0.2 + 0.01
 
 
 async def test_the_worker_and_reconciler_return_non_zero_when_the_role_stays_unsafe(

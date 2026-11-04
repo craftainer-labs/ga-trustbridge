@@ -8,6 +8,7 @@ from trustbridge.tenancy.role_check import (
     RoleFacts,
     RoleGate,
     RoleVerdict,
+    budget_left,
     evaluate,
     register_role_check,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "RoleVerdict",
     "SweepResult",
     "TenantInfo",
+    "budget_left",
     "current_tenant",
     "evaluate",
     "for_each_tenant",
