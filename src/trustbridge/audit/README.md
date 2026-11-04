@@ -1,8 +1,9 @@
 # trustbridge/audit/
 
-The append-only audit log ([ADR 0032](../../../docs/adrs/0032-audit-log.md), Proposed until the
-admin API reads and the mutating endpoints are in): the storage layer (NG6c), event value
-validation, redaction and the emitters at the call sites that exist today (NG6f). Out of scope
+The append-only audit log ([ADR 0032](../../../docs/adrs/0032-audit-log.md), Accepted
+2026-11-04 with #18 and #21; the remaining flows arrive with NG6d, NG6e and NG6h, per the
+deferred table below): the storage layer (NG6c), event value validation, redaction and the
+emitters at the call sites that exist today (NG6f). Out of scope
 here: the admin API routes serving list and export (NG6d), the mutating endpoints' events (NG6e)
 and tenant deletion (NG6h). SIEM push is a follow-up.
 
@@ -79,6 +80,7 @@ ADR names them, with no emitter:
 | `audit.export` (who exported, the range) and the audit read routes | NG6d |
 | The deletion's own events (0034) | NG6h |
 | Wiring `AuditDenials` into the mounted router | NG6d |
+| The reconciler duty calling `purge_expired` (ADR 0032 "Retention") | NG6h |
 | A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export"). No such timeout exists on main and the engine is the template's (`app.db`) | NG6d (api) with NG6h (deletion batches) |
 
 An operation ending `failed` (rolled back, previous state restored) has no event of its own

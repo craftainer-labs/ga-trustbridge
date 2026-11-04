@@ -190,7 +190,7 @@ The transport is user decision 2 below. The export is:
 `AUDIT_RETENTION_MIN_DAYS` is refused at startup). The reconciler runs the purge as a singleton
 duty (EB-6) through `tb_audit_purge`, in bounded batches so it never holds a long lock
 (`purge_expired` implements the batch loop, one short transaction per batch; the reconciler duty
-that calls it is not wired on main yet). The function refuses a cut-off inside a configured
+that calls it is not wired on main yet; NG6h owns it). The function refuses a cut-off inside a configured
 floor (`AUDIT_RETENTION_MIN_DAYS`, default 90) so a typo cannot erase recent history. The retention
 interacts with EB-15 deletion ([0034](0034-tenant-data-deletion.md)): the deletion's own
 events always survive, and 0034 holds the open decision on the rest of a deleted tenant's
