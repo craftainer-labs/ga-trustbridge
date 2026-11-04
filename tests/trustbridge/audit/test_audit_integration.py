@@ -813,9 +813,14 @@ _LEGACY_INSERT = (
 )
 
 
-async def _snapshot(conn: AsyncConnection) -> dict[str, object]:
-    """Every migration-test row's `on_behalf_of`, by `actor_sub`."""
-    return {row[0]: row[1] for row in (await conn.execute(text(_SNAPSHOT))).all()}
+async def _snapshot(conn: AsyncConnection, step: str) -> dict[str, object]:
+    """Every migration-test row's `on_behalf_of`, by `actor_sub`.
+
+    The comment makes each call a distinct statement: asyncpg's prepared statement for the same
+    text is invalid after the column's type changes.
+    """
+    rows = (await conn.execute(text(f"/* {step} */ {_SNAPSHOT}"))).all()
+    return {row[0]: row[1] for row in rows}
 
 
 async def _migration_steps(conn: AsyncConnection) -> dict[str, object]:
@@ -826,15 +831,15 @@ async def _migration_steps(conn: AsyncConnection) -> dict[str, object]:
     for suffix, value in (("a", "sender=1;delivery=d"), ("b", None), ("c", "garbage")):
         await conn.execute(text(_LEGACY_INSERT), {"sub": f"migration-{suffix}", "v": value})
     await conn.run_sync(_run_migration, "upgrade")
-    steps["upgraded"] = await _snapshot(conn)
+    steps["upgraded"] = await _snapshot(conn, "upgraded")
     await conn.execute(
         text(_OBJECT_INSERT), {"v": json.dumps({"github_sender_id": 9, "delivery_id": "d-9"})}
     )
-    steps["with object"] = await _snapshot(conn)
+    steps["with object"] = await _snapshot(conn, "with object")
     await conn.run_sync(_run_migration, "downgrade")
-    steps["downgraded"] = await _snapshot(conn)
+    steps["downgraded"] = await _snapshot(conn, "downgraded")
     await conn.run_sync(_run_migration, "upgrade")
-    steps["re-upgraded"] = await _snapshot(conn)
+    steps["re-upgraded"] = await _snapshot(conn, "re-upgraded")
     return steps
 
 
