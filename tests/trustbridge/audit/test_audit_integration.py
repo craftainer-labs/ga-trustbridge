@@ -510,9 +510,9 @@ async def test_a_tenant_reads_only_its_own_events_and_instance_scope_reads_all(
         rows = (await session.execute(text("SELECT id FROM audit_events"))).scalars().all()
         assert [UUID(str(i)) for i in rows] == [mine]
     async with db.app() as session:  # instance scope: no context needed (definer function)
-        everything = await list_events(session, AuditQuery(), tenant_id=None)
+        everything = await list_events(session, AuditQuery(), instance_scope=True)
         assert {item.id for item in everything.items} == {mine, theirs, nobody}
-        only_b = await list_events(session, AuditQuery(tenant_id=b), tenant_id=None)
+        only_b = await list_events(session, AuditQuery(tenant_id=b), instance_scope=True)
         assert [item.id for item in only_b.items] == [theirs]
         denied = next(item for item in everything.items if item.id == nobody)
         assert denied.tenant_id is None
@@ -566,7 +566,7 @@ async def test_the_cursor_is_ordered_resumable_and_filters_agree_across_scopes(d
             query = AuditQuery(**extra)
             own = await list_events(session, query, tenant_id=tenant)
             wide = await list_events(
-                session, AuditQuery(**{**extra, "tenant_id": tenant}), tenant_id=None
+                session, AuditQuery(**{**extra, "tenant_id": tenant}), instance_scope=True
             )
             assert [i.id for i in own.items] == [i.id for i in wide.items], extra
         rotated = await list_events(
@@ -598,7 +598,9 @@ async def _export(
     query = query or AuditQuery()
     if tenant is None:
         async with db.app() as session:
-            stream = export_ndjson(session, query, tenant_id=None, lag_seconds=lag, page_size=2)
+            stream = export_ndjson(
+                session, query, instance_scope=True, lag_seconds=lag, page_size=2
+            )
             return [line async for line in stream]
     async with tenant_session(db.app, tenant) as session:
         stream = export_ndjson(session, query, tenant_id=tenant, lag_seconds=lag, page_size=2)

@@ -3,7 +3,7 @@
 * `append` inserts in the caller's transaction (so the row commits with the change it records),
   never uses `RETURNING`, and lets the database assign `occurred_at`, `recorded_at` and `seq`.
 * `list_events` and `export_ndjson` read a tenant's events directly (RLS applies, and the tenant
-  is also filtered explicitly) or, with `tenant_id=None`, every tenant's through
+  is also filtered explicitly) or, with `instance_scope=True`, every tenant's through
   `tb_audit_list()`, which is for an instance-scoped auditor only: this layer does not check roles.
 * `purge_batch` and `purge_expired` delete only through `tb_audit_purge()`.
 """
@@ -182,15 +182,30 @@ async def _fetch(
     return [_record(row) for row in result.mappings()]
 
 
+def _check_scope(tenant_id: UUID | None, instance_scope: bool) -> None:
+    """Instance scope is an explicit opt-in: a missing tenant must never widen a read."""
+    if tenant_id is None and not instance_scope:
+        raise ValueError("tenant_id is required unless instance_scope=True")
+    if tenant_id is not None and instance_scope:
+        raise ValueError("instance_scope=True cannot be combined with a tenant_id")
+
+
 async def list_events(
-    session: AsyncSession, query: AuditQuery, *, tenant_id: UUID | None
+    session: AsyncSession,
+    query: AuditQuery,
+    *,
+    tenant_id: UUID | None = None,
+    instance_scope: bool = False,
 ) -> AuditPage:
     """One page. `tenant_id` set: that tenant's events (open the session in its context).
 
-    `tenant_id=None` is instance scope: all tenants, including null-tenant events, through
-    `tb_audit_list()`; call it only for an instance-scoped auditor. `query.tenant_id` then
-    narrows the read; in tenant scope it must be unset or equal `tenant_id`.
+    `instance_scope=True` (with `tenant_id=None`) reads all tenants, including null-tenant
+    events, through `tb_audit_list()`; call it only for an instance-scoped auditor.
+    `query.tenant_id` then narrows the read; in tenant scope it must be unset or equal
+    `tenant_id`. `tenant_id=None` without `instance_scope=True`, or both together, raises
+    `ValueError` before any query.
     """
+    _check_scope(tenant_id, instance_scope)
     if tenant_id is not None and query.tenant_id not in (None, tenant_id):
         raise ValueError("query.tenant_id conflicts with the tenant scope")
     rows = await _fetch(session, query, tenant_id, query.limit + 1)
@@ -199,11 +214,12 @@ async def list_events(
     return AuditPage(items=items, next_seq=items[-1].seq if more else None)
 
 
-async def export_ndjson(
+async def export_ndjson(  # noqa: PLR0913 - the two scope arguments must stay separate keywords
     session: AsyncSession,
     query: AuditQuery,
     *,
-    tenant_id: UUID | None,
+    tenant_id: UUID | None = None,
+    instance_scope: bool = False,
     lag_seconds: float,
     page_size: int = DEFAULT_EXPORT_PAGE,
 ) -> AsyncIterator[bytes]:
@@ -212,11 +228,14 @@ async def export_ndjson(
     Only events recorded more than `lag_seconds` ago are returned (and none after the first
     one that is not), so resuming from the last `seq` never skips a late commit. The caller
     writes the export's own audit event and sets the response's content type
-    (`application/x-ndjson`).
+    (`application/x-ndjson`). Scope rules are `list_events`'s; a violation raises `ValueError`
+    on the first iteration, before any query.
     """
     current = replace(query, descending=False, lag_seconds=lag_seconds, limit=page_size)
     while True:
-        page = await list_events(session, current, tenant_id=tenant_id)
+        page = await list_events(
+            session, current, tenant_id=tenant_id, instance_scope=instance_scope
+        )
         for record in page.items:
             yield record.to_ndjson_line()
         if page.next_seq is None:

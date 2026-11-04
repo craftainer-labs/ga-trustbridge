@@ -6,11 +6,12 @@ are in `test_audit_integration.py`) and EB-15 (retention settings).
 
 import json
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.trustbridge.helpers import host, make_settings
 from trustbridge.audit import (
@@ -20,6 +21,8 @@ from trustbridge.audit import (
     AuditQuery,
     AuditRecord,
     Outcome,
+    export_ndjson,
+    list_events,
 )
 
 COLUMNS = [
@@ -157,3 +160,33 @@ def test_audit_settings_defaults_and_validation() -> None:
         make_settings([host()], audit_retention_min_days=0)
     with pytest.raises(ValidationError, match="audit_export_lag_seconds"):
         make_settings([host()], audit_export_lag_seconds=0)
+
+
+# -- explicit instance scope (review of NG6c): a missing tenant must never widen a read --------
+
+NO_SESSION = cast(AsyncSession, None)  # the scope check raises before the session is touched
+
+
+async def test_list_events_requires_an_explicit_scope() -> None:
+    """No tenant and no `instance_scope=True` raises before any query."""
+    with pytest.raises(ValueError, match="instance_scope"):
+        await list_events(NO_SESSION, AuditQuery())
+    with pytest.raises(ValueError, match="instance_scope"):
+        await list_events(NO_SESSION, AuditQuery(), tenant_id=None)
+
+
+async def test_list_events_rejects_instance_scope_with_a_tenant() -> None:
+    """A tenant and `instance_scope=True` together is a contradiction."""
+    with pytest.raises(ValueError, match="cannot be combined"):
+        await list_events(NO_SESSION, AuditQuery(), tenant_id=uuid4(), instance_scope=True)
+
+
+async def test_export_ndjson_enforces_the_same_scope_rules() -> None:
+    """The export raises the same errors on its first iteration."""
+    with pytest.raises(ValueError, match="instance_scope"):
+        [line async for line in export_ndjson(NO_SESSION, AuditQuery(), lag_seconds=0)]
+    with pytest.raises(ValueError, match="cannot be combined"):
+        stream = export_ndjson(
+            NO_SESSION, AuditQuery(), tenant_id=uuid4(), instance_scope=True, lag_seconds=0
+        )
+        [line async for line in stream]

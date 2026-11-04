@@ -18,8 +18,8 @@ All take an `AsyncSession` (or factory) and leave the transaction to the caller,
 | Function | Use |
 | --- | --- |
 | `append(session, event) -> UUID` | Insert in the caller's transaction, so the row commits with the change. No `RETURNING` (a null-tenant row is not selectable by the app role); the id is generated in code. `tenant_id` must be null or the session's tenant context. |
-| `list_events(session, query, *, tenant_id) -> AuditPage` | One page. `tenant_id` set: that tenant (open the session in its `tenant_session`; the tenant is also filtered explicitly). `tenant_id=None`: instance scope through `tb_audit_list()`, all tenants and null-tenant events; the caller must have checked the instance-scoped `auditor` role, this layer does not. |
-| `export_ndjson(session, query, *, tenant_id, lag_seconds, page_size) -> AsyncIterator[bytes]` | Ascending `seq`, one line per event, resumable with `AuditQuery.after_seq`. |
+| `list_events(session, query, *, tenant_id=None, instance_scope=False) -> AuditPage` | One page. `tenant_id` set: that tenant (open the session in its `tenant_session`; the tenant is also filtered explicitly). `instance_scope=True` with `tenant_id=None`: instance scope through `tb_audit_list()`, all tenants and null-tenant events; the caller must have checked the instance-scoped `auditor` role, this layer does not. `tenant_id=None` without the flag, or both together, raises `ValueError` before any query, so a failed tenant lookup never widens a read. NG6d passes the flag only after the role check. |
+| `export_ndjson(session, query, *, tenant_id=None, instance_scope=False, lag_seconds, page_size) -> AsyncIterator[bytes]` | Ascending `seq`, one line per event, resumable with `AuditQuery.after_seq`. Same scope rules as `list_events`. |
 | `purge_batch(session, *, before, min_days, batch_size)` | One `tb_audit_purge` call; returns rows deleted. |
 | `purge_expired(factory, *, retention_days, min_days, batch_size, now)` | Loops `purge_batch`, one short transaction per batch; `retention_days=0` never purges. For the reconciler's singleton duty. |
 
@@ -68,6 +68,12 @@ schema_version`. Timestamps are UTC with a `Z`; ids and `source_ip` are strings.
 
 ## Rules
 
+- Validating `before`/`after` serializability, `outcome` and `schema_version` at construction is
+  NG6f's (it owns the action enum and redaction); until then a bad value fails inside the caller's
+  transaction at `append`.
+- `AUDIT_RETENTION_DAYS` equal to `AUDIT_RETENTION_MIN_DAYS` passes validation but leaves no
+  clock-skew margin: an app clock ahead of the database's makes every purge raise 22023. Keep
+  retention above the floor by a margin. `AUDIT_EXPORT_LAG_SECONDS` has no upper bound.
 - Redaction is the emitter's job (allow-list per resource type, NG6f); this layer stores
   `before` and `after` as given.
 - Never `RETURNING` on an insert; never write `occurred_at`; never delete except via the purge.
