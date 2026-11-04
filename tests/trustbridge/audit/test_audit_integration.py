@@ -751,12 +751,12 @@ async def test_a_tenant_sync_without_a_sender_stores_a_null_on_behalf_of(db: Db)
     )
     (record,) = await _tenant_events(db, tenant)
     assert record.on_behalf_of is None
-    assert (
-        await _admin_scalar(
-            db, f"SELECT on_behalf_of IS NULL FROM audit_events WHERE tenant_id = '{tenant}'"
-        )
-        is True
+    is_null = await _scalar(
+        db.owner,
+        "SELECT on_behalf_of IS NULL FROM audit_events WHERE tenant_id = CAST(:t AS uuid)",
+        t=tenant,
     )
+    assert is_null is True
 
 
 async def test_on_behalf_of_is_a_jsonb_column(db: Db) -> None:
@@ -771,14 +771,13 @@ async def test_on_behalf_of_is_a_jsonb_column(db: Db) -> None:
     )
     tenant = uuid4()
     await _write(db, tenant, on_behalf_of={"github_sender_id": 7, "delivery_id": "d"})
-    assert (
-        await _admin_scalar(
-            db,
-            "SELECT on_behalf_of->>'github_sender_id' FROM audit_events "
-            f"WHERE tenant_id = '{tenant}'",
-        )
-        == "7"
+    sender = await _scalar(
+        db.owner,
+        "SELECT on_behalf_of->>'github_sender_id' FROM audit_events "
+        "WHERE tenant_id = CAST(:t AS uuid)",
+        t=tenant,
     )
+    assert sender == "7"
 
 
 def _run_migration(sync_conn: Connection, direction: str) -> None:
