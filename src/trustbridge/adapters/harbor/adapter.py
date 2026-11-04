@@ -531,14 +531,17 @@ class HarborAdapter:
         name: str,
         robot_id: str | None = None,
         *,
-        required: bool = True,
+        strict: bool = True,
     ) -> JsonObj | None:
         """Return the robot `name` of `project`; its full name is `<prefix><project>+<name>`.
 
         A recorded `robot_id` is read directly (`GET /robots/{id}`); that robot counts only when
         it still passes every ownership check (tenant prefix, name, project, marker). An id
         Harbor no longer knows, or one that now names another robot, falls back to the project
-        listing, which applies the same checks. A robot failing them is never returned.
+        listing, which applies the same checks. A robot failing them is never returned: with
+        `strict` (ensure, rotate) a listed robot of that exact name and project failing them is
+        a non-retryable error, since creating it would only meet a 409 forever; without it
+        (deletes) it is skipped, as already gone.
         """
         if robot_id is not None:
             got = await c.call("GET", f"{API}/robots/{seg(robot_id)}", accept=NOT_FOUND)
@@ -549,9 +552,12 @@ class HarborAdapter:
             logger.debug(
                 "Harbor robot id %s no longer names robot %r; using the listing", robot_id, name
             )
-        for robot in await self._robots(c, project, name, required=required):
+        for robot in await self._robots(c, project, name, required=strict):
             if self._owned_robot_ok(robot, project, name):
                 return robot
+            if strict and self._robot_matches(robot, project, name):
+                msg = "Harbor robot account exists but is not managed by trustbridge"
+                raise AdapterError(False, msg)
         return None
 
     def _owned_robot_ok(self, robot: JsonObj, project: str, name: str) -> bool:
@@ -675,7 +681,7 @@ class HarborAdapter:
             return False
         project = self._project_for_credentials()
         robot = await self._find_robot(
-            c, project, slot.name, slot.ref.get("robot_id"), required=False
+            c, project, slot.name, slot.ref.get("robot_id"), strict=False
         )
         if robot is None or robot.get("description") != MARKER:
             return False

@@ -580,14 +580,13 @@ async def test_a_robot_of_another_project_does_not_count() -> None:
 async def test_a_robot_without_the_marker_is_never_adopted_or_deleted() -> None:
     """Ownership: a same-named robot that trustbridge did not create is not touched."""
     for call in ("ensure", "rotate"):
-        replay, adapter = build("credentials.json", "foreign_robot_create")
+        replay, adapter = build("credentials.json", "foreign_robot")
         action = adapter.ensure_credential if call == "ensure" else adapter.rotate_begin
-        with pytest.raises(AdapterError):
+        with pytest.raises(AdapterError) as info:
             await action(PUSH, state_of(DELIVERED_SLOT))
         replay.assert_exhausted()
-        # The listed unmarked robot is skipped (never adopted or refreshed): a create is tried,
-        # which Harbor refuses because the name is taken.
-        assert [r.method for r in replay.seen] == ["GET", "GET", "POST"]
+        assert not info.value.retryable
+        assert {r.method for r in replay.seen} == {"GET"}
     replay, adapter = build("credentials.json", "foreign_robot")
     outcome = await adapter.delete_credential(PUSH, state_of(SLOT))
     replay.assert_exhausted()
@@ -935,10 +934,11 @@ async def test_the_project_id_is_read_once_per_operation() -> None:
 async def test_a_robot_found_by_id_without_the_marker_is_refused() -> None:
     """Ownership also applies to the id path."""
     replay, adapter = build("credentials.json", "by_id_foreign")
-    with pytest.raises(AdapterError):
+    with pytest.raises(AdapterError) as info:
         await adapter.ensure_credential(PUSH, state_of(BY_ID_SLOT))
     replay.assert_exhausted()
-    assert [r.method for r in replay.seen] == ["GET", "GET", "GET", "POST"]
+    assert not info.value.retryable
+    assert {r.method for r in replay.seen} == {"GET"}
 
 
 async def test_a_project_creation_race_applies_the_privacy_check() -> None:
