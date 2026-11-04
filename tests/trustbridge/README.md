@@ -11,6 +11,8 @@ Tests for the instance package `src/trustbridge/` (instance-added files under th
 - `worker/test_integration_pg.py` and `adapters/test_sql_store_integration.py` are marked
   `integration`: they need the devcontainer stack's Postgres and run in CI's stack (the 100%
   coverage gate counts the SQL stores through them).
+- `tenancy/test_rls_integration.py` is marked `integration` (it needs the stack's Postgres, with the
+  owner and app roles); `tenancy/test_tenancy_unit.py` needs no service.
 - `test_main.py` runs the real `trustbridge.main:app` in a subprocess (the entrypoint mutates the
   template app at import, which must not leak into the template's own tests).
 
