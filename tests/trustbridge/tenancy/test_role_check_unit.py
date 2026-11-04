@@ -54,6 +54,11 @@ class _Session:
         return types.SimpleNamespace(one=lambda: row)
 
 
+def _current(gate: RoleGate) -> bool:
+    """`gate.current` read through a call, so mypy does not narrow it across a refresh."""
+    return gate.current
+
+
 def _gate(row: tuple[object, ...] | None) -> RoleGate:
     return RoleGate(_Session(row), mock=False)  # type: ignore[arg-type]
 
@@ -108,9 +113,9 @@ def test_audit_events_counts_as_an_rls_table() -> None:
 async def test_the_gate_reads_the_row_and_holds_the_verdict() -> None:
     """A safe row makes the gate current; an unsafe one keeps it not ready with the reason."""
     safe = _gate(("trustbridge_app", False, False, True))
-    assert not safe.current
+    assert not _current(safe)
     assert await safe.refresh()
-    assert safe.current
+    assert _current(safe)
     assert safe.reason is None
     unsafe = _gate(("postgres", True, False, True))
     assert not await unsafe.refresh()
@@ -175,10 +180,10 @@ async def test_the_api_background_task_exits_only_in_production() -> None:
     )
     await asyncio.sleep(0.05)
     assert not task.done()  # still polling, not ready, not exited
-    assert not dev.current
+    assert not _current(dev)
     dev_session.row = ("trustbridge_app", False, False, True)  # the operator fixes the role
     await asyncio.wait_for(task, timeout=1)
-    assert dev.current
+    assert _current(dev)
     assert exits == [1]
 
 
@@ -238,4 +243,4 @@ async def test_the_worker_and_reconciler_return_non_zero_when_the_role_stays_uns
         overrides = ProcessOverrides(
             redis=as_redis(FakeRedis()), checker=FakeHostChecker(), stop=asyncio.Event()
         )
-        assert await runtime.run_process(kind, make_settings(), overrides) == 1  # type: ignore[arg-type]
+        assert await runtime.run_process(kind, make_settings(), overrides) == 1
