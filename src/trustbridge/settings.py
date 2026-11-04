@@ -146,6 +146,11 @@ class TrustbridgeSettings(Settings):
     delivery_id_retention_days: int = Field(default=30, gt=0)
     dead_stream_retention_days: int = Field(default=30, gt=0)
 
+    # Audit log (ADR 0032). `0` retention means never purge; the floor guards a typo.
+    audit_retention_days: int = Field(default=365, ge=0)
+    audit_retention_min_days: int = Field(default=90, ge=1)
+    audit_export_lag_seconds: float = Field(default=30.0, gt=0)
+
     # Leases and adapter calls.
     lease_ttl_seconds: float = Field(default=120.0, gt=0)
     adapter_call_timeout_seconds: float = Field(default=30.0, gt=0)
@@ -215,6 +220,8 @@ class TrustbridgeSettings(Settings):
             problems.append("ADAPTER_CALL_TIMEOUT_SECONDS must be shorter than LEASE_TTL_SECONDS")
         if self.retry_backoff_max_seconds < self.retry_backoff_base_seconds:
             problems.append("RETRY_BACKOFF_MAX_SECONDS must be >= RETRY_BACKOFF_BASE_SECONDS")
+        if 0 < self.audit_retention_days < self.audit_retention_min_days:
+            problems.append("AUDIT_RETENTION_DAYS must be 0 or >= AUDIT_RETENTION_MIN_DAYS")
         if problems:
             raise ValueError("; ".join(problems))
         for warning in warnings:
