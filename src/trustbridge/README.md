@@ -21,6 +21,8 @@ The instance package of the trustbridge GitHub App, a sibling of the template's 
   `runtime.build_host_runtime`). See its `README.md`.
 - `adapters/`: the adapter plugin interface (I2) and the credential core. See its `README.md`.
 - `signer/`: the `file` and `vault-transit` App-key signers. See its `README.md`.
+- `rbac/`: role-based access for the admin API (claims to grants, `require_role`). See its
+  `README.md`.
 - `reconciler/`, `migrations/`: one-line `__main__` shims so the commands keep the names in the
   ADR (`python -m trustbridge.reconciler`, `python -m trustbridge.migrations upgrade`).
 
