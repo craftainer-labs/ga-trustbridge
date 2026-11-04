@@ -143,9 +143,7 @@ MAX_DELIVERY_ID = 100
 
 
 def _check_on_behalf_of(value: object) -> None:
-    """`on_behalf_of` is None or `{"github_sender_id": int, "delivery_id": str}` (user decision)."""
-    if value is None:
-        return
+    """A non-null `on_behalf_of` is `{"github_sender_id": int, "delivery_id": str}`."""
     if not isinstance(value, dict) or set(value) != {"github_sender_id", "delivery_id"}:
         raise ValueError("on_behalf_of must be an object with github_sender_id and delivery_id")
     sender, delivery = value["github_sender_id"], value["delivery_id"]

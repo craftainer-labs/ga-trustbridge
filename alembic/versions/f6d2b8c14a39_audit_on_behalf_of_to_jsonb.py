@@ -23,9 +23,9 @@ change: the existing table grants carry over.
 
 ``ck_audit_events_on_behalf_of`` then pins the shape in the database, so no insert path (the app
 role's ``INSERT`` grant included) can store anything but null or
-``{"github_sender_id": <number>, "delivery_id": "<string>"}``. It is added ``NOT VALID`` and then
-validated in the same step (Squawk's ``constraint-missing-not-valid``); the table is tiny and the
-conversion above guarantees every existing row passes. The downgrade drops it first.
+``{"github_sender_id": <number>, "delivery_id": "<string>"}``. It is added validated: the table
+is tiny and the conversion above guarantees every existing row passes. The downgrade drops it
+first.
 """
 
 from collections.abc import Sequence
@@ -57,15 +57,20 @@ def upgrade() -> None:
         "'delivery_id', substring(on_behalf_of FROM '^sender=[0-9]+;delivery=(.*)$')) "
         "ELSE NULL END"
     )
+    # Squawk's constraint-missing-not-valid is ignored for this one statement: the same
+    # transaction already holds the exclusive lock for the type change, the table is tiny and
+    # the conversion above guarantees every row passes, so a separate NOT VALID/VALIDATE round
+    # trip would only add a second pass (and SQLAlchemy reflects a NOT VALID check badly).
     op.execute(
+        "-- squawk-ignore constraint-missing-not-valid\n"
         f"ALTER TABLE audit_events ADD CONSTRAINT {CHECK_NAME} CHECK ("
         "on_behalf_of IS NULL OR ("
         "jsonb_typeof(on_behalf_of) = 'object' "
         "AND on_behalf_of ?& array['github_sender_id', 'delivery_id'] "
         "AND jsonb_typeof(on_behalf_of->'github_sender_id') = 'number' "
-        "AND jsonb_typeof(on_behalf_of->'delivery_id') = 'string')) NOT VALID"
+        "AND jsonb_typeof(on_behalf_of->'delivery_id') = 'string'))"
     )
-    op.execute(f"ALTER TABLE audit_events VALIDATE CONSTRAINT {CHECK_NAME}")
+
 
 
 def downgrade() -> None:

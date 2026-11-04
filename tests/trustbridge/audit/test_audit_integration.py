@@ -835,11 +835,11 @@ async def _migration_steps(conn: AsyncConnection) -> list[object]:
 
 
 async def test_the_on_behalf_of_migration_keeps_legacy_strings_and_nulls_and_reverses(
-    db: Db,
+    fresh_db: Db,
 ) -> None:
     """text -> jsonb turns a legacy `sender=..;delivery=..` string into the object."""
     try:
-        async with db.admin.connect() as conn:
+        async with fresh_db.admin.connect() as conn:
             seen = await _migration_steps(conn)
             await conn.rollback()
     except DBAPIError as exc:
