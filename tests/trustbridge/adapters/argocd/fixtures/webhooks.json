@@ -1,0 +1,432 @@
+{
+  "source": "argocd-notifications-cm service.webhook.<name> with a header referencing a key of argocd-notifications-secret (Argo CD notifications webhook service)",
+  "scenarios": {
+    "create": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/configmaps/argocd-notifications-cm"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "ConfigMap",
+              "metadata": {
+                "name": "argocd-notifications-cm",
+                "namespace": "argocd"
+              },
+              "data": {
+                "other.key": "x"
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/secrets/argocd-notifications-secret"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "Secret",
+              "metadata": {
+                "name": "argocd-notifications-secret",
+                "namespace": "argocd"
+              },
+              "type": "Opaque",
+              "data": {
+                "slack-token": "cw=="
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PATCH",
+            "path": "/api/v1/namespaces/argocd/secrets/argocd-notifications-secret",
+            "json": {
+              "stringData": {
+                "${hook}-token": "whsec-dummy-value"
+              }
+            },
+            "content_type": "application/merge-patch+json"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "Secret",
+              "metadata": {
+                "name": "argocd-notifications-secret",
+                "namespace": "argocd"
+              },
+              "type": "Opaque",
+              "data": {}
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PATCH",
+            "path": "/api/v1/namespaces/argocd/configmaps/argocd-notifications-cm",
+            "json": {
+              "data": {
+                "service.webhook.${hook}": "url: \"https://tb.example/hooks/argocd\"\nheaders:\n- name: Authorization\n  value: Bearer $${hook}-token\n"
+              }
+            },
+            "content_type": "application/merge-patch+json"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "ConfigMap",
+              "metadata": {
+                "name": "argocd-notifications-cm",
+                "namespace": "argocd"
+              },
+              "data": {}
+            }
+          }
+        }
+      ]
+    },
+    "exists": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/configmaps/argocd-notifications-cm"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "ConfigMap",
+              "metadata": {
+                "name": "argocd-notifications-cm",
+                "namespace": "argocd"
+              },
+              "data": {
+                "service.webhook.${hook}": "url: \"https://tb.example/hooks/argocd\"\nheaders:\n- name: Authorization\n  value: Bearer $${hook}-token\n"
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/secrets/argocd-notifications-secret"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "Secret",
+              "metadata": {
+                "name": "argocd-notifications-secret",
+                "namespace": "argocd"
+              },
+              "type": "Opaque",
+              "data": {
+                "${hook}-token": "d2hzZWMtZHVtbXktdmFsdWU="
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drift": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/configmaps/argocd-notifications-cm"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "ConfigMap",
+              "metadata": {
+                "name": "argocd-notifications-cm",
+                "namespace": "argocd"
+              },
+              "data": {
+                "service.webhook.${hook}": "url: \"https://old.example/hook\"\nheaders:\n- name: Authorization\n  value: Bearer $${hook}-token\n"
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/secrets/argocd-notifications-secret"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "Secret",
+              "metadata": {
+                "name": "argocd-notifications-secret",
+                "namespace": "argocd"
+              },
+              "type": "Opaque",
+              "data": {
+                "${hook}-token": "b2xkLXRva2Vu"
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PATCH",
+            "path": "/api/v1/namespaces/argocd/secrets/argocd-notifications-secret",
+            "json": {
+              "stringData": {
+                "${hook}-token": "whsec-dummy-value"
+              }
+            },
+            "content_type": "application/merge-patch+json"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "Secret",
+              "metadata": {
+                "name": "argocd-notifications-secret",
+                "namespace": "argocd"
+              },
+              "type": "Opaque",
+              "data": {}
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PATCH",
+            "path": "/api/v1/namespaces/argocd/configmaps/argocd-notifications-cm",
+            "json": {
+              "data": {
+                "service.webhook.${hook}": "url: \"https://tb.example/hooks/argocd\"\nheaders:\n- name: Authorization\n  value: Bearer $${hook}-token\n"
+              }
+            },
+            "content_type": "application/merge-patch+json"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "ConfigMap",
+              "metadata": {
+                "name": "argocd-notifications-cm",
+                "namespace": "argocd"
+              },
+              "data": {}
+            }
+          }
+        }
+      ]
+    },
+    "missing_cm": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/configmaps/argocd-notifications-cm"
+          },
+          "response": {
+            "status": 404,
+            "json": {
+              "kind": "Status",
+              "apiVersion": "v1",
+              "status": "Failure",
+              "reason": "NotFound",
+              "code": 404,
+              "message": "configmaps not found"
+            }
+          }
+        }
+      ]
+    },
+    "missing_secret": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/configmaps/argocd-notifications-cm"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "ConfigMap",
+              "metadata": {
+                "name": "argocd-notifications-cm",
+                "namespace": "argocd"
+              },
+              "data": {}
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/secrets/argocd-notifications-secret"
+          },
+          "response": {
+            "status": 404,
+            "json": {
+              "kind": "Status",
+              "apiVersion": "v1",
+              "status": "Failure",
+              "reason": "NotFound",
+              "code": 404,
+              "message": "secrets not found"
+            }
+          }
+        }
+      ]
+    },
+    "delete": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/configmaps/argocd-notifications-cm"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "ConfigMap",
+              "metadata": {
+                "name": "argocd-notifications-cm",
+                "namespace": "argocd"
+              },
+              "data": {
+                "service.webhook.${hook}": "url: \"https://tb.example/hooks/argocd\"\nheaders:\n- name: Authorization\n  value: Bearer $${hook}-token\n"
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PATCH",
+            "path": "/api/v1/namespaces/argocd/configmaps/argocd-notifications-cm",
+            "json": {
+              "data": {
+                "service.webhook.${hook}": null
+              }
+            },
+            "content_type": "application/merge-patch+json"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "ConfigMap",
+              "metadata": {
+                "name": "argocd-notifications-cm",
+                "namespace": "argocd"
+              },
+              "data": {}
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/secrets/argocd-notifications-secret"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "Secret",
+              "metadata": {
+                "name": "argocd-notifications-secret",
+                "namespace": "argocd"
+              },
+              "type": "Opaque",
+              "data": {
+                "${hook}-token": "d2hzZWMtZHVtbXktdmFsdWU="
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PATCH",
+            "path": "/api/v1/namespaces/argocd/secrets/argocd-notifications-secret",
+            "json": {
+              "data": {
+                "${hook}-token": null
+              }
+            },
+            "content_type": "application/merge-patch+json"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "Secret",
+              "metadata": {
+                "name": "argocd-notifications-secret",
+                "namespace": "argocd"
+              },
+              "type": "Opaque",
+              "data": {}
+            }
+          }
+        }
+      ]
+    },
+    "delete_absent": {
+      "exchanges": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/configmaps/argocd-notifications-cm"
+          },
+          "response": {
+            "status": 404,
+            "json": {
+              "kind": "Status",
+              "apiVersion": "v1",
+              "status": "Failure",
+              "reason": "NotFound",
+              "code": 404,
+              "message": "configmaps not found"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/api/v1/namespaces/argocd/secrets/argocd-notifications-secret"
+          },
+          "response": {
+            "status": 200,
+            "json": {
+              "apiVersion": "v1",
+              "kind": "Secret",
+              "metadata": {
+                "name": "argocd-notifications-secret",
+                "namespace": "argocd"
+              },
+              "type": "Opaque",
+              "data": {}
+            }
+          }
+        }
+      ]
+    }
+  }
+}
