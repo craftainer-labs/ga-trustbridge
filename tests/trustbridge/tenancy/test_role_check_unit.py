@@ -258,7 +258,7 @@ async def test_the_api_waits_for_the_schema_then_checks_the_role() -> None:
 
     core = types.SimpleNamespace(gate=Schema(), roles=Roles())
     settings = make_settings(schema_wait_seconds=3.0, schema_poll_seconds=0.5)
-    await main_module.wait_gates(core, settings)  # type: ignore[arg-type]
+    await main_module.wait_gates(core, settings, lambda: 50.0)  # type: ignore[arg-type]
     assert calls == ["schema:3.0:0.5", "roles:False:3.0:0.5"]
 
 
