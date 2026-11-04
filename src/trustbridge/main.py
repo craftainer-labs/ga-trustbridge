@@ -33,7 +33,7 @@ from trustbridge.github.availability import HostChecker
 from trustbridge.github.ports import SecretReader
 from trustbridge.github.webhook_secrets import WebhookSecretResolver
 from trustbridge.settings import TrustbridgeSettings, get_trustbridge_settings
-from trustbridge.tenancy import install_tenant_hook
+from trustbridge.tenancy import install_tenant_hook, register_role_check
 from trustbridge.webhooks.argocd import router as argocd_router
 from trustbridge.webhooks.ingress import ArgocdRuntime, WebhookRuntime
 from trustbridge.webhooks.ingress import router as webhook_router
@@ -43,7 +43,7 @@ from trustbridge.webhooks.limiter import (
     WebhookLimiter,
     WindowCounter,
 )
-from trustbridge.worker.runtime import build_core, open_redis, session_factory_or_none
+from trustbridge.worker.runtime import Core, build_core, open_redis, session_factory_or_none
 from trustbridge.worker.schema import register_schema_check
 
 logger = logging.getLogger(__name__)
@@ -103,6 +103,18 @@ def install(
     return app
 
 
+async def wait_gates(core: Core, settings: TrustbridgeSettings) -> None:
+    """Wait for the schema, then check the database role (ADR 0031; the role check needs it)."""
+    await core.gate.wait_or_exit(
+        timeout=settings.schema_wait_seconds, poll=settings.schema_poll_seconds
+    )
+    await core.roles.background(
+        production=settings.production,
+        timeout=settings.schema_wait_seconds,
+        poll=settings.schema_poll_seconds,
+    )
+
+
 @asynccontextmanager
 async def _trustbridge_resources(
     app: FastAPI, settings: TrustbridgeSettings, overrides: Overrides
@@ -135,15 +147,11 @@ async def _trustbridge_resources(
     tasks: list[asyncio.Task[None]] = []
     try:
         if not mock:
-            register_schema_check(overrides.health_registry(), core.gate)
+            registry = overrides.health_registry()
+            register_schema_check(registry, core.gate)
+            register_role_check(registry, core.roles)  # ADR 0031: not ready on a bypassing role
             await core.gate.refresh()
-            tasks.append(
-                asyncio.create_task(
-                    core.gate.wait_or_exit(
-                        timeout=settings.schema_wait_seconds, poll=settings.schema_poll_seconds
-                    )
-                )
-            )
+            tasks.append(asyncio.create_task(wait_gates(core, settings)))
         await monitor.check_all()
         await secrets.warm(monitor.names())
         monitor.start(settings.host_recheck_seconds)

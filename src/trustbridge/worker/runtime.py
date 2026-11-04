@@ -31,7 +31,7 @@ from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.models import SqlRegistrationStore
 from trustbridge.github.runtime import HostRuntime, RuntimeDeps, build_host_runtime
 from trustbridge.settings import TrustbridgeSettings, load_trustbridge_settings
-from trustbridge.tenancy import install_tenant_hook
+from trustbridge.tenancy import RoleGate, install_tenant_hook
 from trustbridge.worker.deliveries import DeliveryStore, InMemoryDeliveryStore, PgDeliveryStore
 from trustbridge.worker.lease import InMemoryLeaseStore, LeaseManager, LeaseStore, PgLeaseStore
 from trustbridge.worker.ports import (
@@ -64,6 +64,7 @@ class Core:
     parked: ParkedValues
     connections: ConnectionData
     gate: SchemaGate
+    roles: RoleGate
     runtime: HostRuntime
     queue: StreamQueue | None
     relay: Relay | None
@@ -154,6 +155,7 @@ def build_core(
         parked=ParkedValues(secrets),
         connections=ConnectionData(secrets),
         gate=SchemaGate(session_factory, mock=settings.mode == "mock"),
+        roles=RoleGate(session_factory, mock=settings.mode == "mock"),
         runtime=runtime,
         queue=queue,
         relay=relay,
@@ -215,6 +217,13 @@ async def run_process(
             )
         except SchemaWaitTimeout:
             logger.critical("schema not current after SCHEMA_WAIT_SECONDS; exiting")
+            return 1
+        # ADR 0031: production waits for a safe database role and exits; elsewhere it only warns
+        if not await core.roles.startup(
+            production=settings.production,
+            timeout=settings.schema_wait_seconds,
+            poll=settings.schema_poll_seconds,
+        ):
             return 1
         monitor = core.runtime.monitor
         await monitor.check_all()
