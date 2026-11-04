@@ -239,7 +239,7 @@ def test_context_exits_when_the_handler_raises() -> None:
 
 def test_non_canonical_tenant_id_spellings_are_404() -> None:
     """One URL spelling per tenant: hex without hyphens and `urn:uuid:` forms are not found."""
-    client = _client(_app(FakeAccess([ACME])), "trustbridge:viewer")
+    client = _client(_app(FakeAccess([ACME])), "trustbridge:operator")
     for raw in (ACME.id.hex, f"urn:uuid:{ACME.id}", f"{{{ACME.id}}}"):
         _problem(client.get(f"/t/{raw}/operator"), 404)
     assert client.get(f"/t/{str(ACME.id).upper()}/operator").status_code == 200

@@ -6,7 +6,8 @@ is closed before `TenantAccess.tenant_context` is entered; a handler's session o
 
 `require_role` returns a dependency that works on any route; mounting is NG6d's. The wiring is
 `app.state.rbac = RbacRuntime(config, access)`; `TenantAccess` is the interface NG6a's
-`trustbridge.tenancy` (`tb_list_tenants()`/by-id lookup and `tenant_context`) satisfies through a thin adapter.
+`trustbridge.tenancy` (`tb_list_tenants()`/by-id lookup and `tenant_context`) satisfies through a
+thin adapter.
 """
 
 import logging

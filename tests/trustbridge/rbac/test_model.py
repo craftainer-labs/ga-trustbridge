@@ -76,5 +76,5 @@ def test_org_without_a_name_and_instance_grants() -> None:
 )
 def test_grant_fails_closed_on_half_scope_or_bad_role(args: tuple[object, ...]) -> None:
     """A half-scoped grant must never become instance-wide; the role must be a `Role`."""
-    with pytest.raises(ValueError, match="grant|role"):
+    with pytest.raises(ValueError, match=r"grant|role"):
         Grant(*args)  # type: ignore[arg-type]
