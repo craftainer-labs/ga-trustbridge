@@ -486,7 +486,7 @@ async def test_retention_zero_never_purges_and_otherwise_purges_in_batches(
 
 async def _count(db: Db, where: str) -> int:
     sql = f"SELECT count(*) FROM audit_events WHERE {where}"  # noqa: S608 -- literals in tests
-    return await _scalar(db.owner, sql)
+    return int(await _scalar(db.owner, sql))
 
 
 # --- scope, cursor and filters (inv. 11 storage half) -------------------------------------

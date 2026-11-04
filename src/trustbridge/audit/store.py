@@ -9,13 +9,13 @@
 """
 
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import RowMapping, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.audit.model import (
@@ -97,7 +97,7 @@ async def append(session: AsyncSession, event: AuditEvent) -> UUID:
     return event.id
 
 
-def _record(row: Mapping[str, Any]) -> AuditRecord:
+def _record(row: RowMapping) -> AuditRecord:
     return AuditRecord(
         id=UUID(str(row["id"])),
         seq=row["seq"],

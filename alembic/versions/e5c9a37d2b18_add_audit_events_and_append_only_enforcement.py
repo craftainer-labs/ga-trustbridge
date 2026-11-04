@@ -76,7 +76,7 @@ CREATE TABLE audit_events (
     "after" jsonb,
     request_id text,
     trace_id text,
-    schema_version integer NOT NULL DEFAULT 1,
+    schema_version bigint NOT NULL DEFAULT 1,
     CONSTRAINT pk_audit_events PRIMARY KEY (id),
     CONSTRAINT uq_audit_events_seq UNIQUE (seq),
     CONSTRAINT ck_audit_events_actor CHECK (
