@@ -1,0 +1,292 @@
+{
+ "source": "Shapes from Docker's Hub API reference (https://docs.docker.com/reference/api/hub/latest/, OpenAPI 2-beta) and the access-token pages. See src/trustbridge/adapters/dockerhub/README.md for what still needs a live check. Dummy token values only.",
+ "scenarios": {
+  "repo_create": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/auth/token",
+      "json": {
+       "identifier": "svc-tb",
+       "secret": "dckr_pat_dummy"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "access_token": "jwt-bearer-value"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/namespaces/acme/repositories/api"
+     },
+     "response": {
+      "status": 404,
+      "json": {
+       "message": "not found"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/namespaces/acme/repositories",
+      "json": {
+       "name": "api",
+       "namespace": "acme",
+       "description": "managed by trustbridge",
+       "is_private": true
+      }
+     },
+     "response": {
+      "status": 201,
+      "json": {
+       "name": "api",
+       "namespace": "acme",
+       "description": "managed by trustbridge",
+       "is_private": true
+      }
+     }
+    }
+   ]
+  },
+  "repo_exists_managed": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/auth/token",
+      "json": {
+       "identifier": "svc-tb",
+       "secret": "dckr_pat_dummy"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "access_token": "jwt-bearer-value"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/namespaces/acme/repositories/api"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "name": "api",
+       "namespace": "acme",
+       "description": "managed by trustbridge",
+       "is_private": true
+      }
+     }
+    }
+   ]
+  },
+  "repo_foreign": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/auth/token",
+      "json": {
+       "identifier": "svc-tb",
+       "secret": "dckr_pat_dummy"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "access_token": "jwt-bearer-value"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/namespaces/acme/repositories/api"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "name": "api",
+       "namespace": "acme",
+       "description": "someone else's",
+       "is_private": true
+      }
+     }
+    }
+   ]
+  },
+  "repo_race": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/auth/token",
+      "json": {
+       "identifier": "svc-tb",
+       "secret": "dckr_pat_dummy"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "access_token": "jwt-bearer-value"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/namespaces/acme/repositories/api"
+     },
+     "response": {
+      "status": 404,
+      "json": {
+       "message": "not found"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/namespaces/acme/repositories",
+      "json": {
+       "name": "api",
+       "namespace": "acme",
+       "description": "managed by trustbridge",
+       "is_private": true
+      }
+     },
+     "response": {
+      "status": 409,
+      "json": {
+       "message": "exists"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/namespaces/acme/repositories/api"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "name": "api",
+       "namespace": "acme",
+       "description": "managed by trustbridge",
+       "is_private": true
+      }
+     }
+    }
+   ]
+  },
+  "repo_public": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/auth/token",
+      "json": {
+       "identifier": "svc-tb",
+       "secret": "dckr_pat_dummy"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "access_token": "jwt-bearer-value"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/namespaces/acme/repositories/api"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "name": "api",
+       "namespace": "acme",
+       "description": "managed by trustbridge",
+       "is_private": false
+      }
+     }
+    }
+   ]
+  },
+  "repo_race_public": {
+   "exchanges": [
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/auth/token",
+      "json": {
+       "identifier": "svc-tb",
+       "secret": "dckr_pat_dummy"
+      }
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "access_token": "jwt-bearer-value"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/namespaces/acme/repositories/api"
+     },
+     "response": {
+      "status": 404,
+      "json": {
+       "message": "not found"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "POST",
+      "path": "/v2/namespaces/acme/repositories",
+      "json": {
+       "name": "api",
+       "namespace": "acme",
+       "description": "managed by trustbridge",
+       "is_private": true
+      }
+     },
+     "response": {
+      "status": 409,
+      "json": {
+       "message": "exists"
+      }
+     }
+    },
+    {
+     "request": {
+      "method": "GET",
+      "path": "/v2/namespaces/acme/repositories/api"
+     },
+     "response": {
+      "status": 200,
+      "json": {
+       "name": "api",
+       "namespace": "acme",
+       "description": "managed by trustbridge"
+      }
+     }
+    }
+   ]
+  }
+ }
+}
