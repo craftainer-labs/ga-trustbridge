@@ -22,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic.functional_validators import BeforeValidator
 from pydantic_settings import NoDecode, SettingsConfigDict
 
@@ -162,6 +162,22 @@ class TrustbridgeSettings(Settings):
     schema_poll_seconds: float = Field(default=2.0, gt=0)
     host_recheck_seconds: float = Field(default=float(DEFAULT_HOST_RECHECK_SECONDS), gt=0)
     host_check_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    # Admin API RBAC (ADR 0033). Instance roles are `trustbridge<sep><role>`, tenant roles
+    # `trustbridge<sep><host><sep><org><sep><role>`. The separator is configurable because
+    # Keycloak's acceptance of `:` in client role names is not confirmed by its docs.
+    rbac_alias_template_personas: bool = True
+    rbac_role_separator: str = ":"
+
+    @field_validator("rbac_role_separator")
+    @classmethod
+    def _check_separator(cls, value: str) -> str:
+        """One printable ASCII character that host names and org logins cannot contain."""
+        if len(value) != 1 or not value.isascii() or not value.isprintable() or value == " ":
+            raise ValueError("RBAC_ROLE_SEPARATOR must be one printable non-space ASCII character")
+        if value.isalnum() or value in ".-":
+            raise ValueError("RBAC_ROLE_SEPARATOR must not be a letter, digit, '.' or '-'")
+        return value
 
     @property
     def production(self) -> bool:
