@@ -2,8 +2,10 @@
 
 ## Status
 
-Accepted (2026-11-04). The user's G-api answers (2026-11-03) are recorded below. The implementation
-merged: the table, grants, triggers and purge path in NG6c, the emitters in NG6f. Builds on
+Accepted (2026-11-04). The user's G-api answers (2026-11-03) are recorded below. The storage
+layer (table, grants, triggers, purge path and read functions) is implemented in #18 (NG6c) and
+the emitters at the call sites that exist today in #21 (NG6f). Events whose flows do not exist
+yet are listed under "What is audited" and arrive with the items that build those flows. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (database roles, source address
 behind `TRUSTED_PROXIES`, N-1 migrations) and
 [0031](0031-tenancy-and-row-level-security.md) (tenant context and RLS), and is used by
@@ -50,16 +52,17 @@ One table, `audit_events`, one row per event, written by trustbridge code only:
 | `tenant_id` | nullable UUID; no foreign key, so events outlive a tenant row |
 | `actor_type` | `user` or `system` |
 | `actor_sub`, `actor_iss` | for `user`: the token's `sub` and `iss`, the durable id. Never email, handle or display name (EB-1). For `system`: a fixed name (`worker`, `reconciler`, `github-webhook`, `migrate`) and `actor_iss` null |
-| `on_behalf_of` | nullable; for a webhook-driven event the GitHub sender's numeric `id` and the delivery id, never the login |
+| `on_behalf_of` | `jsonb`, nullable; for a webhook-driven event `{"github_sender_id": <integer 1..2^63-1>, "delivery_id": "<1 to 100 printable characters>"}`: the GitHub sender's numeric `id` and the delivery id, never the login. Null, not an empty object, when the payload has no numeric sender. The database enforces the shape (`ck_audit_events_on_behalf_of`: null, or an object with a numeric `github_sender_id` and a string `delivery_id`) and `AuditEvent` validates the bounds. **User decision (2026-11-04):** structured JSON rather than a `key=value` string. The export nests the object |
 | `source_ip` | `inet`, from `request.client.host`; null for system events. Never read from `X-Forwarded-For` directly (0028) |
-| `action` | dotted verb, from a closed enum in code: `tenant.disable`, `credential.rotate`, `delivery.requeue`, `host.registration.start`, `authz.denied`, ... (there is no `authn.rejected` action: unauthenticated rejections are never rows, user decision 1) |
+| `action` | dotted verb, from a closed enum in code (`trustbridge.audit.actions.Action`): `authz.denied`, `tenant.sync`, `credential.issue`, `credential.rotate.begin`, `credential.rotate.finish`, `credential.revoke`, `credential.operation.abandoned`, `credential.orphan.delete`, `oidc_trust.create`, `oidc_trust.remove` and `audit.purge` are written today; `audit.export`, `tenant.disable`, `credential.rotate` (the API call), `delivery.requeue` and `host.registration.start` are named for the flows that do not exist yet. There is no `authn.rejected` action: unauthenticated rejections are never rows (user decision 1). **User decision (2026-11-04):** these names stay as implemented |
 | `resource_type`, `resource_id` | what was acted on; ids, not names that can change |
 | `outcome` | `success`, `denied` or `failure` |
 | `before`, `after` | `jsonb`, redacted (below); null when not applicable |
 | `request_id`, `trace_id` | correlation with logs and traces (ADR 0021) |
 | `schema_version` | integer version of the event shape |
 
-**What is audited** (the emitters are NG6f; the list is the contract):
+**What is audited** (the list is the contract; "Implemented" below says which items have an
+emitter on main):
 
 - Every mutating admin API call, success, failure and denial, with before/after.
 - Every authorization denial of an authenticated principal (`authz.denied`: role missing,
@@ -78,21 +81,40 @@ One table, `audit_events`, one row per event, written by trustbridge code only:
 - Authn failures: rejected, unauthenticated requests are logs and metrics only; authorization
   denials are rows (user decision 1 below).
 
+*Implemented in #21 (NG6f):* `authz.denied` (written by `require_role` through the sink; if the
+audit write fails the request fails), `tenant.sync` (the state a `created`, `deleted`, `suspend`
+or `unsuspend` installation event left behind), the credential events (issue, rotate begin and
+finish, revoke, abandoned operation, the orphan sweep's deletion, OIDC trust created and
+removed), and `audit.purge` (written by the purge function, #18). *Not yet implemented, with the
+item that builds the flow:* every mutating admin API call (NG6e), host registration and adapter
+configuration changes through the API (NG6e), `audit.export` and the audit read routes (NG6d),
+the tenant deletion's own events (NG6h), and wiring the denial sink into the mounted router
+(NG6d). An operation that ends `failed` (rolled back, previous state restored) has no event of
+its own; the `oidc_trust` event of a rolled-back kind change shows the reversal.
+
 **Same transaction.** For a mutating API call and for a credential state change, the audit row
 is inserted in the transaction that makes the change, so there is no change without its
 event and no event for a rolled-back change. Denials, and failures that roll back, are written
-in their own short transaction. Audit writes use the same tenant context as the action (0031).
+in their own short transaction, and so are the `tenant.sync` event (after the tenant change; a
+failure fails the handler, the delivery is retried and the sync repeats, so the event is
+at-least-once and a retry may add a second one) and the orphan sweep's events (the platform
+credential is already deleted; if the write fails the sweep finishes, logs each unaudited
+orphan, then fails). Credential state changes are implemented this way: the event is appended in
+the save's own session. Audit writes use the same tenant context as the action (0031).
 
 ### Redaction
 
 `before` and `after` are built by an **allow-list per resource type** in code (a function from
 the model to the fields that may be recorded), never by dumping a row and removing names. A
 new column is therefore absent from the audit until someone adds it. Secrets never appear:
-connection data is recorded as `{"configured": true}`, credentials as their id, adapter and
-state (and rotation timestamps), webhook bodies not at all. A free-text field (an error
-message) is recorded only through the same redaction used by the logs (ADR 0007), and a value
-longer than a fixed bound is truncated with a marker. A test plants a canary secret in every
-audited input and asserts it appears in no row (invariant 6).
+connection data is recorded as `{"configured": true}` (the allow-list for it arrives with the
+connection endpoints, NG6e), credentials as their adapter, kind, operation id and kind,
+generation, delivered flag, previous generation and retire-after timestamp (`redact.ALLOW_LISTS`:
+`tenant`, `credential`, `oidc_trust`, `authz_denial`), webhook bodies not at all. Every string
+value goes through `scrub_text` (the same policy the logs apply, ADR 0007: control characters
+dropped, secret-shaped parts masked, a PEM block replaced whole) and is truncated at 256
+characters with a marker; an unknown shape or a non-scalar value is an error. A test plants a
+canary secret in every audited input and asserts it appears in no row (invariant 6).
 
 ### Append-only enforcement
 
@@ -103,15 +125,21 @@ Three layers, from the database outward:
    or Helm's).
 2. **Trigger.** `BEFORE UPDATE OR DELETE` row triggers and a `BEFORE TRUNCATE` statement
    trigger raise unless `current_user` is `trustbridge_owner`. This catches a later grant
-   mistake and a bug in the app role's own code path.
+   mistake and a bug in the app role's own code path. A `BEFORE INSERT` trigger stamps
+   `occurred_at` and `recorded_at`, so a caller-supplied value is ignored.
 3. **Purge through one function.** Retention deletes rows only through
-   `tb_audit_purge(before timestamptz)`, a `SECURITY DEFINER` function owned by the owner
-   role with a fixed `search_path`, which refuses a cut-off newer than the configured
-   retention floor and writes its own summary event. It is the only path that satisfies the
-   trigger.
+   `tb_audit_purge(before timestamptz, min_days integer, batch integer)`, a `SECURITY DEFINER`
+   function with a fixed `search_path`, which deletes at most `batch` rows (1 to 10000) per call,
+   refuses a cut-off newer than the retention floor it is given (`min_days`, which callers pass
+   from `AUDIT_RETENTION_MIN_DAYS`) and writes its own summary event (`audit.purge`, actor
+   `reconciler`, with the cut-off, the row count and the floor) for each batch that deleted
+   rows. It is owned by the owner role when migrations run as the owner (the explicit
+   `ALTER ... OWNER` is deferred to the next release, as for the other definer functions). It is
+   the only path that satisfies the trigger.
 
 RLS (0031) is enabled and forced on `audit_events` from creation (a new table, so no previous
-release touches it; 0031 lists it as a seventh RLS table). Its policies: an `owner_all` policy
+release touches it; 0031 lists it as a seventh RLS table; like every policy in the migration it
+is created only once both roles exist, which production guarantees). Its policies: an `owner_all` policy
 for `trustbridge_owner` (the definer functions `tb_audit_purge` and `tb_audit_list` run as the
 owner and need it, and the append-only trigger still gates the owner's changes), and for the
 app role `INSERT` with `tenant_id` equal to the context tenant or
@@ -139,7 +167,9 @@ export, which call `tb_audit_list`. An auditor's reads are themselves not audite
 
 The transport is user decision 2 below. The export is:
 
-- **Ordered and resumable** by `seq`, one JSON object per event with the columns above.
+- **Ordered and resumable** by `seq`, one JSON object per event with the columns above
+  (`on_behalf_of`, `before` and `after` are nested objects or null). The reading functions
+  (`export_ndjson`, `list_events`) are implemented in #18; the routes are NG6d.
 - **Lag-bounded.** Because identity values can commit out of order (a transaction with a lower
   `seq` can become visible after one with a higher `seq`), an export returns only events whose
   `recorded_at` is older than `AUDIT_EXPORT_LAG_SECONDS` (default 30), so a SIEM that resumes
@@ -147,27 +177,35 @@ The transport is user decision 2 below. The export is:
   audit-writing transaction stays open longer than the lag, so the admin API, the worker and
   the deletion batches run with a `transaction_timeout` (or `statement_timeout` plus
   `idle_in_transaction_session_timeout`) below the lag, and the lag is validated at startup
-  against that timeout. This is a stated consistency model, not real-time delivery.
+  against that timeout. This is a stated consistency model, not real-time delivery. The lag
+  filter is implemented (`tb_audit_list`, `export_ndjson`); the timeouts and the startup check
+  are not on main yet (no such timeout exists, and the engine is the template's) and arrive
+  with the api (NG6d) and the deletion batches (NG6h).
 - **Filtered by scope** (the reader's tenants) and by a time or `seq` range.
 - Itself audited.
 
 ### Retention
 
-`AUDIT_RETENTION_DAYS` (proposed default 365; `0` means never purge). The reconciler runs the
-purge as a singleton duty (EB-6) through `tb_audit_purge`, in bounded batches so it never
-holds a long lock. The function refuses a cut-off inside a configured floor
-(`AUDIT_RETENTION_MIN_DAYS`, default 90) so a typo cannot erase recent history. The retention
+`AUDIT_RETENTION_DAYS` (default 365; `0` means never purge; a non-zero value below
+`AUDIT_RETENTION_MIN_DAYS` is refused at startup). The reconciler runs the purge as a singleton
+duty (EB-6) through `tb_audit_purge`, in bounded batches so it never holds a long lock
+(`purge_expired` implements the batch loop, one short transaction per batch; the reconciler duty
+that calls it is not wired on main yet). The function refuses a cut-off inside a configured
+floor (`AUDIT_RETENTION_MIN_DAYS`, default 90) so a typo cannot erase recent history. The retention
 interacts with EB-15 deletion ([0034](0034-tenant-data-deletion.md)): the deletion's own
 events always survive, and 0034 holds the open decision on the rest of a deleted tenant's
 rows.
 
 ### Migration
 
-Part of the audit work (NG6c): one expand migration creates the table, the indexes
-(`(tenant_id, seq)`, `(occurred_at)`, `(actor_sub, seq)`), the grants, the triggers, the two
-functions and the policies; the application writes to it once the migration has run, and the
-previous release, which never touches the table, is unaffected (NFR-0027). Because the table
-is new, the migration writes the existing `schema_compat` without a bump.
+Implemented in #18 (NG6c): one expand migration creates the table, the indexes
+(`(tenant_id, seq)`, `(occurred_at)`, `(actor_sub, seq)` and `(recorded_at)`, for the export's lag
+bound), the grants, the triggers, the two functions and the policies; the application writes to
+it once the migration has run, and the previous release, which never touches the table, is
+unaffected (NFR-0027). Because the table is new, the migration writes the existing
+`schema_compat` without a bump. A second revision in #21 (NG6f) changes `on_behalf_of` from
+`text` to `jsonb` and adds its CHECK: nothing had written the column, so it ships in the same
+release as the emitters and needs no backfill.
 
 ## User decisions (G-api, 2026-11-03)
 
@@ -197,10 +235,12 @@ Sources: EB-4; EB-5; OWASP Logging Cheat Sheet; NDJSON; NIST SP 800-92 (see Sour
 None open in this ADR. The question of what happens to a deleted tenant's audit rows is a
 decision in [0034](0034-tenant-data-deletion.md), because it interacts with deletion.
 
-## Invariants the implementation must test
+## Invariants the implementation tests
 
-Each is one testable sentence; NG6c and NG6f implement and test them against a real Postgres
-with the app role.
+Each is one testable sentence, tested against a real Postgres with the app role. On main
+(#18, #21), 1 to 4, 3a, 6, 9 (for credential changes), 10, 12 (the store half), 15 (the purge
+function and its batch loop) and 16 are tested; the rest, and the route halves of 12 and 15,
+arrive with the routes and flows (NG6d, NG6e, NG6h).
 
 **Append-only**
 
@@ -262,7 +302,7 @@ with the app role.
 - **Clock.** `occurred_at` and `recorded_at` are the database clock; skew between replicas is irrelevant, but
   the SIEM correlation with log timestamps from pods is by `request_id`, not time.
 - **GitHub-originated actors.** A webhook-driven change records the GitHub sender's numeric
-  id in `on_behalf_of`; mapping it to a person is the SIEM's or the customer's job.
+  id (and the delivery id) in `on_behalf_of`; mapping it to a person is the SIEM's or the customer's job.
 - **Event versioning.** `schema_version` lets the shape evolve; the export documents it in the
   OpenAPI schema (0033) and treats additive changes as compatible.
 - **Reads of audit data** are not logged per row (only exports). If an auditor-of-auditors
