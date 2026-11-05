@@ -57,6 +57,7 @@ from trustbridge.worker.schema import register_schema_check
 
 logger = logging.getLogger(__name__)
 LOOPBACK_ONLY = "127.0.0.1"
+SHUTDOWN_FLUSH_SECONDS = 5.0
 
 
 def _trusted_hosts(settings: TrustbridgeSettings) -> list[str] | str:
@@ -271,9 +272,13 @@ async def _flush_denials(throttle: ThrottledDenials, interval: int) -> None:
 
 
 async def _final_flush(throttle: ThrottledDenials) -> None:
-    """One last pass at graceful shutdown (closed windows only); a failure is logged."""
+    """One last pass at graceful shutdown (closed windows only); a failure is logged.
+
+    Bounded, so a slow counter store cannot push the shutdown past the container's grace period.
+    """
     try:
-        await throttle.flush()
+        async with asyncio.timeout(SHUTDOWN_FLUSH_SECONDS):
+            await throttle.flush()
     except Exception:
         logger.exception("denial summary flush at shutdown failed")
 

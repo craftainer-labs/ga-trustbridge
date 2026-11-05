@@ -270,6 +270,14 @@ async def test_two_replicas_flushing_at_once_write_one_row() -> None:
     assert [r.suppressed for r in sink.rows].count(4) == 1
 
 
+def _claim_key(sub: str = "mallory", *, window: int) -> str:
+    return ThrottledDenials._claim_key(
+        _throttle(Sink(), InMemoryWindowCounter(), Clock()),
+        ThrottledDenials._base(_denial(sub=sub)),
+        window,
+    )
+
+
 async def test_a_window_claimed_elsewhere_is_not_written_again() -> None:
     """Another replica holds the claim marker: this one drops the pending entry, writes nothing."""
     counter = InMemoryWindowCounter()
@@ -278,12 +286,38 @@ async def test_a_window_claimed_elsewhere_is_not_written_again() -> None:
     for _ in range(7):
         await throttle.denied(_denial())
     window = int(clock.now // WINDOW)
-    key = ThrottledDenials._key(ThrottledDenials._base(_denial()), window)
-    await counter.incr(f"{key}:summary", 100)
+    await counter.incr(_claim_key(window=window), 100)
     clock.now += WINDOW
     assert await throttle.flush() == 0
-    assert await counter.smembers(PENDING_KEY) == set()
-    assert len(sink.rows) == 5
+    assert (counter.sets, len(sink.rows)) == ({}, 5)
+
+
+async def test_a_later_denial_skips_a_window_another_replica_already_claimed() -> None:
+    """Path (a) with the claim marker taken elsewhere: no summary, the new denial is recorded."""
+    counter = InMemoryWindowCounter()
+    sink, clock = Sink(), Clock()
+    throttle = _throttle(sink, counter, clock)
+    for _ in range(7):
+        await throttle.denied(_denial())
+    window = int(clock.now // WINDOW)
+    await counter.incr(_claim_key(window=window), 100)
+    clock.now += WINDOW
+    await throttle.denied(_denial(resource="fresh"))
+    assert [r.suppressed for r in sink.rows] == [0] * 6
+    assert counter.sets == {}
+
+
+async def test_a_denial_straddling_the_window_end_is_recorded_not_lost() -> None:
+    """The window was summarised already: a late suppressed denial is a row, not a lost count."""
+    counter = InMemoryWindowCounter()
+    sink, metric = Sink(), Metric()
+    throttle = _throttle(sink, counter, Clock(), metric)
+    for _ in range(5):
+        await throttle.denied(_denial())
+    await counter.incr(_claim_key(window=int(6000 // WINDOW)), 100)
+    await throttle.denied(_denial(resource="late"))
+    assert (len(sink.rows), sink.rows[-1].tenant_id, metric.total) == (6, "late", 0)
+    assert counter.sets == {}
 
 
 async def test_the_summary_describes_the_last_suppressed_denial() -> None:
@@ -298,7 +332,7 @@ async def test_the_summary_describes_the_last_suppressed_denial() -> None:
 
 
 class _NoSets(InMemoryWindowCounter):
-    """A counter whose pending set cannot be written."""
+    """A counter whose pending index cannot be written."""
 
     async def sadd(self, key: str, member: str, ttl_seconds: int) -> None:
         raise ConnectionError("down")
@@ -314,33 +348,31 @@ async def test_a_denial_that_cannot_be_noted_for_a_summary_is_recorded_itself() 
     assert metric.total == 0
 
 
-async def test_flush_skips_foreign_future_and_malformed_entries() -> None:
-    """Only closed `<hash>:<window>` members are summarised; others stay."""
+async def test_flush_forgets_empty_bases_and_ignores_future_and_malformed_windows() -> None:
+    """An index entry without windows is dropped; open and malformed windows stay."""
     counter = InMemoryWindowCounter()
     sink, clock = Sink(), Clock()
     throttle = _throttle(sink, counter, clock)
     now = int(clock.now // WINDOW)
-    for member in ("garbage", f"abc:{now}", f"abc:{now + 5}", "abc:x"):
-        await counter.sadd(PENDING_KEY, member, 100)
+    await counter.sadd(PENDING_KEY, "empty", 100)
+    await counter.sadd(PENDING_KEY, "open", 100)
+    for window in (str(now), str(now + 5), "x"):
+        await counter.sadd(f"{PENDING_KEY}:open", window, 100)
     assert await throttle.flush() == 0
-    assert await counter.smembers(PENDING_KEY) == {
-        "garbage",
-        f"abc:{now}",
-        f"abc:{now + 5}",
-        "abc:x",
-    }
-    await throttle.denied(_denial())  # path (a) ignores other pairs' and malformed members
-    assert len(sink.rows) == 1
+    assert await counter.smembers(PENDING_KEY) == {"open"}
+    assert await counter.smembers(f"{PENDING_KEY}:open") == {str(now), str(now + 5), "x"}
+    assert sink.rows == []
 
 
 async def test_an_expired_count_drops_the_pending_entry_without_a_row() -> None:
-    """A pending member whose count is gone has nothing left to summarise."""
+    """A pending window whose count is gone has nothing left to summarise (and is no error)."""
     counter = InMemoryWindowCounter()
     sink, clock = Sink(), Clock()
     throttle = _throttle(sink, counter, clock)
-    await counter.sadd(PENDING_KEY, "abc:1", 100)
+    await counter.sadd(PENDING_KEY, "abc", 100)
+    await counter.sadd(f"{PENDING_KEY}:abc", "1", 100)
     assert await throttle.flush() == 0
-    assert await counter.smembers(PENDING_KEY) == set()
+    assert counter.sets == {}
 
 
 async def test_a_lost_sample_is_logged_not_invented(caplog: pytest.LogCaptureFixture) -> None:
@@ -355,7 +387,7 @@ async def test_a_lost_sample_is_logged_not_invented(caplog: pytest.LogCaptureFix
     with caplog.at_level(logging.ERROR):
         assert await throttle.flush() == 0
     assert "lost its sample" in caplog.text
-    assert await counter.smembers(PENDING_KEY) == set()
+    assert counter.sets == {}
 
 
 async def test_one_failing_entry_does_not_stop_the_flush() -> None:
@@ -383,17 +415,91 @@ async def test_one_failing_entry_does_not_stop_the_flush() -> None:
     assert await throttle.flush() == 1  # the failed entry was still pending
 
 
-async def test_a_later_denial_skips_a_window_another_replica_already_claimed() -> None:
-    """Path (a) with the claim marker taken elsewhere: no summary, the new denial is recorded."""
-    counter = InMemoryWindowCounter()
-    sink, clock = Sink(), Clock()
-    throttle = _throttle(sink, counter, clock)
+class _FlakySink(Sink):
+    """A sink that fails its first `failures` writes."""
+
+    def __init__(self, failures: int) -> None:
+        """Fail `failures` times."""
+        super().__init__()
+        self.failures = failures
+
+    async def denied(self, denial: Denial) -> None:
+        """Fail, or record."""
+        if self.failures and denial.suppressed:
+            self.failures -= 1
+            raise ConnectionError("db down")
+        await super().denied(denial)
+
+
+async def test_a_summary_whose_row_could_not_be_written_is_retried() -> None:
+    """The claim is released when the sink fails, so the window is not lost."""
+    valkey = FakeRedis()
+    sink, clock = _FlakySink(1), Clock()
+    throttle = _throttle(sink, ValkeyWindowCounter(as_redis(valkey)), clock)
     for _ in range(7):
         await throttle.denied(_denial())
-    window = int(clock.now // WINDOW)
-    key = ThrottledDenials._key(ThrottledDenials._base(_denial()), window)
-    await counter.incr(f"{key}:summary", 100)
     clock.now += WINDOW
+    with pytest.raises(ConnectionError):
+        await throttle.flush()
+    assert await throttle.flush() == 1
+    assert [r.suppressed for r in sink.rows if r.suppressed] == [2]
+
+
+async def test_a_summary_written_but_still_indexed_is_not_written_twice() -> None:
+    """Forgetting the entry failed after the row: the next pass finds the claim and forgets it."""
+    valkey = FakeRedis()
+    sink, clock = Sink(), Clock()
+    throttle = _throttle(sink, ValkeyWindowCounter(as_redis(valkey)), clock)
+    for _ in range(7):
+        await throttle.denied(_denial())
+    clock.now += WINDOW
+    real = valkey.srem
+
+    async def failing(name: str, *values: str) -> int:
+        raise ConnectionError("blip")
+
+    valkey.srem = failing  # type: ignore[method-assign]
+    assert await throttle.flush() == 1
+    valkey.srem = real  # type: ignore[method-assign]
+    assert await throttle.flush() == 0
+    assert valkey.sets == {}
+    assert [r.suppressed for r in sink.rows if r.suppressed] == [2]
+
+
+class _FlakyGet(InMemoryWindowCounter):
+    """A counter whose `get` fails on its n-th call once armed."""
+
+    def __init__(self) -> None:
+        """Start unarmed."""
+        super().__init__()
+        self.fail_on: int | None = None
+
+    async def get(self, key: str) -> int:
+        """Count calls; fail on the armed one."""
+        if self.fail_on is not None:
+            self.fail_on -= 1
+            if self.fail_on == 0:
+                raise ConnectionError("blip")
+        return await super().get(key)
+
+
+async def test_summaries_claimed_before_a_failure_are_still_written() -> None:
+    """Two closed windows; the second read fails: the first, already claimed, is written."""
+    counter = _FlakyGet()
+    sink, clock = Sink(), Clock()
+    throttle = _throttle(sink, counter, clock)
+    for _ in range(8):
+        await throttle.denied(_denial())
+    clock.now += WINDOW
+    counter.fail_on = 1  # the claim of the first window fails, so it stays pending
+    for _ in range(7):
+        await throttle.denied(_denial())
+    assert [r.suppressed for r in sink.rows if r.suppressed] == []
+    clock.now += 3 * WINDOW
+    counter.fail_on = 2
     await throttle.denied(_denial(resource="fresh"))
-    assert [r.suppressed for r in sink.rows] == [0] * 6
-    assert await counter.smembers(PENDING_KEY) == set()
+    assert [r.suppressed for r in sink.rows if r.suppressed] == [3]
+    assert sink.rows[-1].tenant_id == "fresh"
+    counter.fail_on = None
+    assert await throttle.flush() == 1  # the window whose read failed is still pending
+    assert [r.suppressed for r in sink.rows if r.suppressed] == [3, 2]

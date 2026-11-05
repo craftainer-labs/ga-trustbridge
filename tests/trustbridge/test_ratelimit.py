@@ -116,3 +116,9 @@ async def test_text_and_sets_round_trip_on_both_counters() -> None:
         assert await counter.smembers("s") == {"a", "b"}
         await counter.srem("s", "a")
         assert await counter.smembers("s") == {"b"}
+        await counter.srem("s", "b")
+        await counter.srem("absent", "x")
+        assert await counter.smembers("s") == set()
+        await counter.delete("t")
+        await counter.delete("t")
+        assert await counter.get_text("t") is None

@@ -84,9 +84,10 @@ window count lives in Valkey (shared by the replicas, key
 `tb:audit:denied:<hash of sub and reason>:<window>`); a claim marker (`...:summary`) makes the
 summary happen once per window.
 
-**Nothing disappears.** A window that suppressed anything is entered in the Valkey set
-`tb:audit:denied:pending` (member `<hash>:<window>`) with the last suppressed denial stored as its
-sample (`...:<window>:sample`). All of it is kept `max(2 * window, 1 day)`. The summary is then
+**Nothing disappears.** A window that suppressed anything is entered in a Valkey index: the set
+`tb:audit:denied:pending` of subject/reason hashes and, per hash, the set
+`tb:audit:denied:pending:<hash>` of window numbers, with the last suppressed denial stored as the
+window's sample (`...:<window>:sample`). All of it is kept `max(2 * window, 1 day)`. The summary is then
 written by either of two paths, both reading that set (no process-local state):
 
 - the first denial of the same (subject, reason) in a later window summarises EVERY closed pending
@@ -95,9 +96,12 @@ written by either of two paths, both reading that set (no process-local state):
   it at startup, every window, and at graceful shutdown, so a restarted or a second replica
   finishes the other's work. The still-open window is never summarised early.
 
-A Valkey outage or timeout (`AUDIT_DENIED_TIMEOUT_MS`, default 50) fails open to recording the
-row: the audit trail is never thinned by an outage, and the request path stays bounded. A summary
-is at-most-once: a replica that claims a window and dies before writing the row loses that row.
+A window leaves the index only after its row is written; if the write fails or the task is
+cancelled, the claim is released and the window is retried. A Valkey outage or timeout
+(`AUDIT_DENIED_TIMEOUT_MS`, default 50) fails open to recording the row: the audit trail is never
+thinned by an outage, and the request path stays bounded. A denial that was recorded because
+noting it failed is also counted, so that summary can be one too high. The one remaining loss: a
+process killed between claiming a window and writing its row.
 
 ## Read and export routes (NG6d)
 

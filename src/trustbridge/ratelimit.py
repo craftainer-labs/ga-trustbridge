@@ -63,7 +63,11 @@ class WindowCounter(Protocol):
         ...
 
     async def srem(self, key: str, member: str) -> None:
-        """Remove `member` from the set `key`."""
+        """Remove `member` from the set `key` (a set left empty ceases to exist)."""
+        ...
+
+    async def delete(self, key: str) -> None:
+        """Remove `key`, whatever it holds."""
         ...
 
 
@@ -112,6 +116,10 @@ class ValkeyWindowCounter:
     async def srem(self, key: str, member: str) -> None:
         """`SREM key member`."""
         await self._r.srem(key, member)
+
+    async def delete(self, key: str) -> None:
+        """`DEL key`."""
+        await self._r.delete(key)
 
 
 class InMemoryWindowCounter:
@@ -183,8 +191,19 @@ class InMemoryWindowCounter:
         return set(self.sets.get(key, ())) if self._live(key) else set()
 
     async def srem(self, key: str, member: str) -> None:
-        """Remove from a set."""
-        self.sets.get(key, set()).discard(member)
+        """Remove from a set; an emptied set is dropped, as Valkey does."""
+        members = self.sets.get(key)
+        if members is None:
+            return
+        members.discard(member)
+        if not members:
+            del self.sets[key]
+            self._expires.pop(key, None)
+
+    async def delete(self, key: str) -> None:
+        """Remove the key from every kind of store."""
+        for store in (self.counts, self.texts, self.sets, self._expires):
+            store.pop(key, None)
 
 
 def source_key(host: str | None) -> str:

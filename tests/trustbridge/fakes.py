@@ -86,7 +86,19 @@ class FakeRedis:
         members = self.sets.get(name, set())
         before = len(members)
         members.difference_update(values)
+        if name in self.sets and not members:
+            del self.sets[name]
         return before - len(members)
+
+    async def delete(self, *names: str) -> int:
+        """`DEL`."""
+        self._check()
+        gone = 0
+        for name in names:
+            for store in (self.kv, self.texts, self.sets, self.expiries):
+                if store.pop(name, None) is not None:
+                    gone += 1
+        return gone
 
     async def sadd(self, name: str, *values: str) -> int:
         """Add members to a set."""
