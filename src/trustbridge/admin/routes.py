@@ -6,40 +6,52 @@ handlers only read.
 """
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import cache
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from trustbridge.admin.access import all_tenants, tenant_ref
+from trustbridge.admin import queries
+from trustbridge.admin.access import tenants_page
 from trustbridge.admin.cursor import MAX_SEQ, decode_cursor, encode_cursor, invalid_cursor, paginate
 from trustbridge.admin.guards import guard, guard_any_grant
 from trustbridge.admin.problems import AdminProblem
 from trustbridge.admin.runtime import AdminRuntime, admin_runtime
 from trustbridge.admin.schemas import (
+    AdapterPage,
     AuditEventOut,
     AuditEventPage,
+    CredentialPage,
+    DeliveryDetailOut,
+    DeliveryPage,
     GrantOut,
     HostOut,
     HostPage,
     MeOut,
+    OperationPage,
     ProblemOut,
+    RepositoryPage,
+    ResourcePage,
     TenantOut,
     TenantPage,
     TenantRefOut,
 )
 from trustbridge.audit import AuditQuery, Outcome, list_events, record_export
-from trustbridge.rbac import Principal, Role, get_principal, tenant_roles
+from trustbridge.audit.store import get_event
+from trustbridge.rbac import Principal, Role, get_principal, instance_roles
 from trustbridge.rbac.deps import client_ip, safe_request_id
-from trustbridge.tenancy import TenantInfo, tenant_session
+from trustbridge.tenancy import TenantInfo, get_tenant, tenant_session
+from trustbridge.worker.secrets import SecretUnavailable
 
 logger = logging.getLogger(__name__)
 DEFAULT_LIMIT = 50
@@ -68,15 +80,15 @@ async def get_me(
     principal: Annotated[Principal, Depends(get_principal)],
     runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
 ) -> MeOut:
-    """The caller: `sub`, `iss`, role grants and the tenants those grants reach."""
+    """The caller: `sub`, `iss`, role grants and (up to 200 of) the tenants those grants reach."""
     grants = sorted(principal.grants, key=lambda g: (g.role.value, g.host or "", g.org or ""))
     tenants: list[TenantInfo] = []
     if runtime.session_factory is not None:
-        tenants = [
-            t
-            for t in await all_tenants(runtime.session_factory)
-            if tenant_roles(principal, tenant_ref(t))
-        ]
+        # The first page of the tenants the grants reach (by id); `GET /tenants` pages through
+        # all of them. Bounded so an instance-wide grant does not load every tenant per call.
+        tenants = await tenants_page(
+            runtime.session_factory, principal, after=None, limit=MAX_LIMIT
+        )
     return MeOut(
         sub=principal.sub,
         iss=principal.iss,
@@ -93,27 +105,35 @@ async def get_me(
     )
 
 
-_spec: dict[str, Any] = {}
-
-
-def openapi_spec() -> dict[str, Any]:
+def build_spec() -> dict[str, Any]:
     """The OpenAPI document of this router only (the template's routes stay out)."""
-    if not _spec:
-        _spec.update(
-            get_openapi(
-                title="trustbridge admin API",
-                version="1.0.0",
-                summary="Administrative API v1 of trustbridge",
-                routes=router.routes,
-            )
-        )
-    return _spec
+    return get_openapi(
+        title="trustbridge admin API",
+        version="1.0.0",
+        summary="Administrative API v1 of trustbridge",
+        routes=router.routes,
+    )
 
 
-@router.get("/openapi.json", dependencies=guard(None))
-async def get_openapi_spec() -> dict[str, Any]:
+def snapshot_text() -> str:
+    """The canonical spec text: what `docs/openapi/admin-v1.json` holds (ADR 0033 inv. 11)."""
+    return json.dumps(build_spec(), indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+@cache
+def _spec_body() -> bytes:
+    """The served bytes: immutable, built on the first request (the routes are fixed by then)."""
+    return snapshot_text().encode()
+
+
+@router.get(
+    "/openapi.json",
+    dependencies=guard(None),
+    responses={200: {"description": "The OpenAPI 3 document", "content": {"application/json": {}}}},
+)
+async def get_openapi_spec() -> Response:
     """The OpenAPI 3 document of the admin API v1 (any authenticated caller)."""
-    return openapi_spec()
+    return Response(_spec_body(), media_type="application/json")
 
 
 # ---- hosts ----------------------------------------------------------------------------
@@ -163,6 +183,10 @@ def _tenant_out(info: TenantInfo) -> TenantOut:
     )
 
 
+def _tenant_cursor(info: TenantInfo) -> str:
+    return encode_cursor(str(info.id), str(info.id))
+
+
 @router.get("/tenants", response_model=TenantPage, dependencies=guard_any_grant())
 async def list_tenants_route(
     principal: Annotated[Principal, Depends(get_principal)],
@@ -171,12 +195,16 @@ async def list_tenants_route(
     cursor: Cursor = None,
 ) -> TenantPage:
     """The tenants the caller may read, ordered by id."""
-    rows = [
-        t
-        for t in await all_tenants(_factory(runtime))
-        if Role.VIEWER in tenant_roles(principal, tenant_ref(t))
-    ]
-    page, next_cursor = paginate(rows, key=lambda t: str(t.id), limit=limit, cursor=cursor)
+    after: UUID | None = None
+    if cursor is not None:
+        position, _ident = decode_cursor(cursor)
+        try:
+            after = UUID(str(position))
+        except ValueError:
+            raise invalid_cursor() from None
+    rows = await tenants_page(_factory(runtime), principal, after=after, limit=limit + 1)
+    page = rows[:limit]
+    next_cursor = _tenant_cursor(page[-1]) if len(rows) > limit else None
     return TenantPage(items=[_tenant_out(t) for t in page], next_cursor=next_cursor)
 
 
@@ -189,10 +217,149 @@ async def get_tenant_route(
     tenant_id: UUID, runtime: Annotated[AdminRuntime, Depends(admin_runtime)]
 ) -> TenantOut:
     """One tenant; an unknown or ungranted id is a 404."""
-    for info in await all_tenants(_factory(runtime)):
-        if info.id == tenant_id:
-            return _tenant_out(info)
-    raise AdminProblem(404, "not-found", "Tenant not found")
+    info = await get_tenant(_factory(runtime), tenant_id)
+    if info is None:
+        raise AdminProblem(404, "not-found", "Tenant not found")
+    return _tenant_out(info)
+
+
+# ---- tenant data: repositories, adapters, resources, credentials, operations ------------------
+
+
+@router.get(
+    "/tenants/{tenant_id}/repositories",
+    response_model=RepositoryPage,
+    dependencies=guard(Role.VIEWER, tenant_param="tenant_id"),
+)
+async def list_repositories(
+    tenant_id: UUID,
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+    limit: Limit = DEFAULT_LIMIT,
+    cursor: Cursor = None,
+) -> RepositoryPage:
+    """The repositories the tenant's installation can see, by numeric id."""
+    async with _factory(runtime)() as session, session.begin():
+        items, next_cursor = await queries.repositories(
+            session, tenant_id, limit=limit, cursor=cursor
+        )
+    return RepositoryPage(items=items, next_cursor=next_cursor)
+
+
+@router.get(
+    "/tenants/{tenant_id}/adapters",
+    response_model=AdapterPage,
+    dependencies=guard(Role.VIEWER, tenant_param="tenant_id"),
+)
+async def list_adapters(
+    tenant_id: UUID,
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+    limit: Limit = DEFAULT_LIMIT,
+    cursor: Cursor = None,
+) -> AdapterPage:
+    """The enabled adapters: name, whether the tenant has connection data, capabilities.
+
+    Never the connection data (ADR 0033 invariant 8): the store is only asked which entries
+    exist.
+    """
+    rows = []
+    if runtime.adapters is not None:
+        try:
+            rows = await runtime.adapters.for_tenant(tenant_id)
+        except SecretUnavailable:
+            logger.exception("adapters: the connection store cannot be listed")
+            raise AdminProblem(503, "unavailable", "The connection store is unavailable") from None
+    page, next_cursor = paginate(rows, key=lambda a: a.name, limit=limit, cursor=cursor)
+    return AdapterPage(items=page, next_cursor=next_cursor)
+
+
+@router.get(
+    "/tenants/{tenant_id}/resources",
+    response_model=ResourcePage,
+    dependencies=guard(Role.VIEWER, tenant_param="tenant_id"),
+)
+async def list_resources(
+    tenant_id: UUID,
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+    limit: Limit = DEFAULT_LIMIT,
+    cursor: Cursor = None,
+) -> ResourcePage:
+    """The tenant's non-secret adapter resources, by adapter and key."""
+    async with _factory(runtime)() as session, session.begin():
+        items, next_cursor = await queries.resources(session, tenant_id, limit=limit, cursor=cursor)
+    return ResourcePage(items=items, next_cursor=next_cursor)
+
+
+@router.get(
+    "/tenants/{tenant_id}/credentials",
+    response_model=CredentialPage,
+    dependencies=guard(Role.VIEWER, tenant_param="tenant_id"),
+)
+async def list_credentials(
+    tenant_id: UUID,
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+    limit: Limit = DEFAULT_LIMIT,
+    cursor: Cursor = None,
+) -> CredentialPage:
+    """The tenant's credential scopes: state, names and timestamps, never a value."""
+    async with _factory(runtime)() as session, session.begin():
+        items, next_cursor = await queries.credentials(
+            session, tenant_id, limit=limit, cursor=cursor
+        )
+    return CredentialPage(items=items, next_cursor=next_cursor)
+
+
+@router.get(
+    "/tenants/{tenant_id}/operations",
+    response_model=OperationPage,
+    dependencies=guard(Role.VIEWER, tenant_param="tenant_id"),
+)
+async def list_operations(
+    tenant_id: UUID,
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+    limit: Limit = DEFAULT_LIMIT,
+    cursor: Cursor = None,
+) -> OperationPage:
+    """The tenant's credential operations, newest first."""
+    async with _factory(runtime)() as session, session.begin():
+        items, next_cursor = await queries.operations(
+            session, tenant_id, limit=limit, cursor=cursor
+        )
+    return OperationPage(items=items, next_cursor=next_cursor)
+
+
+# ---- deliveries (host-scoped: instance roles only) -----------------------------------------
+
+
+@router.get("/deliveries", response_model=DeliveryPage, dependencies=guard(Role.VIEWER))
+async def list_deliveries(
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+    limit: Limit = DEFAULT_LIMIT,
+    cursor: Cursor = None,
+) -> DeliveryPage:
+    """Received webhook deliveries, newest first: status, attempts and error, no headers or body."""
+    async with _factory(runtime)() as session, session.begin():
+        items, next_cursor = await queries.deliveries(session, limit=limit, cursor=cursor)
+    return DeliveryPage(items=items, next_cursor=next_cursor)
+
+
+@router.get(
+    "/deliveries/{host}/{delivery_id}",
+    response_model=DeliveryDetailOut,
+    dependencies=guard(Role.VIEWER),
+)
+async def get_delivery(
+    host: Annotated[str, Path(max_length=63)],
+    delivery_id: Annotated[str, Path(max_length=255)],
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> DeliveryDetailOut:
+    """One delivery. The stored payload (never the headers) is returned only to an `operator`."""
+    with_payload = Role.OPERATOR in instance_roles(principal)
+    async with _factory(runtime)() as session, session.begin():
+        found = await queries.delivery(session, host, delivery_id, with_payload=with_payload)
+    if found is None:
+        raise AdminProblem(404, "not-found", "Delivery not found")
+    return found
 
 
 # ---- audit ----------------------------------------------------------------------------
@@ -484,3 +651,20 @@ async def export_tenant_audit_events(  # noqa: PLR0913 - the documented query su
     """Stream one tenant's audit events as NDJSON; itself audited."""
     query = _query(filters, after_seq=since_seq)
     return _export_response(request, runtime, principal, query, tenant_id)
+
+
+# Registered after the `/audit-events/export` routes: a fixed segment must win over `{event_id}`.
+@router.get(
+    "/audit-events/{event_id}",
+    response_model=AuditEventOut,
+    dependencies=guard(Role.AUDITOR),
+)
+async def get_audit_event(
+    event_id: UUID, runtime: Annotated[AdminRuntime, Depends(admin_runtime)]
+) -> AuditEventOut:
+    """One audit event of any tenant, or a null-tenant event (instance-scoped auditor)."""
+    async with _factory(runtime)() as session, session.begin():
+        record = await get_event(session, event_id)
+    if record is None:
+        raise AdminProblem(404, "not-found", "Audit event not found")
+    return AuditEventOut.model_validate(record)

@@ -5,6 +5,7 @@
 * `list_events` and `export_ndjson` read a tenant's events directly (RLS applies, and the tenant
   is also filtered explicitly) or, with `instance_scope=True`, every tenant's through
   `tb_audit_list()`, which is for an instance-scoped auditor only: this layer does not check roles.
+* `get_event` reads one event by id through `tb_audit_get()` (instance scope, like `tb_audit_list`).
 * `purge_batch` and `purge_expired` delete only through `tb_audit_purge()`.
 """
 
@@ -53,6 +54,7 @@ _LIST_ALL = text(
     "CAST(:action AS text), CAST(:resource_type AS text), CAST(:resource_id AS text), "
     "CAST(:outcome AS text), CAST(:lag AS double precision), :descending, :limit)"
 )
+_GET_ONE = text(f"SELECT {_COLUMNS} FROM tb_audit_get(CAST(:id AS uuid))")  # noqa: S608 -- constants only
 _LAG_BOUND = text(
     f"SELECT COALESCE(min(seq), {_MAX_SEQ}) FROM audit_events WHERE tenant_id = :tenant_id "  # noqa: S608 -- constants only
     "AND recorded_at > clock_timestamp() - make_interval(secs => CAST(:lag AS double precision))"
@@ -214,6 +216,16 @@ async def list_events(
     more = len(rows) > query.limit
     items = rows[: query.limit]
     return AuditPage(items=items, next_seq=items[-1].seq if more else None)
+
+
+async def get_event(session: AsyncSession, event_id: UUID) -> AuditRecord | None:
+    """The event with this id (any tenant, null-tenant events included), or None.
+
+    Reads through `tb_audit_get()`, so it is for an instance-scoped auditor only; like
+    `list_events(instance_scope=True)` this layer does not check roles. Does not commit.
+    """
+    row = (await session.execute(_GET_ONE, {"id": event_id})).mappings().first()
+    return None if row is None else _record(row)
 
 
 async def export_ndjson(  # noqa: PLR0913 - the two scope arguments must stay separate keywords

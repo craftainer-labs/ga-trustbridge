@@ -3,7 +3,11 @@
 ## Status
 
 Proposed. G-api answers from the user are recorded below (2026-11-03); none are open.
-NG6d-1 (#23) implemented `me`, openapi, hosts, tenants and audit read/export. The other routes arrive with NG6d-2, NG6e and NG6h.
+NG6d-1 (#23) implemented `me`, openapi, hosts, tenants and audit read/export. NG6d-2 implemented
+the rest of the read side except `/tenant-deletions`: repositories, adapters, resources,
+credentials, operations, deliveries, `GET /audit-events/{id}` and the committed OpenAPI snapshot.
+Still open, so this stays Proposed: every mutating route (NG6e) and `GET /tenant-deletions`,
+`GET /tenant-deletions/{id}` (NG6h, with [0034](0034-tenant-data-deletion.md)).
 It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
 endpoints) merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (instance layout, the abuse

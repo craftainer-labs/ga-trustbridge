@@ -67,7 +67,8 @@ class TenantOut(BaseModel):
 
     `state` is the installation state written by webhook sync; `admin_disabled_at` is the
     separate admin-disable column (ADR 0033 "Tenant disable"); `effective_state` combines them:
-    `disabled` when disabled, otherwise `state`.
+    `disabled` when disabled, otherwise `state`. `admin_disabled_by` (the actor's `sub`) and
+    `admin_disable_reason` are null until the disable action exists (NG6e adds the columns).
     """
 
     id: UUID
@@ -77,6 +78,8 @@ class TenantOut(BaseModel):
     org_id: int
     state: str
     admin_disabled_at: datetime | None
+    admin_disabled_by: str | None = None
+    admin_disable_reason: str | None = None
     effective_state: str
     deleting: bool
 
@@ -118,4 +121,162 @@ class AuditEventPage(BaseModel):
     """A page of audit events."""
 
     items: list[AuditEventOut]
+    next_cursor: str | None
+
+
+class RepositoryOut(BaseModel):
+    """A repository the tenant's installation can see (`tenant_repositories`)."""
+
+    tenant_id: UUID
+    repository_id: int
+    full_name: str
+
+
+class RepositoryPage(BaseModel):
+    """A page of repositories."""
+
+    items: list[RepositoryOut]
+    next_cursor: str | None
+
+
+class ResourceOut(BaseModel):
+    """A non-secret adapter resource (`adapter_resources`)."""
+
+    tenant_id: UUID
+    adapter: str
+    resource_key: str
+    state: dict[str, Any]
+    updated_at: datetime
+
+
+class ResourcePage(BaseModel):
+    """A page of resources."""
+
+    items: list[ResourceOut]
+    next_cursor: str | None
+
+
+class CredentialOut(BaseModel):
+    """The state of one credential scope (`adapter_credentials`): names and refs, never a value.
+
+    `state` holds the current and previous slot (generation, name, platform ref, delivered flag,
+    retire time); `outputs` the names of what was delivered to GitHub.
+    """
+
+    tenant_id: UUID
+    adapter: str
+    scope_key: str
+    scope: dict[str, Any]
+    kind: str | None
+    state: dict[str, Any]
+    outputs: list[dict[str, Any]]
+    updated_at: datetime
+
+
+class CredentialPage(BaseModel):
+    """A page of credentials."""
+
+    items: list[CredentialOut]
+    next_cursor: str | None
+
+
+class OperationOut(BaseModel):
+    """A credential operation (`credential_operations`), newest first."""
+
+    id: UUID
+    tenant_id: UUID
+    adapter: str
+    scope_key: str
+    kind: str
+    status: str
+    oidc_offered: bool
+    base_state: dict[str, Any] | None
+    base_kind: str | None
+    attempts: int
+    error: str | None
+    manual_action: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class OperationPage(BaseModel):
+    """A page of operations."""
+
+    items: list[OperationOut]
+    next_cursor: str | None
+
+
+class DeliveryOut(BaseModel):
+    """A received webhook delivery (`webhook_deliveries`) without its headers and body."""
+
+    host: str
+    delivery_id: str
+    event: str
+    status: str
+    attempts: int
+    received_at: datetime
+    next_attempt_at: datetime | None
+    last_relayed_at: datetime | None
+    processed_at: datetime | None
+    dead_at: datetime | None
+    last_error: str | None
+    body_sha256: str | None
+    has_body: bool
+
+
+class DeliveryDetailOut(DeliveryOut):
+    """One delivery. `payload` is the stored body parsed as JSON, only for an `operator`.
+
+    Never the headers. Null for a `viewer`, after the body was purged (retention) or when the
+    stored body is not JSON.
+    """
+
+    payload: Any | None = None
+
+
+class DeliveryPage(BaseModel):
+    """A page of deliveries, newest first."""
+
+    items: list[DeliveryOut]
+    next_cursor: str | None
+
+
+class WebhookCapabilityOut(BaseModel):
+    """How a platform's inbound webhooks are authenticated (never a secret)."""
+
+    auth: str
+    header: str | None
+    trigger_only: bool
+
+
+class CapabilitiesOut(BaseModel):
+    """What an adapter can do (ADR 0029 `Capabilities`); sets are sorted lists."""
+
+    oidc: bool
+    oidc_hosts: list[str]
+    oidc_requires_manual_step: bool
+    ci_credential: bool
+    rotation: str
+    webhook: WebhookCapabilityOut | None
+    github_hosts: list[str]
+    needs_privileged_credential: bool
+    credential_limit: int | None
+
+
+class AdapterOut(BaseModel):
+    """An enabled adapter for one tenant: whether connection data is stored, and what it can do.
+
+    Never the connection data itself (ADR 0033 invariant 8). `capabilities` is null only when
+    the adapter cannot describe itself.
+    """
+
+    name: str
+    configured: bool
+    capabilities: CapabilitiesOut | None
+
+
+class AdapterPage(BaseModel):
+    """A page of adapters."""
+
+    items: list[AdapterOut]
     next_cursor: str | None

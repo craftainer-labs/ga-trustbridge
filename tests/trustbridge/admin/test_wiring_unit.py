@@ -10,6 +10,7 @@ from tests.trustbridge.admin.helpers import fake_factory
 from tests.trustbridge.fakes import FakeHostChecker, FakeRedis
 from tests.trustbridge.helpers import as_redis, make_settings
 from trustbridge import main as main_module
+from trustbridge.adapters.loader import AdapterLoadError
 from trustbridge.admin.access import NoTenants, SqlTenantAccess
 from trustbridge.admin.runtime import get_admin_runtime
 from trustbridge.audit.throttle import ThrottledDenials
@@ -125,3 +126,42 @@ async def test_denials_are_flushed_once_more_at_graceful_shutdown(
         await asyncio.sleep(0.05)  # the startup pass of the background task
         assert calls == ["flush"]
     assert calls == ["flush", "flush"]  # the shutdown pass, whose failure is logged not raised
+
+
+async def test_only_the_enabled_adapters_are_loaded_into_the_admin_runtime(
+    key_signers: None,
+) -> None:
+    """ADR 0029: an adapter not in `ADAPTERS_ENABLED` is never imported; the store is the core's."""
+    app = _template()
+    install(
+        app,
+        make_settings(adapters_enabled=["ghcr", "harbor"]),
+        Overrides(checker=FakeHostChecker(), redis=as_redis(FakeRedis())),
+    )
+    async with app.router.lifespan_context(app):
+        admin = get_admin_runtime(app)
+        assert admin is not None
+        assert admin.adapters is not None
+        assert sorted(admin.adapters.classes) == ["ghcr", "harbor"]
+
+
+async def test_no_adapter_is_enabled_by_default_and_a_bad_name_stops_startup(
+    key_signers: None,
+) -> None:
+    """An empty list is a valid catalog; an unknown entry point fails loudly."""
+    app = _template()
+    install(app, make_settings(), Overrides(checker=FakeHostChecker(), redis=as_redis(FakeRedis())))
+    async with app.router.lifespan_context(app):
+        admin = get_admin_runtime(app)
+        assert admin is not None
+        assert admin.adapters is not None
+        assert admin.adapters.classes == {}
+    broken = _template()
+    install(
+        broken,
+        make_settings(adapters_enabled=["no-such-adapter"]),
+        Overrides(checker=FakeHostChecker(), redis=as_redis(FakeRedis())),
+    )
+    with pytest.raises(AdapterLoadError):
+        async with broken.router.lifespan_context(broken):
+            pass

@@ -30,8 +30,10 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.health_checks import get_health_registry
 from app.main import app as template_app
+from trustbridge.adapters.loader import load_adapter_classes
 from trustbridge.admin import metrics as admin_metrics
 from trustbridge.admin.access import NoTenants, SqlTenantAccess
+from trustbridge.admin.adapters import AdapterCatalog
 from trustbridge.admin.problems import install_problem_types
 from trustbridge.admin.routes import router as admin_router
 from trustbridge.admin.runtime import AdminRuntime, build_limits
@@ -206,7 +208,9 @@ async def _trustbridge_resources(
         with contextlib.suppress(AttributeError):
             del app.state.trustbridge
         for name in ("rbac", "admin"):
-            with contextlib.suppress(AttributeError):
+            # Starlette's State raises AttributeError for an unset name (KeyError on some
+            # versions); a startup that failed half-way leaves some of them unset.
+            with contextlib.suppress(AttributeError, KeyError):
                 delattr(app.state, name)
         if owned_redis is not None:
             await owned_redis.aclose()
@@ -254,6 +258,8 @@ def _install_admin(  # noqa: PLR0913 - the collaborators main owns
         session_factory=sessions,
         writer=writer,
         export_lag_seconds=settings.audit_export_lag_seconds,
+        # ADR 0029: only the enabled adapters are imported; a bad name stops the process.
+        adapters=AdapterCatalog(load_adapter_classes(settings.adapters_enabled), core.secrets),
     )
     return denials
 

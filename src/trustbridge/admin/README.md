@@ -1,7 +1,7 @@
 # admin/
 
 The admin API v1, read side ([ADR 0033](../../../docs/adrs/0033-admin-api-v1-rbac-and-limits.md),
-NG6d-1). Mounted by `trustbridge.main` under `/admin/v1`; authentication and roles come from
+NG6d-1 and NG6d-2). Mounted by `trustbridge.main` under `/admin/v1`; authentication and roles come from
 `trustbridge.rbac`, the tenant context from `trustbridge.tenancy`, audit data from
 `trustbridge.audit`. Imports `app.oidc` and `app.problem_details`; nothing in `src/app/` is edited.
 
@@ -14,8 +14,14 @@ NG6d-1). Mounted by `trustbridge.main` under `/admin/v1`; authentication and rol
   order (ADR 0033 invariant 1). `guard_any_grant` is for `/tenants`, which is filtered per grant.
 - `runtime.py`: `AdminRuntime` (`app.state.admin`: limiters, the host view, the session factory,
   the audit writer, the export lag and page size) and `build_limits`.
-- `access.py`: `SqlTenantAccess`, the `TenantAccess` over `tb_list_tenants()`; `NoTenants` for
-  `MODE=mock` without a database.
+- `access.py`: `SqlTenantAccess`, the `TenantAccess` over `tb_get_tenant()`; `NoTenants` for
+  `MODE=mock` without a database; `tenants_page`, the grant-filtered, keyset-paged tenant list
+  (the filter and the limit run in the database).
+- `queries.py`: the keyset reads behind repositories, resources, credentials, operations and
+  deliveries (constant statements, bound parameters).
+- `adapters.py`: `AdapterCatalog` (the enabled adapter classes plus the secret store listing) and
+  `describe`, the capabilities an adapter class declares.
+- `spec.py`: `python -m trustbridge.admin.spec` prints the OpenAPI snapshot.
 - `problems.py`: problem `type` URIs and the per-address limit on rejected requests.
 - `cursor.py`: the opaque cursor and `paginate`.
 - `schemas.py`: one pydantic model per resource.
@@ -32,8 +38,37 @@ NG6d-1). Mounted by `trustbridge.main` under `/admin/v1`; authentication and rol
 | `GET /hosts`, `/hosts/{host}` | `viewer`, instance (the answering replica's view, ADR 0030) |
 | `GET /tenants` | any grant; lists the tenants the caller holds `viewer` on |
 | `GET /tenants/{t}` | `viewer` on the tenant |
-| `GET /audit-events`, `/audit-events/export` | `auditor`, instance |
+| `GET /tenants/{t}/repositories`, `/resources`, `/credentials`, `/operations` | `viewer` on the tenant |
+| `GET /tenants/{t}/adapters` | `viewer` on the tenant |
+| `GET /deliveries`, `/deliveries/{host}/{delivery_id}` | `viewer`, instance (the payload only for `operator`) |
+| `GET /audit-events`, `/audit-events/export`, `/audit-events/{id}` | `auditor`, instance |
 | `GET /tenants/{t}/audit-events`, `/tenants/{t}/audit-events/export` | `auditor` on the tenant |
+
+**Tenant data** (one pydantic model per table, columns as snake_case, UUIDs as strings, RFC 3339
+timestamps; JSONB columns come back as objects). Orders and cursors: repositories by numeric id;
+resources and credentials by `(adapter, key)`; operations and deliveries newest first
+(`(created_at, id)` and `(received_at, host, delivery_id)`). `credentials` carry state, names of
+delivered outputs and timestamps, never a value. A delivery has no `headers` anywhere; `GET
+/deliveries/{host}/{delivery_id}` adds `payload` (the stored body parsed as JSON) for a caller
+holding `operator` at instance scope, and `null` for a viewer, a purged body or a body that is not
+JSON. `has_body` says whether a body is stored.
+
+**Adapters.** `GET /tenants/{t}/adapters` lists the adapters named by `ADAPTERS_ENABLED` (entry-point
+names; unset means none, an unknown name stops the process). Each item is `name`, `configured`
+(whether the secret store lists `store:tenants/<uuid>/<adapter>`; only the listing is read, never a
+value, ADR 0033 invariant 8) and `capabilities` (what the adapter class declares; `null` only if it
+cannot say). An unavailable store is a 503.
+
+**Tenants.** `/tenants` filters by grant and pages in the database. `/me` lists the first 200 tenants
+the grants reach (by id); use `/tenants` to page through more. `TenantOut` has `admin_disabled_by`
+and `admin_disable_reason`, both `null` until NG6e adds the columns and the disable action
+(`tb_list_tenants()` and `tb_get_tenant()` return constants for the admin-disable columns until
+then).
+
+**The OpenAPI snapshot** `docs/openapi/admin-v1.json` is what `/openapi.json` serves. After any
+route or schema change regenerate it with `python -m trustbridge.admin.spec >
+docs/openapi/admin-v1.json`; the drift test (`tests/trustbridge/admin/test_spec_unit.py`) fails
+otherwise, and the diff shows whether an existing route's schema changed (v1 is additive).
 
 Lists take `limit` (1 to 200, default 50) and an opaque `cursor`, and answer
 `{"items": [...], "next_cursor": "..." | null}`. A larger or non-positive `limit` is a 422.
@@ -67,12 +102,12 @@ Every error under `/admin/v1` is `application/problem+json` (ADR 0004) with `typ
 | `invalid-cursor` | 400 | a malformed `cursor` |
 | `unauthenticated` | 401 | no token or an invalid one (with the RFC 9728 challenge) |
 | `forbidden` | 403 | a valid token whose roles are not enough |
-| `not-found` | 404 | unknown route, host or tenant; also a tenant the caller has no grant on |
+| `not-found` | 404 | unknown route, host, tenant, delivery or audit event; also a tenant the caller has no grant on |
 | `conflict` | 409 | reserved (NG6e) |
 | `validation` | 422 | a query parameter the schema rejects |
 | `rate-limited` | 429 | over a bucket; `Retry-After` is the whole seconds left in the window |
 | `internal` | 500 | an unhandled error (the detail is redacted outside `MODE=dev`) |
-| `unavailable` | 503 | no database configured (`MODE=mock`) |
+| `unavailable` | 503 | no database configured (`MODE=mock`), or the connection store cannot be listed |
 
 The classes are open: v1 may add one. Errors off `/admin/v1` keep the template's `about:blank`.
 
@@ -87,21 +122,11 @@ rejection becomes a 429). Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_REQUES
 
 ## Not here yet
 
-- `GET /tenants/{t}/repositories`, `/resources`, `/credentials`, `/operations`, `/deliveries` and
-  the snapshot `docs/openapi/admin-v1.json` with its drift test: NG6d-2.
-- `/tenants` and `/me` load and sort every tenant row per request, and `GET /tenants/{id}` could
-  use the single-row lookup instead; `openapi_spec()` caches in a module global (the snapshot
-  replaces it): NG6d-2.
-- `GET /tenants/{t}/adapters`: nothing on main loads adapters in the api process (no
-  `ADAPTERS_ENABLED`, no registry), so there is no capability summary to serve; it needs that
-  wiring first (NG6d-2).
-- `GET /audit-events/{id}`: neither `tb_audit_list` nor a plain `SELECT` can read one null-tenant
-  event by id without a new database function (a migration); NG6d-2.
 - `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
   (ADR 0034); NG6h.
-- Every `POST` (NG6e). `admin_disabled_by` and `admin_disable_reason` are not in `TenantOut`
-  because `tb_list_tenants()` does not return them yet.
+- Every `POST` (NG6e), which also fills `admin_disabled_by` and `admin_disable_reason`.
 - The `transaction_timeout` / `AUDIT_EXPORT_LAG_SECONDS` startup check: NG6h.
+- ADR 0033 stays Proposed until the mutating routes (NG6e) and the deletion reads (NG6h) exist.
 
 ## Don't
 

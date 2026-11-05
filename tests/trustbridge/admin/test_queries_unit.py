@@ -1,0 +1,246 @@
+"""The tenant-scoped and delivery reads over a scripted session (the SQL runs in the integration
+suite): parameters, keyset cursors, JSON decoding and the payload gate."""
+
+import json
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import UUID, uuid4
+
+import pytest
+
+from trustbridge.admin import queries
+from trustbridge.admin.cursor import decode_cursor, encode_cursor
+from trustbridge.admin.problems import AdminProblem
+
+T = UUID(int=7)
+NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+
+
+class Rows:
+    """What `session.execute` returns."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        """Hold the rows."""
+        self.rows = rows
+
+    def mappings(self) -> Rows:
+        """Rows as mappings."""
+        return self
+
+    def __iter__(self) -> Any:  # noqa: ANN401
+        """Iterate the rows."""
+        return iter(self.rows)
+
+    def first(self) -> dict[str, Any] | None:
+        """The first row, if any."""
+        return self.rows[0] if self.rows else None
+
+
+class Session:
+    """Records the bound parameters and serves one scripted result."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        """Serve `rows`."""
+        self.rows = rows
+        self.params: dict[str, Any] = {}
+
+    async def execute(self, _statement: object, params: dict[str, Any]) -> Rows:
+        """Record the parameters and answer."""
+        self.params = params
+        return Rows(self.rows)
+
+
+def _repo(n: int) -> dict[str, Any]:
+    return {"tenant_id": T, "repository_id": n, "full_name": f"o/r{n}"}
+
+
+async def test_repositories_page_and_cursor() -> None:
+    """One extra row decides `next_cursor`; the cursor is the last id sent."""
+    session = Session([_repo(1), _repo(2), _repo(3)])
+    items, cursor = await queries.repositories(session, T, limit=2, cursor=None)  # type: ignore[arg-type]
+    assert [i.repository_id for i in items] == [1, 2]
+    assert session.params == {"tenant_id": T, "after": 0, "limit": 3}
+    assert cursor is not None
+    assert decode_cursor(cursor) == (2, "2")
+    last, none = await queries.repositories(Session([_repo(3)]), T, limit=2, cursor=cursor)  # type: ignore[arg-type]
+    assert [i.repository_id for i in last] == [3]
+    assert none is None
+    resumed = Session([])
+    await queries.repositories(resumed, T, limit=2, cursor=cursor)  # type: ignore[arg-type]
+    assert resumed.params["after"] == 2
+
+
+async def test_a_text_cursor_is_not_a_repository_position() -> None:
+    """A cursor of the wrong kind is a 400."""
+    with pytest.raises(AdminProblem) as caught:
+        await queries.repositories(Session([]), T, limit=2, cursor=encode_cursor("a", "b"))  # type: ignore[arg-type]
+    assert caught.value.status_code == 400
+
+
+async def test_resources_decode_text_json_and_resume_by_adapter_and_key() -> None:
+    """A driver that returns JSONB as text is decoded; the cursor is `(adapter, key)`."""
+    row = {
+        "tenant_id": T,
+        "adapter": "ghcr",
+        "resource_key": "k1",
+        "state": json.dumps({"name": "n"}),
+        "updated_at": NOW,
+    }
+    second = {**row, "resource_key": "k2", "state": {"name": "m"}}
+    session = Session([row, second])
+    items, cursor = await queries.resources(session, T, limit=1, cursor=None)  # type: ignore[arg-type]
+    assert items[0].state == {"name": "n"}
+    assert session.params["adapter"] == session.params["key"] == ""
+    assert cursor is not None
+    assert decode_cursor(cursor) == ("ghcr", "k1")
+    again = Session([])
+    await queries.resources(again, T, limit=1, cursor=cursor)  # type: ignore[arg-type]
+    assert (again.params["adapter"], again.params["key"]) == ("ghcr", "k1")
+
+
+async def test_an_integer_cursor_is_not_a_text_position() -> None:
+    """The (adapter, key) cursor needs a text first part."""
+    with pytest.raises(AdminProblem):
+        await queries.resources(Session([]), T, limit=1, cursor=encode_cursor(5, "x"))  # type: ignore[arg-type]
+
+
+async def test_credentials_hold_names_and_state() -> None:
+    """All three JSONB columns come back as objects and lists."""
+    row = {
+        "tenant_id": T,
+        "adapter": "jfrog",
+        "scope_key": "abc",
+        "scope": json.dumps({"repository_id": 1}),
+        "kind": None,
+        "state": {"current": None, "previous": None},
+        "outputs": json.dumps([{"kind": "secret", "name": "X"}]).encode(),
+        "updated_at": NOW,
+    }
+    items, cursor = await queries.credentials(Session([row]), T, limit=5, cursor=None)  # type: ignore[arg-type]
+    assert cursor is None
+    assert items[0].scope == {"repository_id": 1}
+    assert items[0].outputs == [{"kind": "secret", "name": "X"}]
+
+
+def _operation(offset: int) -> dict[str, Any]:
+    return {
+        "id": UUID(int=offset + 1),
+        "tenant_id": T,
+        "adapter": "ghcr",
+        "scope_key": "s",
+        "kind": "issue",
+        "status": "finished",
+        "oidc_offered": False,
+        "base_state": None,
+        "base_kind": None,
+        "attempts": 0,
+        "error": None,
+        "manual_action": None,
+        "created_at": NOW - timedelta(minutes=offset),
+        "updated_at": NOW,
+    }
+
+
+async def test_operations_are_newest_first_and_resume_after_the_last_pair() -> None:
+    """The cursor is `(created_at, id)`; the first page binds no time."""
+    session = Session([_operation(0), _operation(1)])
+    items, cursor = await queries.operations(session, T, limit=1, cursor=None)  # type: ignore[arg-type]
+    assert len(items) == 1
+    assert session.params["since"] is None
+    assert cursor is not None
+    resumed = Session([])
+    await queries.operations(resumed, T, limit=1, cursor=cursor)  # type: ignore[arg-type]
+    assert resumed.params["since"] == NOW
+    assert resumed.params["id"] == UUID(int=1)
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        encode_cursor(5, "x"),  # not text
+        encode_cursor("not a time", str(uuid4())),
+        encode_cursor("2026-11-04T12:00:00", str(uuid4())),  # no zone
+        encode_cursor(NOW.isoformat(), "not-a-uuid"),
+    ],
+)
+async def test_a_bad_operations_cursor_is_a_400(cursor: str) -> None:
+    """Position kind, timestamp syntax, zone and id are all checked."""
+    with pytest.raises(AdminProblem) as caught:
+        await queries.operations(Session([]), T, limit=1, cursor=cursor)  # type: ignore[arg-type]
+    assert caught.value.status_code == 400
+
+
+def _delivery(offset: int, **extra: Any) -> dict[str, Any]:  # noqa: ANN401
+    return {
+        "host": "github.com",
+        "delivery_id": f"d{offset}",
+        "event": "push",
+        "status": "pending",
+        "attempts": 0,
+        "received_at": NOW - timedelta(minutes=offset),
+        "next_attempt_at": None,
+        "last_relayed_at": None,
+        "processed_at": None,
+        "dead_at": None,
+        "last_error": None,
+        "body_sha256": "h",
+        "has_body": True,
+        **extra,
+    }
+
+
+async def test_deliveries_resume_after_the_last_host_and_id() -> None:
+    """Newest first; the ident is `host/delivery_id`."""
+    session = Session([_delivery(0), _delivery(1)])
+    items, cursor = await queries.deliveries(session, limit=1, cursor=None)  # type: ignore[arg-type]
+    assert [i.delivery_id for i in items] == ["d0"]
+    assert session.params["since"] is None
+    assert cursor is not None
+    assert decode_cursor(cursor)[1] == "github.com/d0"
+    resumed = Session([])
+    await queries.deliveries(resumed, limit=1, cursor=cursor)  # type: ignore[arg-type]
+    assert (resumed.params["host"], resumed.params["delivery_id"]) == ("github.com", "d0")
+    assert resumed.params["since"] == NOW
+
+
+async def test_a_delivery_cursor_without_a_host_and_id_is_a_400() -> None:
+    """The ident must split into a host and an id."""
+    with pytest.raises(AdminProblem):
+        await queries.deliveries(
+            Session([]),  # type: ignore[arg-type]
+            limit=1,
+            cursor=encode_cursor(NOW.isoformat(), "no-slash"),
+        )
+
+
+async def test_one_delivery_returns_the_payload_only_when_asked() -> None:
+    """`with_body` is bound false for a viewer, and the payload is then never set."""
+    body = json.dumps({"action": "opened"}).encode()
+    viewer = Session([_delivery(0, body=body)])
+    seen = await queries.delivery(viewer, "github.com", "d0", with_payload=False)  # type: ignore[arg-type]
+    assert seen is not None
+    assert seen.payload is None
+    assert viewer.params["with_body"] is False
+    operator = Session([_delivery(0, body=body)])
+    got = await queries.delivery(operator, "github.com", "d0", with_payload=True)  # type: ignore[arg-type]
+    assert got is not None
+    assert got.payload == {"action": "opened"}
+    assert operator.params["with_body"] is True
+
+
+@pytest.mark.parametrize("body", [None, b"not json", b"\xff\xfe"])
+async def test_a_missing_or_non_json_body_is_a_null_payload(body: bytes | None) -> None:
+    """A purged body or a body that is not JSON gives null, never an error."""
+    got = await queries.delivery(
+        Session([_delivery(0, body=body, has_body=body is not None)]),  # type: ignore[arg-type]
+        "github.com",
+        "d0",
+        with_payload=True,
+    )
+    assert got is not None
+    assert got.payload is None
+
+
+async def test_an_unknown_delivery_is_none() -> None:
+    """No row, no delivery."""
+    assert await queries.delivery(Session([]), "github.com", "x", with_payload=True) is None  # type: ignore[arg-type]

@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.admin import metrics
+from trustbridge.admin.adapters import AdapterCatalog
 from trustbridge.audit.emit import AuditWriter
 from trustbridge.github.availability import HostStatus
 from trustbridge.ratelimit import FixedWindowLimiter, WindowCounter
@@ -35,7 +36,10 @@ class AdminLimits:
 
 @dataclass(frozen=True, slots=True)
 class AdminRuntime:
-    """Collaborators of the admin routes. `session_factory` and `writer` are None in mock mode."""
+    """Collaborators of the admin routes. `session_factory` and `writer` are None in mock mode.
+
+    `adapters` is the enabled-adapter catalog for `GET /tenants/{t}/adapters` (None: none).
+    """
 
     limits: AdminLimits
     hosts: HostStatuses
@@ -43,6 +47,7 @@ class AdminRuntime:
     writer: AuditWriter | None
     export_lag_seconds: float
     export_page_size: int = DEFAULT_EXPORT_PAGE
+    adapters: AdapterCatalog | None = None
 
 
 def build_limits(settings: TrustbridgeSettings, counter: WindowCounter) -> AdminLimits:
