@@ -70,6 +70,14 @@ class WindowCounter(Protocol):
         """Remove `key`, whatever it holds."""
         ...
 
+    async def note(self, text_key: str, text: str, sets: dict[str, str], ttl_seconds: int) -> None:
+        """Store `text` under `text_key` and add one member to each set in `sets`, in ONE call.
+
+        `sets` maps a set key to the member to add; every key written expires after
+        `ttl_seconds`. One round trip, so noting costs a suppressed denial a single call.
+        """
+        ...
+
 
 class ValkeyWindowCounter:
     """`INCR` + `EXPIRE NX` in one transaction on a redis-py asyncio client."""
@@ -120,6 +128,15 @@ class ValkeyWindowCounter:
     async def delete(self, key: str) -> None:
         """`DEL key`."""
         await self._r.delete(key)
+
+    async def note(self, text_key: str, text: str, sets: dict[str, str], ttl_seconds: int) -> None:
+        """`SET` and `SADD`s with their expiries in one transaction."""
+        async with self._r.pipeline(transaction=True) as pipe:
+            pipe.set(text_key, text, ex=ttl_seconds)
+            for key, member in sets.items():
+                pipe.sadd(key, member)
+                pipe.expire(key, ttl_seconds)
+            await pipe.execute()
 
 
 class InMemoryWindowCounter:
@@ -199,6 +216,12 @@ class InMemoryWindowCounter:
         if not members:
             del self.sets[key]
             self._expires.pop(key, None)
+
+    async def note(self, text_key: str, text: str, sets: dict[str, str], ttl_seconds: int) -> None:
+        """Store the text and add the members."""
+        await self.set_text(text_key, text, ttl_seconds)
+        for key, member in sets.items():
+            await self.sadd(key, member, ttl_seconds)
 
     async def delete(self, key: str) -> None:
         """Remove the key from every kind of store."""

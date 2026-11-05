@@ -352,7 +352,8 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
 **Authentication and authorization**
 
 1. A test walks the admin router and fails for any route with no role requirement, and for
-   any route whose first dependency is not authentication (NFR-0011, NFR-0012).
+   any route whose dependencies are not, in order, authentication, the rate limit and the role
+   check (NFR-0011, NFR-0012).
 2. A request with no token or an invalid token gets 401 problem details with the RFC 9728
    `WWW-Authenticate` challenge, and the error body never names the validation detail outside
    `MODE=dev`.

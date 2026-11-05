@@ -122,3 +122,13 @@ async def test_text_and_sets_round_trip_on_both_counters() -> None:
         await counter.delete("t")
         await counter.delete("t")
         assert await counter.get_text("t") is None
+
+
+async def test_note_stores_the_text_and_adds_to_every_set_on_both_counters() -> None:
+    """One call writes the sample and the index entries."""
+    for counter in (InMemoryWindowCounter(), ValkeyWindowCounter(as_redis(FakeRedis()))):
+        await counter.note("sample", "text", {"a": "1", "b": "2"}, 10)
+        await counter.note("sample", "newer", {"a": "3"}, 10)
+        assert await counter.get_text("sample") == "newer"
+        assert await counter.smembers("a") == {"1", "3"}
+        assert await counter.smembers("b") == {"2"}

@@ -15,9 +15,10 @@ class Denial:
 
     `required_role` is the role's string value. `tenant_id` is the requested tenant id when the
     route is tenant-scoped and the path value is a canonical UUID, else None. `source_ip` and
-    `request_id` are None when absent or malformed. `suppressed` and `window_seconds` are set
-    only on the summary row `ThrottledDenials` writes when a window closes: how many further
-    denials of the same subject and reason were counted but not recorded in that window.
+    `request_id` are None when absent or malformed. `suppressed`, `window_seconds` and `window`
+    are set only on the summary row `ThrottledDenials` writes when a window closes: how many
+    further denials of the same subject and reason were counted but not recorded in that window
+    (`window` is the window number, `time // window_seconds`).
     """
 
     sub: str
@@ -30,6 +31,7 @@ class Denial:
     request_id: str | None
     suppressed: int = 0
     window_seconds: int = 0
+    window: int = 0
 
 
 class DenialSink(Protocol):

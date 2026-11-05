@@ -298,6 +298,10 @@ class FakePipeline:
         """Queue INCR."""
         self._ops.append(("incr", key, 0, False, ""))
 
+    def set(self, key: str, value: str, ex: int | None = None) -> None:
+        """Queue SET."""
+        self._ops.append(("set", key, ex or 0, False, value))
+
     def sadd(self, key: str, member: str) -> None:
         """Queue SADD."""
         self._ops.append(("sadd", key, 0, False, member))
@@ -314,6 +318,10 @@ class FakePipeline:
             if op == "incr":
                 self._r.kv[key] = self._r.kv.get(key, 0) + 1
                 out.append(self._r.kv[key])
+            elif op == "set":
+                self._r.texts[key] = member
+                self._r.expiries[key] = ttl
+                out.append(1)
             elif op == "sadd":
                 members = self._r.sets.setdefault(key, set())
                 out.append(0 if member in members else 1)

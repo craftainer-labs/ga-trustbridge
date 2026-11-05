@@ -112,6 +112,7 @@ async def test_a_summary_denial_records_the_suppressed_count_and_names_no_resour
             request_id=None,
             suppressed=41,
             window_seconds=60,
+            window=100,
         )
     )
     (event,) = writer.events
@@ -122,5 +123,6 @@ async def test_a_summary_denial_records_the_suppressed_count_and_names_no_resour
         "scope": "tenant",
         "suppressed": 41,
         "window_seconds": 60,
+        "window": 100,
         "sample": "last",
     }

@@ -74,34 +74,46 @@ A principal with a valid token can ask for random tenant ids and be denied each 
 is wrapped in `ThrottledDenials` (NG6d decision A6). Per (subject, reason) and fixed window
 (`AUDIT_DENIED_WINDOW_SECONDS`, default 60) the first `AUDIT_DENIED_BURST` (default 5) denials are
 recorded in full: the 5th is a row, the 6th is only counted (in the counter store and the metric
-`trustbridge.audit.authz_denied.suppressed`). When the window has closed, ONE summary
+`trustbridge.audit.authz_denied.suppressed`). After the window has closed, a summary
 `authz.denied` row is written: `after` carries `suppressed` (how many were not recorded),
-`window_seconds` and `"sample": "last"`, `resource_id` is null, and the denied principal, `reason`,
-`required_role`, `scope`, `tenant_id`, `source_ip` and `request_id` are those of the LAST
-suppressed denial of the window. `"sample": "last"` says exactly that: those fields describe one
-request, not the whole burst. A window that closes with nothing suppressed writes no summary. The
-window count lives in Valkey (shared by the replicas, key
-`tb:audit:denied:<hash of sub and reason>:<window>`); a claim marker (`...:summary`) makes the
-summary happen once per window.
+`window_seconds`, `window` (the window number, `time // window_seconds`) and `"sample": "last"`;
+`resource_id` is null, and the denied principal, `reason`, `required_role`, `scope`, `tenant_id`,
+`source_ip` and `request_id` are those of the LAST suppressed denial of the window.
+`"sample": "last"` says exactly that: those fields describe one request, not the whole burst.
+The window count lives in Valkey (shared by the replicas, key
+`tb:audit:denied:<hash of sub and reason>:<window>`).
 
-**Nothing disappears.** A window that suppressed anything is entered in a Valkey index: the set
-`tb:audit:denied:pending` of subject/reason hashes and, per hash, the set
-`tb:audit:denied:pending:<hash>` of window numbers, with the last suppressed denial stored as the
-window's sample (`...:<window>:sample`). All of it is kept `max(2 * window, 1 day)`. The summary is then
-written by either of two paths, both reading that set (no process-local state):
+**Delivered at least once, never lost.** Every suppressed denial notes its window in a Valkey
+index (one call): the set `tb:audit:denied:pending` of subject/reason hashes and, per hash, the set
+`tb:audit:denied:pending:<hash>` of window numbers, and stores itself as the window's sample
+(`...:<window>:sample`, so the sample is the last suppressed denial). All of it is kept
+`max(2 * window, 1 day)` and nothing is kept in the process. A summary is written by either path,
+both reading that index:
 
 - the first denial of the same (subject, reason) in a later window summarises EVERY closed pending
-  window of the pair, however many windows ago;
+  window of the pair, however many windows ago. The current denial is recorded first; each old
+  summary is then tried on its own, and a failure is logged, never raised, so an old summary cannot
+  fail a request;
 - `ThrottledDenials.flush()` summarises every closed pending window of every subject. The api calls
-  it at startup, every window, and at graceful shutdown, so a restarted or a second replica
-  finishes the other's work. The still-open window is never summarised early.
+  it at startup, every window, and at graceful shutdown (bounded to a few seconds), so a restarted
+  or second replica finishes the other's work, and a flush the shutdown cut short is continued by
+  the next start. The still-open window is never summarised early. Hash entries are not removed
+  eagerly; they expire.
 
-A window leaves the index only after its row is written; if the write fails or the task is
-cancelled, the claim is released and the window is retried. A Valkey outage or timeout
-(`AUDIT_DENIED_TIMEOUT_MS`, default 50) fails open to recording the row: the audit trail is never
-thinned by an outage, and the request path stays bounded. A denial that was recorded because
-noting it failed is also counted, so that summary can be one too high. The one remaining loss: a
-process killed between claiming a window and writing its row.
+There is no claim before the write. A replica reads the window, writes the row, and only then marks
+the window done (it stores the count it summarised) and removes it from the index. So a crash, a
+timeout, a cancel or a failing sink at any point leaves the window pending and the next pass writes
+it. The price is that **a summary can be written twice** when two replicas handle the same window
+at the same moment: the duplicates are recognisable, because `after` has the same `window` (and the
+row the same actor and `reason`) and the same `suppressed`. A denial counted after a summary was
+written (a request that straddled the window end) puts the window back in the index and gets its own
+smaller summary, with the same `window`, `suppressed` being only what was new. A window that closes
+with nothing suppressed writes no summary.
+
+The only loss: the whole counter store (Valkey) down. Then no count exists, so the throttle fails
+open and EVERY denial is recorded as a row (the trail is complete, only larger). A timeout or error
+on a single call also records that denial itself (`AUDIT_DENIED_TIMEOUT_MS`, default 50), at the
+price that its summary may count it once more.
 
 ## Read and export routes (NG6d)
 
