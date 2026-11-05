@@ -96,3 +96,32 @@ async def test_a_failing_flush_is_logged_and_the_loop_goes_on(
     task.cancel()
     assert calls >= 2
     assert "denial summary flush failed" in caplog.text
+
+
+async def test_denials_are_flushed_once_more_at_graceful_shutdown(
+    key_signers: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lifespan's exit writes the pending summaries of closed windows."""
+    calls: list[str] = []
+
+    async def flush(self: ThrottledDenials) -> int:
+        calls.append("flush")
+        if len(calls) > 1:
+            raise RuntimeError("valkey gone")
+        return 0
+
+    monkeypatch.setattr(ThrottledDenials, "flush", flush)
+    app = _template()
+    install(
+        app,
+        make_settings(audit_denied_window_seconds=3600),
+        Overrides(
+            checker=FakeHostChecker(),
+            redis=as_redis(FakeRedis()),
+            session_factory=fake_factory(),
+        ),
+    )
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0.05)  # the startup pass of the background task
+        assert calls == ["flush"]
+    assert calls == ["flush", "flush"]  # the shutdown pass, whose failure is logged not raised

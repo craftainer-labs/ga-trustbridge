@@ -46,6 +46,26 @@ class WindowCounter(Protocol):
         """The current count of `key` (0 when absent or expired)."""
         ...
 
+    async def set_text(self, key: str, value: str, ttl_seconds: int) -> None:
+        """Store `value` under `key` (replacing any value) for `ttl_seconds`."""
+        ...
+
+    async def get_text(self, key: str) -> str | None:
+        """The text under `key`, or None when absent or expired."""
+        ...
+
+    async def sadd(self, key: str, member: str, ttl_seconds: int) -> None:
+        """Add `member` to the set `key` and set the set's expiry to `ttl_seconds`."""
+        ...
+
+    async def smembers(self, key: str) -> set[str]:
+        """The members of the set `key` (empty when absent)."""
+        ...
+
+    async def srem(self, key: str, member: str) -> None:
+        """Remove `member` from the set `key`."""
+        ...
+
 
 class ValkeyWindowCounter:
     """`INCR` + `EXPIRE NX` in one transaction on a redis-py asyncio client."""
@@ -67,22 +87,104 @@ class ValkeyWindowCounter:
         value = await self._r.get(key)
         return 0 if value is None else int(value)
 
+    async def set_text(self, key: str, value: str, ttl_seconds: int) -> None:
+        """`SET key value EX ttl`."""
+        await self._r.set(key, value, ex=ttl_seconds)
+
+    async def get_text(self, key: str) -> str | None:
+        """`GET key` as text (None when absent)."""
+        value = await self._r.get(key)
+        if value is None:
+            return None
+        return value.decode() if isinstance(value, bytes) else str(value)
+
+    async def sadd(self, key: str, member: str, ttl_seconds: int) -> None:
+        """`SADD` and refresh the set's expiry in one transaction."""
+        async with self._r.pipeline(transaction=True) as pipe:
+            pipe.sadd(key, member)
+            pipe.expire(key, ttl_seconds)
+            await pipe.execute()
+
+    async def smembers(self, key: str) -> set[str]:
+        """`SMEMBERS key` as text."""
+        return {m.decode() if isinstance(m, bytes) else str(m) for m in await self._r.smembers(key)}
+
+    async def srem(self, key: str, member: str) -> None:
+        """`SREM key member`."""
+        await self._r.srem(key, member)
+
 
 class InMemoryWindowCounter:
-    """Process-local counter for `MODE=mock` and unit tests (no expiry beyond the window key)."""
+    """Process-local counter for `MODE=mock` and unit tests; expired keys are evicted.
 
-    def __init__(self) -> None:
+    A key lives `ttl_seconds` from its creation, as in Valkey; a sweep (at most once a second)
+    drops the expired ones so rotating per-principal keys cannot grow the dict without bound.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         """Start empty."""
         self.counts: dict[str, int] = {}
+        self.texts: dict[str, str] = {}
+        self.sets: dict[str, set[str]] = {}
+        self._expires: dict[str, float] = {}
+        self._clock = clock
+        self._next_sweep = 0.0
+
+    def _live(self, key: str) -> bool:
+        """Whether `key` has not expired (a key without an expiry never does)."""
+        return self._expires.get(key, float("inf")) > self._clock()
+
+    def _sweep(self) -> None:
+        now = self._clock()
+        if now < self._next_sweep:
+            return
+        self._next_sweep = now + 1.0
+        for key in [k for k, at in self._expires.items() if at <= now]:
+            del self._expires[key]
+            self.counts.pop(key, None)
+            self.texts.pop(key, None)
+            self.sets.pop(key, None)
 
     async def incr(self, key: str, ttl_seconds: int) -> int:
-        """Increment in process memory."""
+        """Increment in process memory; the expiry is set when the key is created."""
+        self._sweep()
+        if not self._live(key):
+            self.counts.pop(key, None)
+            self._expires.pop(key, None)
+        if key not in self.counts:
+            self._expires[key] = self._clock() + ttl_seconds
         self.counts[key] = self.counts.get(key, 0) + 1
         return self.counts[key]
 
     async def get(self, key: str) -> int:
-        """Read from process memory."""
-        return self.counts.get(key, 0)
+        """Read from process memory (0 when absent or expired)."""
+        return self.counts.get(key, 0) if self._live(key) else 0
+
+    async def set_text(self, key: str, value: str, ttl_seconds: int) -> None:
+        """Store text with an expiry."""
+        self._sweep()
+        self.texts[key] = value
+        self._expires[key] = self._clock() + ttl_seconds
+
+    async def get_text(self, key: str) -> str | None:
+        """The text, or None when absent or expired."""
+        return self.texts.get(key) if self._live(key) else None
+
+    async def sadd(self, key: str, member: str, ttl_seconds: int) -> None:
+        """Add to a set and refresh its expiry."""
+        self._sweep()
+        if not self._live(key):
+            self.sets.pop(key, None)
+        self.sets.setdefault(key, set()).add(member)
+        self._expires[key] = self._clock() + ttl_seconds
+
+    async def smembers(self, key: str) -> set[str]:
+        """A copy of the set (empty when absent or expired)."""
+        return set(self.sets.get(key, ())) if self._live(key) else set()
+
+    async def srem(self, key: str, member: str) -> None:
+        """Remove from a set."""
+        self.sets.get(key, set()).discard(member)
 
 
 def source_key(host: str | None) -> str:

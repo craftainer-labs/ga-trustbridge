@@ -55,3 +55,64 @@ async def test_failures_without_metrics_still_fail_open() -> None:
     valkey.down = True
     limiter = _limiter(ValkeyWindowCounter(as_redis(valkey)))
     assert (await limiter.check_key("a")).allowed
+
+
+class _Clock:
+    """A settable clock."""
+
+    def __init__(self) -> None:
+        """Start at 0."""
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        """The time."""
+        return self.now
+
+
+async def test_the_in_memory_counter_evicts_expired_keys() -> None:
+    """Keys live `ttl` from their creation; a sweep frees the dict (no unbounded growth)."""
+    clock = _Clock()
+    counter = InMemoryWindowCounter(clock)
+    for n in range(100):
+        await counter.incr(f"principal:{n}", 10)
+    await counter.set_text("t", "v", 10)
+    await counter.sadd("s", "m", 10)
+    assert len(counter.counts) == 100
+    assert await counter.incr("principal:0", 10) == 2  # not expired: same window
+    clock.now = 11.0
+    assert await counter.get("principal:0") == 0
+    assert await counter.get_text("t") is None
+    assert await counter.smembers("s") == set()
+    assert await counter.incr("fresh", 10) == 1  # the sweep runs on write
+    assert set(counter.counts) == {"fresh"}
+    assert (counter.texts, counter.sets) == ({}, {})
+
+
+async def test_an_expired_key_restarts_from_one_even_before_the_sweep() -> None:
+    """Reading an expired key never returns the old count, whenever the sweep runs."""
+    clock = _Clock()
+    counter = InMemoryWindowCounter(clock)
+    await counter.incr("k", 10)
+    await counter.incr("k", 10)
+    await counter.sadd("s", "old", 10)
+    clock.now = 10.5
+    counter._next_sweep = 100.0  # noqa: SLF001 - hold the sweep off, so only `_live` can tell
+    assert await counter.incr("k", 10) == 1
+    await counter.sadd("s", "new", 10)
+    assert await counter.smembers("s") == {"new"}
+
+
+async def test_text_and_sets_round_trip_on_both_counters() -> None:
+    """The pending-set and sample primitives behave the same in memory and in Valkey."""
+    for counter in (InMemoryWindowCounter(), ValkeyWindowCounter(as_redis(FakeRedis()))):
+        assert await counter.get_text("t") is None
+        await counter.set_text("t", "one", 10)
+        await counter.set_text("t", "two", 10)
+        assert await counter.get_text("t") == "two"
+        assert await counter.smembers("s") == set()
+        await counter.sadd("s", "a", 10)
+        await counter.sadd("s", "a", 10)
+        await counter.sadd("s", "b", 10)
+        assert await counter.smembers("s") == {"a", "b"}
+        await counter.srem("s", "a")
+        assert await counter.smembers("s") == {"b"}

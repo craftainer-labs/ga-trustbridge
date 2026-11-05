@@ -122,4 +122,5 @@ async def test_a_summary_denial_records_the_suppressed_count_and_names_no_resour
         "scope": "tenant",
         "suppressed": 41,
         "window_seconds": 60,
+        "sample": "last",
     }

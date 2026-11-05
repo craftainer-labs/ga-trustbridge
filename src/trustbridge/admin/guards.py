@@ -1,8 +1,11 @@
-"""Route guards: authentication, the role check, then the rate limit (ADR 0033 invariants 1, 14).
+"""Route guards: authentication, the rate limit, then the role check (ADR 0033 invariants 1, 14).
 
-`guard(...)` returns the `dependencies` list of a route: the RBAC dependency first (it
-authenticates), then the principal's rate-limit bucket. Each dependency is recorded in
-`GUARDED` so the router-walk test can prove every admin route declares one.
+`guard(...)` returns the `dependencies` list of a route: `get_principal` first (authentication),
+then the principal's rate-limit bucket, then the RBAC dependency. The limit runs before the role
+check so that a principal over its budget costs no tenant lookup (`get_tenant`'s database read)
+and no `authz.denied` work. The role dependencies are recorded in `GUARDED` and the limit
+dependencies in `LIMITS` so the router-walk test can prove every admin route declares all three,
+in this order. `get_principal` is cached per request, so the role check reuses its result.
 """
 
 import hashlib
@@ -23,9 +26,13 @@ GUARDED: dict[Callable[..., object], tuple[Role | None, str | None]] = {}
 """Each guard dependency and the `(role, tenant_param)` it requires (`None` role: any caller)."""
 
 
-def principal_key(sub: str) -> str:
-    """The bounded limiter key of a principal."""
-    return hashlib.sha256(sub.encode()).hexdigest()[:32]
+LIMITS: set[Callable[..., object]] = set()
+"""Every rate-limit dependency `guard` / `guard_any_grant` built."""
+
+
+def principal_key(iss: str | None, sub: str) -> str:
+    """The bounded limiter key of a principal: a hash of the (issuer, subject) pair."""
+    return hashlib.sha256(f"{iss or ''}\0{sub}".encode()).hexdigest()[:32]
 
 
 def _limit(bucket: Bucket) -> Callable[..., object]:
@@ -34,7 +41,7 @@ def _limit(bucket: Bucket) -> Callable[..., object]:
         runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
     ) -> None:
         limiter = getattr(runtime.limits, bucket)
-        decision = await limiter.check_key(principal_key(principal.sub))
+        decision = await limiter.check_key(principal_key(principal.iss, principal.sub))
         if not decision.allowed:
             raise AdminProblem(
                 429,
@@ -43,6 +50,7 @@ def _limit(bucket: Bucket) -> Callable[..., object]:
                 headers={"Retry-After": str(decision.retry_after)},
             )
 
+    LIMITS.add(dependency)
     return dependency
 
 
@@ -55,7 +63,7 @@ def guard(
     else:
         auth = require_role(role, tenant_param=tenant_param)
     GUARDED[auth] = (role, tenant_param)
-    return [Depends(auth), Depends(_limit(bucket))]
+    return [Depends(get_principal), Depends(_limit(bucket)), Depends(auth)]
 
 
 async def any_grant(
@@ -88,7 +96,7 @@ async def any_grant(
 def guard_any_grant(bucket: Bucket = "read") -> list[DependsParam]:
     """Dependencies for a route whose result is filtered by the caller's grants."""
     GUARDED[any_grant] = (Role.VIEWER, "per-grants")
-    return [Depends(any_grant), Depends(_limit(bucket))]
+    return [Depends(get_principal), Depends(_limit(bucket)), Depends(any_grant)]
 
 
-__all__ = ["GUARDED", "Bucket", "any_grant", "guard", "guard_any_grant", "principal_key"]
+__all__ = ["GUARDED", "LIMITS", "Bucket", "any_grant", "guard", "guard_any_grant", "principal_key"]

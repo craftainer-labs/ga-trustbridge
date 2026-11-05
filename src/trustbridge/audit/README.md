@@ -75,19 +75,29 @@ is wrapped in `ThrottledDenials` (NG6d decision A6). Per (subject, reason) and f
 (`AUDIT_DENIED_WINDOW_SECONDS`, default 60) the first `AUDIT_DENIED_BURST` (default 5) denials are
 recorded in full: the 5th is a row, the 6th is only counted (in the counter store and the metric
 `trustbridge.audit.authz_denied.suppressed`). When the window has closed, ONE summary
-`authz.denied` row is written: `after` carries `suppressed` (how many were not recorded) and
-`window_seconds`, `resource_id` is null, and the denied principal, `reason`, `required_role` and
-`scope` are those of the last suppressed denial. A window that closes with nothing suppressed
-writes no summary. The window count lives in Valkey (shared by the replicas, key
-`tb:audit:denied:<hash of sub and reason>:<window>`); a claim marker makes the summary happen once.
+`authz.denied` row is written: `after` carries `suppressed` (how many were not recorded),
+`window_seconds` and `"sample": "last"`, `resource_id` is null, and the denied principal, `reason`,
+`required_role`, `scope`, `tenant_id`, `source_ip` and `request_id` are those of the LAST
+suppressed denial of the window. `"sample": "last"` says exactly that: those fields describe one
+request, not the whole burst. A window that closes with nothing suppressed writes no summary. The
+window count lives in Valkey (shared by the replicas, key
+`tb:audit:denied:<hash of sub and reason>:<window>`); a claim marker (`...:summary`) makes the
+summary happen once per window.
 
-**When the summary is written.** Either on the next denial of the same (subject, reason) in a later
-window, or by `ThrottledDenials.flush()`, which the api calls every window from a background task
-(a process-local index of windows that had suppressed denials). A restart loses only that index:
-the counts stay in Valkey, so the summary is then written when that subject is denied again, and
-not at all if it never is (and the counts expire after two windows). A Valkey outage or timeout
-(`AUDIT_DENIED_TIMEOUT_MS`, default 50) fails open to recording the row: the audit trail is never
-thinned by an outage, and the request path stays bounded.
+**Nothing disappears.** A window that suppressed anything is entered in the Valkey set
+`tb:audit:denied:pending` (member `<hash>:<window>`) with the last suppressed denial stored as its
+sample (`...:<window>:sample`). All of it is kept `max(2 * window, 1 day)`. The summary is then
+written by either of two paths, both reading that set (no process-local state):
+
+- the first denial of the same (subject, reason) in a later window summarises EVERY closed pending
+  window of the pair, however many windows ago;
+- `ThrottledDenials.flush()` summarises every closed pending window of every subject. The api calls
+  it at startup, every window, and at graceful shutdown, so a restarted or a second replica
+  finishes the other's work. The still-open window is never summarised early.
+
+A Valkey outage or timeout (`AUDIT_DENIED_TIMEOUT_MS`, default 50) fails open to recording the
+row: the audit trail is never thinned by an outage, and the request path stays bounded. A summary
+is at-most-once: a replica that claims a window and dies before writing the row loses that row.
 
 ## Read and export routes (NG6d)
 

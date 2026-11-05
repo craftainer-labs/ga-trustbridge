@@ -141,6 +141,7 @@ class AuditDenials:
                             {
                                 "suppressed": denial.suppressed,
                                 "window_seconds": denial.window_seconds,
+                                "sample": "last",
                             }
                             if denial.suppressed
                             else {}

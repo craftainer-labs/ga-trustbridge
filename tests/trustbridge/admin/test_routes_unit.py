@@ -15,9 +15,9 @@ from tests.trustbridge.admin.helpers import ACME, OTHER, build, problem
 from trustbridge.admin import routes
 from trustbridge.admin.access import NoTenants
 from trustbridge.admin.cursor import encode_cursor
-from trustbridge.admin.guards import GUARDED
+from trustbridge.admin.guards import GUARDED, LIMITS
 from trustbridge.audit import ActorType, AuditPage, AuditQuery, AuditRecord, Outcome
-from trustbridge.rbac import RbacConfig, RbacRuntime
+from trustbridge.rbac import RbacConfig, RbacRuntime, get_principal
 from trustbridge.tenancy import TenantInfo, current_tenant
 
 ADMIN = "trustbridge:admin"
@@ -79,14 +79,17 @@ def tenants(monkeypatch: pytest.MonkeyPatch) -> list[TenantInfo]:
 # ---- the router walk (inv. 1, 13, 21) ------------------------------------------------------
 
 
-def test_every_admin_route_declares_a_guard_first_and_sits_under_v1() -> None:
-    """Inv. 1/13/21: the first dependency is a recorded guard; every path is under /admin/v1."""
+def test_every_admin_route_authenticates_limits_then_checks_the_role_under_v1() -> None:
+    """Inv. 1/13/21: authenticate, then the limit, then a recorded role guard, all before the handler."""
     api_routes = [r for r in routes.router.routes if isinstance(r, APIRoute)]
     assert api_routes
     for route in api_routes:
         assert route.path.startswith("/admin/v1/"), route.path
-        assert route.dependant.dependencies, route.path
-        assert route.dependant.dependencies[0].call in GUARDED, route.path
+        calls = [d.call for d in route.dependant.dependencies]
+        assert len(calls) >= 3, route.path  # noqa: PLR2004 - authenticate, limit, role
+        assert calls[0] is get_principal, route.path
+        assert calls[1] in LIMITS, route.path
+        assert calls[2] in GUARDED, route.path
         assert route.methods == {"GET"}, route.path  # NG6d is the read side
 
 

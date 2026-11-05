@@ -7,12 +7,15 @@ recorded in full; the rest are only counted (in the shared counter store, and in
 `suppressed` metric). When the window has closed, ONE summary row (a `Denial` with
 `suppressed > 0`) records how many were not written.
 
-**When the summary is written.** Either (a) on the first denial of the same (subject, reason) in
-a later window, or (b) by `flush()`, which the api's lifespan calls every window. The counts live
-in the shared counter store (Valkey), so a replica restart does not lose them; what a restart
-loses is only the process-local index of windows `flush()` walks, so a summary is then written by
-path (a) when that subject is denied again, and not at all if it never is. A claim marker
-(`INCR` to 1) makes the summary happen once across replicas and paths.
+**Nothing disappears from the trail.** A window that suppressed anything is entered in a shared
+*pending set* (`tb:audit:denied:pending`, members `<subject/reason hash>:<window>`) together with
+the last suppressed denial as its sample (`...:sample`). Both live in the counter store, so no
+process-local state is needed: (a) the first denial of the same (subject, reason) in a later
+window summarises EVERY closed pending window of that pair, however many windows ago, and (b)
+`flush()` (the api calls it every window, at startup and at shutdown) summarises every closed
+pending window of every subject, on any replica, also after a restart. A claim marker (`INCR` to
+1 per window) makes each window's summary happen once across replicas and paths. Keys are kept
+`max(2 * window, 1 day)`, so an outage of the whole api shorter than that loses nothing.
 
 A counter-store failure or timeout fails open to *recording the row*: the audit trail stays
 complete, and the request path stays bounded by `timeout_ms`.
@@ -20,18 +23,20 @@ complete, and the request path stays bounded by `timeout_ms`.
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from trustbridge.audit.denial import Denial, DenialSink
 from trustbridge.ratelimit import CounterLike, WindowCounter
 
 logger = logging.getLogger(__name__)
 KEY_PREFIX = "tb:audit:denied"
-MAX_OPEN_WINDOWS = 10_000
-"""Most (subject, reason) windows the process remembers for `flush()`; beyond it only path (a)."""
+PENDING_KEY = f"{KEY_PREFIX}:pending"
+MIN_RETENTION_SECONDS = 24 * 3600
+"""How long counts, samples and the pending set are kept (at least two windows)."""
 
 
 class ThrottledDenials:
@@ -56,7 +61,7 @@ class ThrottledDenials:
         self._timeout = timeout_ms / 1000
         self._suppressed = suppressed
         self._clock = clock
-        self._open: dict[str, tuple[int, Denial]] = {}
+        self._retain = max(2 * window_seconds, MIN_RETENTION_SECONDS)
 
     @staticmethod
     def _base(denial: Denial) -> str:
@@ -64,76 +69,107 @@ class ThrottledDenials:
         digest = hashlib.sha256(f"{denial.sub}\0{denial.reason}".encode()).hexdigest()
         return digest[:32]
 
-    def _key(self, base: str, window: int) -> str:
+    @staticmethod
+    def _key(base: str, window: int) -> str:
         return f"{KEY_PREFIX}:{base}:{window}"
+
+    def _current(self) -> int:
+        return int(self._clock() // self._window)
 
     async def denied(self, denial: Denial) -> None:
         """Record the denial, or count it when this (subject, reason) is over its burst."""
-        window = int(self._clock() // self._window)
+        window = self._current()
         base = self._base(denial)
         count = 0  # 0: the counter store failed, so the row is recorded
-        summary: Denial | None = None
+        summaries: list[Denial] = []
         try:
             async with asyncio.timeout(self._timeout):
-                count = await self._counter.incr(self._key(base, window), 2 * self._window)
+                count = await self._counter.incr(self._key(base, window), self._retain)
                 if count == 1:
-                    summary = await self._claim_summary(base, window - 1, denial)
+                    summaries = await self._claim_closed(base, window)
+                if count > self._burst:
+                    await self._note_suppressed(
+                        base, window, denial, first=count == self._burst + 1
+                    )
         except Exception:
             logger.warning("denial throttle failed open", exc_info=True)
-        if summary is not None:
+            if count > self._burst:
+                count = 0  # it could not be noted for a summary, so record the row itself
+        for summary in summaries:
             await self._sink.denied(summary)
         if count > self._burst:
             if self._suppressed is not None:
                 self._suppressed.add(1)
-            if base in self._open or len(self._open) < MAX_OPEN_WINDOWS:
-                self._open[base] = (window, denial)
             return
         await self._sink.denied(denial)
 
-    async def _claim_summary(self, base: str, window: int, sample: Denial) -> Denial | None:
-        """The summary of `window` if it had suppressed denials and nobody claimed it yet."""
-        suppressed = await self._counter.get(self._key(base, window)) - self._burst
+    async def _note_suppressed(
+        self, base: str, window: int, denial: Denial, *, first: bool
+    ) -> None:
+        """Keep the latest suppressed denial as the window's sample; enter the window as pending."""
+        sample = json.dumps(asdict(replace(denial, suppressed=0, window_seconds=0)))
+        await self._counter.set_text(f"{self._key(base, window)}:sample", sample, self._retain)
+        if first:
+            await self._counter.sadd(PENDING_KEY, f"{base}:{window}", self._retain)
+
+    async def _claim_closed(self, base: str, current: int) -> list[Denial]:
+        """The summaries of every closed pending window of `base` this call claimed."""
+        out: list[Denial] = []
+        for member in sorted(await self._counter.smembers(PENDING_KEY)):
+            member_base, _, text = member.partition(":")
+            if member_base != base or not text.isdigit() or int(text) >= current:
+                continue
+            summary = await self._summarise(member_base, int(text))
+            if summary is not None:
+                out.append(summary)
+        return out
+
+    async def _summarise(self, base: str, window: int) -> Denial | None:
+        """The summary of a closed `window`, if it suppressed anything and nobody claimed it."""
+        key = self._key(base, window)
+        member = f"{base}:{window}"
+        suppressed = await self._counter.get(key) - self._burst
         if suppressed <= 0:
-            self._open.pop(base, None)
+            await self._counter.srem(PENDING_KEY, member)
             return None
-        claim = await self._counter.incr(f"{self._key(base, window)}:summary", 2 * self._window)
-        known = self._open.pop(base, None)
+        claim = await self._counter.incr(f"{key}:summary", self._retain)
+        await self._counter.srem(PENDING_KEY, member)
         if claim != 1:
             return None
+        text = await self._counter.get_text(f"{key}:sample")
+        if text is None:
+            logger.error("denial summary lost its sample", extra={"window": window})
+            return None
         return replace(
-            known[1] if known is not None else sample,
-            suppressed=suppressed,
-            window_seconds=self._window,
+            Denial(**json.loads(text)), suppressed=suppressed, window_seconds=self._window
         )
 
     async def flush(self) -> int:
-        """Write the summaries of windows that have closed; returns how many were written.
+        """Write the summaries of every closed pending window; returns how many were written.
 
-        Call it about once a window. A failure for one entry is logged and the entry dropped
-        (the count stays in the store for path (a)).
+        Driven by the shared pending set, so any replica (or a restarted one) finishes the
+        work of any other. A failure for one entry is logged; the entry stays pending for the
+        next pass unless it was already claimed.
         """
-        current = int(self._clock() // self._window)
+        current = self._current()
+        try:
+            async with asyncio.timeout(self._timeout):
+                members = sorted(await self._counter.smembers(PENDING_KEY))
+        except Exception:
+            logger.warning("denial summary flush failed", exc_info=True)
+            return 0
         written = 0
-        for base, (window, sample) in list(self._open.items()):
-            if window >= current:
+        for member in members:
+            base, _, text = member.partition(":")
+            if not text.isdigit() or int(text) >= current:
                 continue
-            del self._open[base]
             try:
                 async with asyncio.timeout(self._timeout):
-                    suppressed = await self._counter.get(self._key(base, window)) - self._burst
-                    claim = (
-                        await self._counter.incr(
-                            f"{self._key(base, window)}:summary", 2 * self._window
-                        )
-                        if suppressed > 0
-                        else 0
-                    )
+                    summary = await self._summarise(base, int(text))
             except Exception:
                 logger.warning("denial summary flush failed", exc_info=True)
                 continue
-            if claim == 1:
-                await self._sink.denied(
-                    replace(sample, suppressed=suppressed, window_seconds=self._window)
-                )
+            if summary is not None:
+                await self._sink.denied(summary)
                 written += 1
         return written

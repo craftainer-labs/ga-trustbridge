@@ -41,7 +41,9 @@ ALLOW_LISTS: Mapping[str, frozenset[str]] = {
         }
     ),
     "oidc_trust": frozenset({"adapter", "operation_id"}),
-    "authz_denial": frozenset({"reason", "required_role", "scope", "suppressed", "window_seconds"}),
+    "authz_denial": frozenset(
+        {"reason", "required_role", "scope", "suppressed", "window_seconds", "sample"}
+    ),
     "audit_export": frozenset(
         {
             "scope",

@@ -6,10 +6,12 @@ NG6d-1). Mounted by `trustbridge.main` under `/admin/v1`; authentication and rol
 `trustbridge.audit`. Imports `app.oidc` and `app.problem_details`; nothing in `src/app/` is edited.
 
 - `routes.py`: the router and the handlers (read only; every route is a `GET`).
-- `guards.py`: `guard(role, bucket, tenant_param=...)` returns a route's `dependencies`: first the
-  RBAC dependency (it authenticates), then the principal's rate-limit bucket. Every guard is
-  recorded in `GUARDED`; the router-walk test fails for a route whose first dependency is not one
-  (ADR 0033 invariant 1). `guard_any_grant` is for `/tenants`, which is filtered per grant.
+- `guards.py`: `guard(role, bucket, tenant_param=...)` returns a route's `dependencies`: first
+  `get_principal` (authentication), then the principal's rate-limit bucket (keyed on a hash of
+  `(iss, sub)`; it runs before the role check so an over-limit caller costs no tenant lookup),
+  then the RBAC dependency. Role guards are recorded in `GUARDED`, limit dependencies in
+  `LIMITS`; the router-walk test fails for a route whose dependencies are not those three in that
+  order (ADR 0033 invariant 1). `guard_any_grant` is for `/tenants`, which is filtered per grant.
 - `runtime.py`: `AdminRuntime` (`app.state.admin`: limiters, the host view, the session factory,
   the audit writer, the export lag and page size) and `build_limits`.
 - `access.py`: `SqlTenantAccess`, the `TenantAccess` over `tb_list_tenants()`; `NoTenants` for
@@ -77,7 +79,7 @@ The classes are open: v1 may add one. Errors off `/admin/v1` keep the template's
 ## Rate limits (decision 5)
 
 Fixed windows in Valkey through `trustbridge.ratelimit` (key prefix `tb:rl:admin:`), fail open with
-a metric. Per principal (`sub`, hashed): reads 600/min, exports 6/min (mutations 60/min, for
+a metric. Per principal (`iss` and `sub`, hashed): reads 600/min, exports 6/min (mutations 60/min, for
 NG6e). Per source address: 30/min for rejected requests (401, 403, 404 count; over the limit the
 rejection becomes a 429). Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_REQUESTS`,
 `MUTATION_REQUESTS`, `EXPORT_REQUESTS`, `ANONYMOUS_REQUESTS`, `WINDOW_SECONDS`, `TIMEOUT_MS`,
@@ -87,6 +89,9 @@ rejection becomes a 429). Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_REQUES
 
 - `GET /tenants/{t}/repositories`, `/resources`, `/credentials`, `/operations`, `/deliveries` and
   the snapshot `docs/openapi/admin-v1.json` with its drift test: NG6d-2.
+- `/tenants` and `/me` load and sort every tenant row per request, and `GET /tenants/{id}` could
+  use the single-row lookup instead; `openapi_spec()` caches in a module global (the snapshot
+  replaces it): NG6d-2.
 - `GET /tenants/{t}/adapters`: nothing on main loads adapters in the api process (no
   `ADAPTERS_ENABLED`, no registry), so there is no capability summary to serve; it needs that
   wiring first (NG6d-2).

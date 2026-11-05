@@ -162,6 +162,7 @@ async def _trustbridge_resources(
         refresh_min_seconds=settings.webhook_secret_refresh_min_seconds,
     )
     tasks: list[asyncio.Task[None]] = []
+    denials: ThrottledDenials | None = None
     try:
         if not mock:
             registry = overrides.health_registry()
@@ -190,7 +191,7 @@ async def _trustbridge_resources(
                 handler=core.runtime.argocd, tenants=core.tenants, configs=core.connections
             ),
         )
-        _install_admin(
+        denials = _install_admin(
             app=app, settings=settings, core=core, counter=counter, sessions=sessions, tasks=tasks
         )
         yield
@@ -199,6 +200,8 @@ async def _trustbridge_resources(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if denials is not None:
+            await _final_flush(denials)
         with contextlib.suppress(AttributeError):
             del app.state.trustbridge
         for name in ("rbac", "admin"):
@@ -216,8 +219,11 @@ def _install_admin(  # noqa: PLR0913 - the collaborators main owns
     counter: WindowCounter,
     sessions: async_sessionmaker[AsyncSession] | None,
     tasks: list[asyncio.Task[None]],
-) -> None:
-    """Build `app.state.rbac` (with the throttled denial sink) and `app.state.admin`."""
+) -> ThrottledDenials | None:
+    """Build `app.state.rbac` (with the throttled denial sink) and `app.state.admin`.
+
+    Returns the denial throttle (None without a database) so the lifespan can flush it at shutdown.
+    """
     writer = None if sessions is None else AuditWriter(sessions)
     denials = None
     if writer is not None:
@@ -248,16 +254,28 @@ def _install_admin(  # noqa: PLR0913 - the collaborators main owns
         writer=writer,
         export_lag_seconds=settings.audit_export_lag_seconds,
     )
+    return denials
 
 
 async def _flush_denials(throttle: ThrottledDenials, interval: int) -> None:
-    """Write the summary rows of closed denial windows once a window, for the process's life."""
+    """Write the summary rows of closed denial windows at startup, then once a window.
+
+    The first pass finishes what a previous process left pending in the shared store.
+    """
     while True:
-        await asyncio.sleep(interval)
         try:
             await throttle.flush()
         except Exception:
             logger.exception("denial summary flush failed")
+        await asyncio.sleep(interval)
+
+
+async def _final_flush(throttle: ThrottledDenials) -> None:
+    """One last pass at graceful shutdown (closed windows only); a failure is logged."""
+    try:
+        await throttle.flush()
+    except Exception:
+        logger.exception("denial summary flush at shutdown failed")
 
 
 def __getattr__(name: str) -> FastAPI:
