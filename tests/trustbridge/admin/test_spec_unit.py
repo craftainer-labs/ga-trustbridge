@@ -70,7 +70,7 @@ def test_the_spec_is_served_from_one_immutable_body() -> None:
 
 
 def test_the_regeneration_command_prints_the_snapshot(capsys: pytest.CaptureFixture[str]) -> None:
-    """`python -m trustbridge.admin.spec` prints exactly the committed text; importing prints none."""
+    """The module prints exactly the committed text when run; importing it prints nothing."""
     runpy.run_module("trustbridge.admin.spec", run_name="__main__")
     assert capsys.readouterr().out == SNAPSHOT.read_text()
     importlib.import_module("trustbridge.admin.spec")
