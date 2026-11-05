@@ -96,7 +96,7 @@ async def test_an_expired_key_restarts_from_one_even_before_the_sweep() -> None:
     await counter.incr("k", 10)
     await counter.sadd("s", "old", 10)
     clock.now = 10.5
-    counter._next_sweep = 100.0  # noqa: SLF001 - hold the sweep off, so only `_live` can tell
+    counter._next_sweep = 100.0
     assert await counter.incr("k", 10) == 1
     await counter.sadd("s", "new", 10)
     assert await counter.smembers("s") == {"new"}

@@ -75,14 +75,6 @@ class FakeRedis:
             return self.texts[name]
         return str(self.kv[name]) if name in self.kv else None
 
-    async def set(self, name: str, value: str, ex: int | None = None) -> bool:
-        """`SET name value [EX ex]` of a text value."""
-        self._check()
-        self.texts[name] = value
-        if ex is not None:
-            self.expiries[name] = ex
-        return True
-
     async def smembers(self, name: str) -> set[str]:
         """The members of a set."""
         self._check()
@@ -265,6 +257,14 @@ class FakeRedis:
     def pipeline(self, transaction: bool = True) -> FakePipeline:
         """A MULTI/EXEC-like pipeline for the limiter."""
         return FakePipeline(self)
+
+    async def set(self, name: str, value: str, ex: int | None = None) -> bool:
+        """`SET name value [EX ex]` of a text value."""
+        self._check()
+        self.texts[name] = value
+        if ex is not None:
+            self.expiries[name] = ex
+        return True
 
 
 class FakePipeline:

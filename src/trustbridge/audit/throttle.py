@@ -88,9 +88,7 @@ class ThrottledDenials:
                 if count == 1:
                     summaries = await self._claim_closed(base, window)
                 if count > self._burst:
-                    await self._note_suppressed(
-                        base, window, denial, first=count == self._burst + 1
-                    )
+                    await self._note_suppressed(base, window, denial)
         except Exception:
             logger.warning("denial throttle failed open", exc_info=True)
             if count > self._burst:
@@ -103,14 +101,15 @@ class ThrottledDenials:
             return
         await self._sink.denied(denial)
 
-    async def _note_suppressed(
-        self, base: str, window: int, denial: Denial, *, first: bool
-    ) -> None:
-        """Keep the latest suppressed denial as the window's sample; enter the window as pending."""
+    async def _note_suppressed(self, base: str, window: int, denial: Denial) -> None:
+        """Keep the latest suppressed denial as the window's sample; enter the window as pending.
+
+        The pending entry is written on every suppressed denial (`SADD` is idempotent), so a
+        failure on the first one does not leave the window unnoted.
+        """
         sample = json.dumps(asdict(replace(denial, suppressed=0, window_seconds=0)))
         await self._counter.set_text(f"{self._key(base, window)}:sample", sample, self._retain)
-        if first:
-            await self._counter.sadd(PENDING_KEY, f"{base}:{window}", self._retain)
+        await self._counter.sadd(PENDING_KEY, f"{base}:{window}", self._retain)
 
     async def _claim_closed(self, base: str, current: int) -> list[Denial]:
         """The summaries of every closed pending window of `base` this call claimed."""

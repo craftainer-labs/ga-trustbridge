@@ -278,7 +278,7 @@ async def test_a_window_claimed_elsewhere_is_not_written_again() -> None:
     for _ in range(7):
         await throttle.denied(_denial())
     window = int(clock.now // WINDOW)
-    key = ThrottledDenials._key(ThrottledDenials._base(_denial()), window)  # noqa: SLF001
+    key = ThrottledDenials._key(ThrottledDenials._base(_denial()), window)
     await counter.incr(f"{key}:summary", 100)
     clock.now += WINDOW
     assert await throttle.flush() == 0
@@ -381,3 +381,19 @@ async def test_one_failing_entry_does_not_stop_the_flush() -> None:
     assert await throttle.flush() == 1
     valkey.get = real  # type: ignore[method-assign]
     assert await throttle.flush() == 1  # the failed entry was still pending
+
+
+async def test_a_later_denial_skips_a_window_another_replica_already_claimed() -> None:
+    """Path (a) with the claim marker taken elsewhere: no summary, the new denial is recorded."""
+    counter = InMemoryWindowCounter()
+    sink, clock = Sink(), Clock()
+    throttle = _throttle(sink, counter, clock)
+    for _ in range(7):
+        await throttle.denied(_denial())
+    window = int(clock.now // WINDOW)
+    key = ThrottledDenials._key(ThrottledDenials._base(_denial()), window)
+    await counter.incr(f"{key}:summary", 100)
+    clock.now += WINDOW
+    await throttle.denied(_denial(resource="fresh"))
+    assert [r.suppressed for r in sink.rows] == [0] * 6
+    assert await counter.smembers(PENDING_KEY) == set()

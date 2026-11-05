@@ -80,13 +80,13 @@ def tenants(monkeypatch: pytest.MonkeyPatch) -> list[TenantInfo]:
 
 
 def test_every_admin_route_authenticates_limits_then_checks_the_role_under_v1() -> None:
-    """Inv. 1/13/21: authenticate, then the limit, then a recorded role guard, all before the handler."""
+    """Inv. 1/13/21: authenticate, then the limit, then a recorded role guard."""
     api_routes = [r for r in routes.router.routes if isinstance(r, APIRoute)]
     assert api_routes
     for route in api_routes:
         assert route.path.startswith("/admin/v1/"), route.path
         calls = [d.call for d in route.dependant.dependencies]
-        assert len(calls) >= 3, route.path  # noqa: PLR2004 - authenticate, limit, role
+        assert len(calls) >= 3, route.path
         assert calls[0] is get_principal, route.path
         assert calls[1] in LIMITS, route.path
         assert calls[2] in GUARDED, route.path
