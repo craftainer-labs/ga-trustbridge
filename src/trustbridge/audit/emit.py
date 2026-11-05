@@ -116,6 +116,8 @@ class AuditDenials:
             resource_type, resource_id = "tenant", denial.tenant_id
         else:
             resource_type, resource_id = "role", denial.required_role
+        if denial.suppressed:  # a summary row names no single resource
+            resource_id = None
         await self._writer.record(
             AuditEvent(
                 actor_type=ActorType.USER,
@@ -135,6 +137,16 @@ class AuditDenials:
                         "reason": denial.reason,
                         "required_role": denial.required_role,
                         "scope": denial.scope,
+                        **(
+                            {
+                                "suppressed": denial.suppressed,
+                                "window_seconds": denial.window_seconds,
+                                "window": denial.window,
+                                "sample": "last",
+                            }
+                            if denial.suppressed
+                            else {}
+                        ),
                     },
                 ),
             )

@@ -3,7 +3,8 @@
 ## Status
 
 Proposed. G-api answers from the user are recorded below (2026-11-03); none are open.
-No code is written yet. It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
+NG6d-1 (#23) implemented `me`, openapi, hosts, tenants and audit read/export. The other routes arrive with NG6d-2, NG6e and NG6h.
+It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
 endpoints) merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (instance layout, the abuse
 limiter, the NG6 split of limits),
@@ -351,7 +352,8 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
 **Authentication and authorization**
 
 1. A test walks the admin router and fails for any route with no role requirement, and for
-   any route whose first dependency is not authentication (NFR-0011, NFR-0012).
+   any route whose dependencies are not, in order, authentication, the rate limit and the role
+   check (NFR-0011, NFR-0012).
 2. A request with no token or an invalid token gets 401 problem details with the RFC 9728
    `WWW-Authenticate` challenge, and the error body never names the validation detail outside
    `MODE=dev`.

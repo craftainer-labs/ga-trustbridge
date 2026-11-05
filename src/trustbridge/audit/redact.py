@@ -41,7 +41,26 @@ ALLOW_LISTS: Mapping[str, frozenset[str]] = {
         }
     ),
     "oidc_trust": frozenset({"adapter", "operation_id"}),
-    "authz_denial": frozenset({"reason", "required_role", "scope"}),
+    "authz_denial": frozenset(
+        {"reason", "required_role", "scope", "suppressed", "window_seconds", "window", "sample"}
+    ),
+    "audit_export": frozenset(
+        {
+            "scope",
+            "tenant_id",
+            "after_seq",
+            "since",
+            "until",
+            "actor_sub",
+            "action",
+            "resource_type",
+            "resource_id",
+            "outcome",
+            "row_count",
+            "last_seq",
+            "complete",
+        }
+    ),
 }
 """The fields each shape may record. Secrets and connection data never appear here."""
 

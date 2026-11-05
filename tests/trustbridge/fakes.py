@@ -42,6 +42,7 @@ class FakeRedis:
         self.groups: dict[tuple[str, str], _Group] = {}
         self.kv: dict[str, int] = {}
         self.sets: dict[str, set[str]] = {}
+        self.texts: dict[str, str] = {}
         self.expiries: dict[str, int] = {}
         self._last = (0, -1)
         self.down = False
@@ -66,6 +67,38 @@ class FakeRedis:
     def ids_of(self, name: str) -> list[str]:
         """The `id` field (delivery id) of each entry in order."""
         return [fields["id"] for _, fields in self.entries(name)]
+
+    async def get(self, name: str) -> str | None:
+        """`GET` of a counter key (the limiter's `INCR` values)."""
+        self._check()
+        if name in self.texts:
+            return self.texts[name]
+        return str(self.kv[name]) if name in self.kv else None
+
+    async def smembers(self, name: str) -> set[str]:
+        """The members of a set."""
+        self._check()
+        return set(self.sets.get(name, set()))
+
+    async def srem(self, name: str, *values: str) -> int:
+        """Remove members from a set."""
+        self._check()
+        members = self.sets.get(name, set())
+        before = len(members)
+        members.difference_update(values)
+        if name in self.sets and not members:
+            del self.sets[name]
+        return before - len(members)
+
+    async def delete(self, *names: str) -> int:
+        """`DEL`."""
+        self._check()
+        gone = 0
+        for name in names:
+            for store in (self.kv, self.texts, self.sets, self.expiries):
+                if store.pop(name, None) is not None:
+                    gone += 1
+        return gone
 
     async def sadd(self, name: str, *values: str) -> int:
         """Add members to a set."""
@@ -237,6 +270,14 @@ class FakeRedis:
         """A MULTI/EXEC-like pipeline for the limiter."""
         return FakePipeline(self)
 
+    async def set(self, name: str, value: str, ex: int | None = None) -> bool:
+        """`SET name value [EX ex]` of a text value."""
+        self._check()
+        self.texts[name] = value
+        if ex is not None:
+            self.expiries[name] = ex
+        return True
+
 
 class FakePipeline:
     """`INCR` + `EXPIRE NX`, applied atomically on `execute`."""
@@ -244,7 +285,7 @@ class FakePipeline:
     def __init__(self, redis: FakeRedis) -> None:
         """Bind the fake."""
         self._r = redis
-        self._ops: list[tuple[str, str, int]] = []
+        self._ops: list[tuple[str, str, int, bool, str]] = []
 
     async def __aenter__(self) -> FakePipeline:
         """Enter."""
@@ -255,24 +296,43 @@ class FakePipeline:
 
     def incr(self, key: str) -> None:
         """Queue INCR."""
-        self._ops.append(("incr", key, 0))
+        self._ops.append(("incr", key, 0, False, ""))
+
+    def set(self, key: str, value: str, ex: int | None = None) -> None:
+        """Queue SET."""
+        self._ops.append(("set", key, ex or 0, False, value))
+
+    def sadd(self, key: str, member: str) -> None:
+        """Queue SADD."""
+        self._ops.append(("sadd", key, 0, False, member))
 
     def expire(self, key: str, ttl: int, nx: bool = False) -> None:
         """Queue EXPIRE NX."""
-        self._ops.append(("expire", key, ttl))
+        self._ops.append(("expire", key, ttl, nx, ""))
 
     async def execute(self) -> list[int]:
         """Run the queued commands."""
         self._r._check()
         out = []
-        for op, key, ttl in self._ops:
+        for op, key, ttl, nx, member in self._ops:
             if op == "incr":
                 self._r.kv[key] = self._r.kv.get(key, 0) + 1
                 out.append(self._r.kv[key])
+            elif op == "set":
+                self._r.texts[key] = member
+                self._r.expiries[key] = ttl
+                out.append(1)
+            elif op == "sadd":
+                members = self._r.sets.setdefault(key, set())
+                out.append(0 if member in members else 1)
+                members.add(member)
             else:
                 first = key not in self._r.expiries
-                self._r.expiries.setdefault(key, ttl)
-                out.append(1 if first else 0)
+                if nx:
+                    self._r.expiries.setdefault(key, ttl)
+                else:
+                    self._r.expiries[key] = ttl
+                out.append(1 if first or not nx else 0)
         return out
 
 

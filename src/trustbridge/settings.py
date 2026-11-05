@@ -168,6 +168,26 @@ class TrustbridgeSettings(Settings):
     host_recheck_seconds: float = Field(default=float(DEFAULT_HOST_RECHECK_SECONDS), gt=0)
     host_check_timeout_seconds: float = Field(default=10.0, gt=0)
 
+    # Admin API rate limits (ADR 0033 decision 5): fixed windows in Valkey, fail open. Reads,
+    # mutations and exports are per principal; `anonymous` is per source address for
+    # unauthenticated or rejected requests. Starting points to measure with the UI.
+    admin_rate_limit_enabled: bool = True
+    admin_rate_limit_read_requests: int = Field(default=600, gt=0)
+    admin_rate_limit_mutation_requests: int = Field(default=60, gt=0)
+    admin_rate_limit_export_requests: int = Field(default=6, gt=0)
+    admin_rate_limit_anonymous_requests: int = Field(default=30, gt=0)
+    admin_rate_limit_window_seconds: int = Field(default=60, gt=0)
+    admin_rate_limit_timeout_ms: int = Field(default=50, gt=0)
+    admin_rate_limit_exempt_cidrs: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = Field(
+        default_factory=list
+    )
+
+    # Bound on `authz.denied` rows (ADR 0032, NG6d): per (subject, reason) and window, the first
+    # `burst` denials are recorded in full, the rest are counted and summarised in one row.
+    audit_denied_window_seconds: int = Field(default=60, gt=0)
+    audit_denied_burst: int = Field(default=5, gt=0)
+    audit_denied_timeout_ms: int = Field(default=50, gt=0)
+
     # Admin API RBAC (ADR 0033). Instance roles are `trustbridge<sep><role>`, tenant roles
     # `trustbridge<sep><host><sep><org><sep><role>`. The separator is configurable because
     # Keycloak's acceptance of `:` in client role names is not confirmed by its docs.

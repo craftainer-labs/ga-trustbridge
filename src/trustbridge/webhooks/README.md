@@ -23,7 +23,9 @@ path and processing" and "Abuse limits on the webhook route").
   names the application: `ArgoCdDeploymentHandler.handle` re-reads the state through the
   `DeploymentStateSource` (NG5d) before GitHub is written. 503 without a state source or when the
   host is not `ready`.
-- `limiter.py`: the Valkey-backed fixed-window limiter per source address (default 300 requests
+- `limiter.py`: the webhook binding (key prefix `tb:rl:webhooks`, the webhook metrics) of the
+  shared limiter in `trustbridge/ratelimit.py`, which the admin API also uses. The Valkey-backed
+  fixed-window limiter per source address (default 300 requests
   per 60 s, /64 for IPv6, 50 ms total budget, fail open, exempt CIDRs). It reads only
   `request.client.host`; `trustbridge.main` installs uvicorn's `ProxyHeadersMiddleware` with
   `TRUSTED_PROXIES`, and the api must run with `--no-proxy-headers`.

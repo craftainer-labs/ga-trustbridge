@@ -30,9 +30,17 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.health_checks import get_health_registry
 from app.main import app as template_app
+from trustbridge.admin import metrics as admin_metrics
+from trustbridge.admin.access import NoTenants, SqlTenantAccess
+from trustbridge.admin.problems import install_problem_types
+from trustbridge.admin.routes import router as admin_router
+from trustbridge.admin.runtime import AdminRuntime, build_limits
+from trustbridge.audit import AuditDenials, AuditWriter
+from trustbridge.audit.throttle import ThrottledDenials
 from trustbridge.github.availability import HostChecker
 from trustbridge.github.ports import SecretReader
 from trustbridge.github.webhook_secrets import WebhookSecretResolver
+from trustbridge.rbac import RbacConfig, RbacRuntime
 from trustbridge.settings import TrustbridgeSettings, get_trustbridge_settings
 from trustbridge.tenancy import budget_left, install_tenant_hook, register_role_check
 from trustbridge.webhooks.argocd import router as argocd_router
@@ -49,6 +57,7 @@ from trustbridge.worker.schema import register_schema_check
 
 logger = logging.getLogger(__name__)
 LOOPBACK_ONLY = "127.0.0.1"
+SHUTDOWN_FLUSH_SECONDS = 5.0
 
 
 def _trusted_hosts(settings: TrustbridgeSettings) -> list[str] | str:
@@ -98,6 +107,8 @@ def install(
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_hosts(settings))
     app.include_router(webhook_router)
     app.include_router(argocd_router)
+    app.include_router(admin_router)  # /admin/v1 (ADR 0033); every route declares its guard
+    install_problem_types(app)
     # Not a documented Starlette attribute (see the module docstring); the smoke test guards it.
     app.router.lifespan_context = lifespan  # type: ignore[assignment]
     app.state.trustbridge_installed = True
@@ -152,6 +163,7 @@ async def _trustbridge_resources(
         refresh_min_seconds=settings.webhook_secret_refresh_min_seconds,
     )
     tasks: list[asyncio.Task[None]] = []
+    denials: ThrottledDenials | None = None
     try:
         if not mock:
             registry = overrides.health_registry()
@@ -180,16 +192,95 @@ async def _trustbridge_resources(
                 handler=core.runtime.argocd, tenants=core.tenants, configs=core.connections
             ),
         )
+        denials = _install_admin(
+            app=app, settings=settings, core=core, counter=counter, sessions=sessions, tasks=tasks
+        )
         yield
     finally:
         await monitor.stop()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if denials is not None:
+            await _final_flush(denials)
         with contextlib.suppress(AttributeError):
             del app.state.trustbridge
+        for name in ("rbac", "admin"):
+            with contextlib.suppress(AttributeError):
+                delattr(app.state, name)
         if owned_redis is not None:
             await owned_redis.aclose()
+
+
+def _install_admin(  # noqa: PLR0913 - the collaborators main owns
+    *,
+    app: FastAPI,
+    settings: TrustbridgeSettings,
+    core: Core,
+    counter: WindowCounter,
+    sessions: async_sessionmaker[AsyncSession] | None,
+    tasks: list[asyncio.Task[None]],
+) -> ThrottledDenials | None:
+    """Build `app.state.rbac` (with the throttled denial sink) and `app.state.admin`.
+
+    Returns the denial throttle (None without a database) so the lifespan can flush it at shutdown.
+    """
+    writer = None if sessions is None else AuditWriter(sessions)
+    denials = None
+    if writer is not None:
+        denials = ThrottledDenials(
+            AuditDenials(writer),
+            counter,
+            window_seconds=settings.audit_denied_window_seconds,
+            burst=settings.audit_denied_burst,
+            timeout_ms=settings.audit_denied_timeout_ms,
+            suppressed=admin_metrics.authz_denied_suppressed,
+        )
+        tasks.append(
+            asyncio.create_task(_flush_denials(denials, settings.audit_denied_window_seconds))
+        )
+    app.state.rbac = RbacRuntime(
+        RbacConfig(
+            client_id=settings.oidc_client_id,
+            separator=settings.rbac_role_separator,
+            alias_personas=settings.rbac_alias_template_personas,
+        ),
+        NoTenants() if sessions is None else SqlTenantAccess(sessions),
+        denials=denials,
+    )
+    app.state.admin = AdminRuntime(
+        limits=build_limits(settings, counter),
+        hosts=core.runtime.monitor,
+        session_factory=sessions,
+        writer=writer,
+        export_lag_seconds=settings.audit_export_lag_seconds,
+    )
+    return denials
+
+
+async def _flush_denials(throttle: ThrottledDenials, interval: int) -> None:
+    """Write the summary rows of closed denial windows at startup, then once a window.
+
+    The first pass finishes what a previous process left pending in the shared store.
+    """
+    while True:
+        try:
+            await throttle.flush()
+        except Exception:
+            logger.exception("denial summary flush failed")
+        await asyncio.sleep(interval)
+
+
+async def _final_flush(throttle: ThrottledDenials) -> None:
+    """One last pass at graceful shutdown (closed windows only); a failure is logged.
+
+    Bounded, so a slow counter store cannot push the shutdown past the container's grace period.
+    """
+    try:
+        async with asyncio.timeout(SHUTDOWN_FLUSH_SECONDS):
+            await throttle.flush()
+    except Exception:
+        logger.exception("denial summary flush at shutdown failed")
 
 
 def __getattr__(name: str) -> FastAPI:

@@ -21,6 +21,11 @@ Tests for the instance package `src/trustbridge/` (instance-added files under th
   (null-tenant denial rows, same-transaction credential events, the canary check).
   `rbac/test_denial_audit.py`, `github/test_tenant_sync_audit.py` and
   `adapters/test_orphan_audit.py` cover the three call-site hooks with fake sinks.
+- `admin/` covers the admin API: `test_routes_unit.py` (guards, errors, pagination, export over
+  fakes), `test_limits_unit.py`, `test_cursor_unit.py`, `test_wiring_unit.py`; and
+  `test_admin_integration.py` (marked `integration`, reuses `tenancy/test_rls_integration.py`'s scratch
+  database): the tenant context under the async-generator dependency, denial rows and the export
+  against real RLS. `audit/test_throttle_unit.py` covers the denial throttle.
 - `test_main.py` runs the real `trustbridge.main:app` in a subprocess (the entrypoint mutates the
   template app at import, which must not leak into the template's own tests).
 

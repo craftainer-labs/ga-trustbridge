@@ -100,7 +100,7 @@ class Authorized:
     tenant_id: UUID | None = None
 
 
-def _source_ip(request: Request) -> str | None:
+def client_ip(request: Request) -> str | None:
     """The ASGI client address (already rewritten for trusted proxies), if it is an IP."""
     host = request.client.host if request.client else None
     try:
@@ -109,7 +109,7 @@ def _source_ip(request: Request) -> str | None:
         return None
 
 
-def _request_id(request: Request) -> str | None:
+def safe_request_id(request: Request) -> str | None:
     """The caller's `X-Request-ID` when it is a short, plain token; anything else is dropped."""
     value = request.headers.get("x-request-id")
     return value if value is not None and _REQUEST_ID.fullmatch(value) else None
@@ -164,8 +164,8 @@ def require_role(
                         required_role=role.value,
                         scope="instance" if tenant_param is None else "tenant",
                         tenant_id=tenant_id,
-                        source_ip=_source_ip(request),
-                        request_id=_request_id(request),
+                        source_ip=client_ip(request),
+                        request_id=safe_request_id(request),
                     )
                 )
 
@@ -210,7 +210,9 @@ __all__ = [
     "RbacConfig",
     "RbacRuntime",
     "TenantAccess",
+    "client_ip",
     "get_principal",
     "get_runtime",
     "require_role",
+    "safe_request_id",
 ]
