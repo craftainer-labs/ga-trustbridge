@@ -122,8 +122,8 @@ async def _seed(db: rls.Db) -> None:
     ("path", "key", "expected_a"),
     [
         ("repositories", "repository_id", [1, 2, 3]),
-        ("resources", "resource_key", ["k1", "k2", "seed"]),
-        ("credentials", "scope_key", ["k1", "k2", "seed"]),
+        ("resources", "resource_key", ["seed", "k1", "k2"]),
+        ("credentials", "scope_key", ["seed", "k1", "k2"]),
     ],
 )
 async def test_tenant_lists_are_scoped_ordered_and_keyset_paged(
@@ -148,11 +148,12 @@ async def test_credentials_and_resources_return_json_objects(db: rls.Db) -> None
     """The JSONB columns arrive as objects whatever the driver's codec does."""
     await _seed(db)
     async with _client(db, f"trustbridge:{HOST}:a:viewer") as mine:
-        resource = (await mine.get(f"/admin/v1/tenants/{db.a}/resources")).json()["items"][0]
-        assert resource["state"] == {"name": "n"}
-        credential = (await mine.get(f"/admin/v1/tenants/{db.a}/credentials")).json()["items"][0]
-        assert credential["scope"] == {"permission": "pull"}
-        assert credential["outputs"] == []
+        listed = (await mine.get(f"/admin/v1/tenants/{db.a}/resources")).json()["items"]
+        assert next(r for r in listed if r["adapter"] == "ghcr")["state"] == {"name": "n"}
+        creds = (await mine.get(f"/admin/v1/tenants/{db.a}/credentials")).json()["items"]
+        ghcr = next(c for c in creds if c["adapter"] == "ghcr")
+        assert ghcr["scope"] == {"permission": "pull"}
+        assert ghcr["outputs"] == []
 
 
 async def test_operations_are_newest_first_and_page_without_repeats(db: rls.Db) -> None:
