@@ -22,8 +22,9 @@ so the next pass writes it. A denial counted after a summary was written (a requ
 straddled the window end) makes the window pending again and gets its own, smaller, summary.
 Keys are kept `max(2 * window, 1 day)`.
 
-Failure isolation: the current denial is always recorded first; old summaries follow, each in its
-own try/except, so an old summary can never fail a request. A counter-store failure or timeout
+Failure isolation: the current denial is always recorded first; up to `MAX_INLINE_SUMMARIES` old
+summaries follow, each in its own try/except, so an old summary can never fail a request; the rest
+wait for `flush()`. A counter-store failure or timeout
 while counting or noting fails open to *recording the row*, so the audit trail stays complete and
 the request path stays bounded by `timeout_ms`.
 """
@@ -42,6 +43,8 @@ from trustbridge.ratelimit import CounterLike, WindowCounter
 logger = logging.getLogger(__name__)
 KEY_PREFIX = "tb:audit:denied"
 PENDING_KEY = f"{KEY_PREFIX}:pending"
+MAX_INLINE_SUMMARIES = 3
+"""Most old-window summaries one denial writes inline; the rest stay pending for `flush()`."""
 MIN_RETENTION_SECONDS = 24 * 3600
 """How long counts, samples and the pending set are kept (at least two windows)."""
 
@@ -96,6 +99,9 @@ class ThrottledDenials:
         """Record the denial, or count it when this (subject, reason) is over its burst.
 
         The current denial comes first; summaries of earlier windows follow and cannot fail it.
+        At most `MAX_INLINE_SUMMARIES` of them are written here, each bounded by the counter
+        timeout (the sink write is the sink's own); any further ones stay pending for `flush()`,
+        so a long gap cannot stall the denied response.
         """
         window = self._current()
         base = self._base(denial)
@@ -117,7 +123,7 @@ class ThrottledDenials:
                 self._suppressed.add(1)
         else:
             await self._sink.denied(denial)
-        for closed in old:
+        for closed in old[:MAX_INLINE_SUMMARIES]:
             await self._summarise(base, closed)
 
     async def _note(self, base: str, window: int, denial: Denial) -> None:

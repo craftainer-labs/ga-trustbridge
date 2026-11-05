@@ -529,3 +529,21 @@ async def test_a_base_whose_index_cannot_be_read_is_skipped_and_retried() -> Non
     assert await throttle.flush() == 0
     valkey.smembers = real  # type: ignore[method-assign]
     assert await throttle.flush() == 1
+
+
+async def test_a_denial_writes_at_most_three_old_summaries_and_flush_does_the_rest() -> None:
+    """Five pending windows: three inline writes (oldest first), two left for the flush."""
+    counter = InMemoryWindowCounter()
+    sink, clock = _FlakySink(1000), Clock()
+    throttle = _throttle(sink, counter, clock)
+    for n in range(5):  # one suppressed denial in each of five windows; summaries keep failing
+        stale = _throttle(sink, counter, Clock(6000.0 + n * WINDOW))
+        for _ in range(BURST + 1):
+            await stale.denied(_denial())
+    sink.failures = 0
+    sink.rows.clear()
+    clock.now += 10 * WINDOW
+    await throttle.denied(_denial(resource="fresh"))
+    assert [r.window for r in sink.rows if r.suppressed] == [100, 101, 102]
+    assert await throttle.flush() == 2
+    assert [r.window for r in sink.rows if r.suppressed] == [100, 101, 102, 103, 104]

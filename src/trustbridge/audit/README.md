@@ -98,7 +98,7 @@ both reading that index:
   it at startup, every window, and at graceful shutdown (bounded to a few seconds), so a restarted
   or second replica finishes the other's work, and a flush the shutdown cut short is continued by
   the next start. The still-open window is never summarised early. Hash entries are not removed
-  eagerly; they expire.
+  eagerly; they expire, and what a flush over the pending-base set costs is measured in NG6g.
 
 There is no claim before the write. A replica reads the window, writes the row, and only then marks
 the window done (it stores the count it summarised) and removes it from the index. So a crash, a
