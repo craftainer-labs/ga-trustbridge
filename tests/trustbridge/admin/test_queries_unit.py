@@ -90,7 +90,7 @@ async def test_resources_decode_text_json_and_resume_by_adapter_and_key() -> Non
     second = {**row, "resource_key": "k2", "state": {"name": "m"}}
     session = Session([row, second])
     items, cursor = await queries.resources(session, T, limit=1, cursor=None)  # type: ignore[arg-type]
-    assert items[0].state == {"name": "n"}
+    assert items[0].state == {"name": "n", "ref": {}}
     assert session.params["adapter"] == session.params["key"] == ""
     assert cursor is not None
     assert decode_cursor(cursor) == ("ghcr", "k1")
@@ -144,7 +144,14 @@ async def test_credential_reads_drop_unknown_keys_and_scrub_values() -> None:
     slot = {
         "generation": 2,
         "name": "tb-cred",
-        "ref": {"id": "42", **PLANTED, "note": f"token={SECRET}"},
+        "ref": {
+            "id": "42",
+            **PLANTED,
+            "note": f"token={SECRET}",
+            "not an identifier": "x",
+            "n": 5,
+            "k" * 40: "x",
+        },
         "delivered": True,
         "retire_after": None,
         **PLANTED,
@@ -160,6 +167,9 @@ async def test_credential_reads_drop_unknown_keys_and_scrub_values() -> None:
         "updated_at": NOW,
     }
     items, _ = await queries.credentials(Session([row]), T, limit=5, cursor=None)  # type: ignore[arg-type]
+    odd_session = Session([{**row, "outputs": {"kind": "secret", **PLANTED}}])
+    odd, _ = await queries.credentials(odd_session, T, limit=5, cursor=None)  # type: ignore[arg-type]
+    assert odd[0].outputs == []
     shown = _everything_shown(items[0])
     assert SECRET not in shown
     assert "hunter2" not in shown

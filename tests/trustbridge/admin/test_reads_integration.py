@@ -149,10 +149,16 @@ async def test_credentials_and_resources_return_json_objects(db: rls.Db) -> None
     await _seed(db)
     async with _client(db, f"trustbridge:{HOST}:a:viewer") as mine:
         listed = (await mine.get(f"/admin/v1/tenants/{db.a}/resources")).json()["items"]
-        assert next(r for r in listed if r["adapter"] == "ghcr")["state"] == {"name": "n"}
+        resource = next(r for r in listed if r["adapter"] == "ghcr")
+        assert resource["state"] == {"name": "n", "ref": {}}
         creds = (await mine.get(f"/admin/v1/tenants/{db.a}/credentials")).json()["items"]
         ghcr = next(c for c in creds if c["adapter"] == "ghcr")
-        assert ghcr["scope"] == {"permission": "pull"}
+        assert ghcr["scope"] == {
+            "repository_id": None,
+            "repository_owner_id": None,
+            "environment": None,
+            "permission": "pull",
+        }
         assert ghcr["outputs"] == []
 
 
