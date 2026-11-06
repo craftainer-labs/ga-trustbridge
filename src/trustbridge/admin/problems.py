@@ -3,8 +3,10 @@
 ADR 0004 gives every error an `application/problem+json` body; the template's handlers write
 `type: about:blank`. For paths under `/admin/v1` this module wraps them so `type` is the stable
 URI `tag:trustbridge,2026:problem/<class>` (one class per kind of error, listed in
-`admin/README.md`), and counts every 401, 403 and 404 against the source address's
-`anonymous` bucket (ADR 0033 decision 5): over the limit the answer becomes a 429.
+`admin/README.md`), and counts rejected requests (ADR 0033 decision 5): a 401 (no or invalid
+credentials) and a 404 for an unknown route count against the source address's `anonymous`
+bucket; a 403 or 404 for an authenticated principal counts against that principal's `read`
+bucket (the guard recorded its key). Over the limit the answer becomes a 429.
 """
 
 import json
@@ -70,12 +72,21 @@ def _retyped(response: JSONResponse, kind: str) -> ProblemDetailResponse:
 
 
 async def _rate_limited(request: Request) -> ProblemDetailResponse | None:
-    """A 429 when this address is over the `anonymous` bucket, else None."""
+    """A 429 when the rejected request pushes its bucket over, else None.
+
+    An authenticated principal's 403 or 404 counts against its own `read` bucket, so callers
+    behind one address (a NAT, the BFF) do not use up each other's budget; everything else
+    (401, a route that does not exist) counts against the source address.
+    """
     runtime = get_admin_runtime(request.app)
     if runtime is None:
         return None
-    host = request.client.host if request.client else None
-    decision = await runtime.limits.anonymous.check(host)
+    key = getattr(request.state, "admin_principal_key", None)
+    if key is not None:  # set by the guard, which runs after authentication
+        decision = await runtime.limits.read.check_key(key)
+    else:
+        host = request.client.host if request.client else None
+        decision = await runtime.limits.anonymous.check(host)
     if decision.allowed:
         return None
     return ProblemDetailResponse(

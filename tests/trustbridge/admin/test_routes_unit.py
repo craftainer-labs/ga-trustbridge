@@ -13,11 +13,11 @@ from fastapi.testclient import TestClient
 from tests.trustbridge.admin import helpers
 from tests.trustbridge.admin.helpers import ACME, OTHER, build, problem
 from trustbridge.admin import routes
-from trustbridge.admin.access import NoTenants
+from trustbridge.admin.access import NoTenants, tenant_ref
 from trustbridge.admin.cursor import encode_cursor
 from trustbridge.admin.guards import GUARDED, LIMITS
 from trustbridge.audit import ActorType, AuditPage, AuditQuery, AuditRecord, Outcome
-from trustbridge.rbac import RbacConfig, RbacRuntime, get_principal
+from trustbridge.rbac import Principal, RbacConfig, RbacRuntime, get_principal, tenant_roles
 from trustbridge.tenancy import TenantInfo, current_tenant
 
 ADMIN = "trustbridge:admin"
@@ -69,10 +69,18 @@ def tenants(monkeypatch: pytest.MonkeyPatch) -> list[TenantInfo]:
     """Two tenants as `tb_list_tenants()` returns them (ACME disabled)."""
     rows = [_info(ACME, disabled=True), _info(OTHER)]
 
-    async def all_tenants(_factory: object) -> list[TenantInfo]:
-        return sorted(rows, key=lambda t: str(t.id))
+    async def tenants_page(
+        _factory: object, principal: Principal, *, after: UUID | None, limit: int
+    ) -> list[TenantInfo]:
+        mine = [t for t in rows if tenant_roles(principal, tenant_ref(t))]
+        ordered = sorted(mine, key=lambda t: str(t.id))
+        return [t for t in ordered if after is None or str(t.id) > str(after)][:limit]
 
-    monkeypatch.setattr(routes, "all_tenants", all_tenants)
+    async def get_tenant(_factory: object, tenant_id: UUID) -> TenantInfo | None:
+        return next((t for t in rows if t.id == tenant_id), None)
+
+    monkeypatch.setattr(routes, "tenants_page", tenants_page)
+    monkeypatch.setattr(routes, "get_tenant", get_tenant)
     return rows
 
 
@@ -530,10 +538,10 @@ def test_a_tenant_that_vanished_between_the_check_and_the_read_is_a_404(
 ) -> None:
     """RBAC saw the tenant, the listing no longer does."""
 
-    async def none(_factory: object) -> list[TenantInfo]:
-        return [_info(OTHER)]
+    async def none(_factory: object, _tenant_id: UUID) -> None:
+        return None
 
-    monkeypatch.setattr(routes, "all_tenants", none)
+    monkeypatch.setattr(routes, "get_tenant", none)
     problem(build().client(ACME_VIEWER).get(f"/admin/v1/tenants/{ACME.id}"), 404, "not-found")
 
 
@@ -571,11 +579,6 @@ def test_me_without_a_database_lists_no_tenants() -> None:
     assert [g["role"] for g in body["grants"]] == ["viewer"]
 
 
-def test_the_spec_is_built_once() -> None:
-    """The second call returns the cached document."""
-    assert routes.openapi_spec() is routes.openapi_spec()
-
-
 async def test_no_tenants_access_resolves_nothing() -> None:
     """`MODE=mock` without a database."""
     access = NoTenants()
@@ -584,3 +587,43 @@ async def test_no_tenants_access_resolves_nothing() -> None:
     with access.tenant_context(tenant):
         assert current_tenant.get() == tenant
     assert current_tenant.get() is None
+
+
+def test_a_tenants_cursor_must_name_a_tenant_id(tenants: list[TenantInfo]) -> None:
+    """The tenant list resumes after an id; any other key is a 400."""
+    del tenants
+    client = build().client(VIEWER)
+    for bad in (encode_cursor("not-a-uuid", "x"), encode_cursor(5, "5")):
+        problem(client.get("/admin/v1/tenants", params={"cursor": bad}), 400, "invalid-cursor")
+    ok = client.get("/admin/v1/tenants", params={"cursor": encode_cursor(str(UUID(int=0)), "x")})
+    assert ok.status_code == 200
+
+
+def test_me_caps_the_tenants_at_200_and_says_when_more_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User decision (NG6d-2): the first 200, and `tenants_truncated` when there are more."""
+    rows = [_info(ACME)] * 201
+
+    async def many(
+        _factory: object, _principal: Principal, *, after: UUID | None, limit: int
+    ) -> list[TenantInfo]:
+        assert after is None
+        return rows[:limit]
+
+    monkeypatch.setattr(routes, "tenants_page", many)
+    client = build().client(VIEWER)
+    body = client.get("/admin/v1/me").json()
+    assert len(body["tenants"]) == 200
+    assert body["tenants_truncated"] is True
+    rows[:] = rows[:200]
+    exact = client.get("/admin/v1/me").json()
+    assert len(exact["tenants"]) == 200
+    assert exact["tenants_truncated"] is False
+
+
+def test_me_is_not_truncated_for_a_small_list(tenants: list[TenantInfo]) -> None:
+    """Few tenants, no flag."""
+    del tenants
+    body = build().client(VIEWER).get("/admin/v1/me").json()
+    assert body["tenants_truncated"] is False

@@ -37,11 +37,16 @@ def principal_key(iss: str | None, sub: str) -> str:
 
 def _limit(bucket: Bucket) -> Callable[..., object]:
     async def dependency(
+        request: Request,
         principal: Annotated[Principal, Depends(get_principal)],
         runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
     ) -> None:
         limiter = getattr(runtime.limits, bucket)
-        decision = await limiter.check_key(principal_key(principal.iss, principal.sub))
+        key = principal_key(principal.iss, principal.sub)
+        # From here on the caller is authenticated: a later 403 or 404 counts against this
+        # principal's read bucket instead of the source address's (`problems.py`).
+        request.state.admin_principal_key = key
+        decision = await limiter.check_key(key)
         if not decision.allowed:
             raise AdminProblem(
                 429,

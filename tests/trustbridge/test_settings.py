@@ -280,3 +280,19 @@ def test_settings_load_from_the_environment_and_are_cached(
         assert get_trustbridge_settings() is get_trustbridge_settings()
     finally:
         get_trustbridge_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("ghcr,jfrog", ["ghcr", "jfrog"]),
+        (' ["ghcr"] ', ["ghcr"]),
+        ("", []),
+        ("ghcr, ,argocd", ["ghcr", "argocd"]),
+    ],
+)
+def test_adapters_enabled_is_a_comma_separated_or_json_list(raw: str, expected: list[str]) -> None:
+    """`ADAPTERS_ENABLED` (ADR 0029) takes either form; unset means none."""
+    assert make_settings(adapters_enabled=raw).adapters_enabled == expected
+    assert make_settings().adapters_enabled == []
+    assert make_settings(adapters_enabled=expected).adapters_enabled == expected

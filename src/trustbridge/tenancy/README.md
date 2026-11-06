@@ -13,7 +13,7 @@ yet (release N+1), so the app role behaves as before.
   leaks to the next user of a pooled connection, PgBouncer transaction mode included. It is the
   only writer of the setting. `worker.runtime.build_core` and `main.install` install it.
 - `session.py`: `tenant_session(factory, tenant_id)` (a session opened inside the context),
-  `list_tenants` (reads `tb_list_tenants()` with no context), `iterate_tenants` (each tenant id
+  `list_tenants` (reads `tb_list_tenants()` with no context), `get_tenant` (one tenant by id through `tb_get_tenant()`, also with no context), `iterate_tenants` (each tenant id
   yielded inside its own context) and `for_each_tenant` (runs a coroutine per tenant, logs and
   counts a failure as `trustbridge.tenants.sweep_failures` and carries on).
 - `role_check.py`: the runtime role safety check. `evaluate(RoleFacts)` is the pure decision: not
@@ -45,7 +45,7 @@ yet (release N+1), so the app role behaves as before.
 and `tb_list_tenants` (fixed `search_path = pg_catalog, public`, `EXECUTE` revoked from `PUBLIC` and
 granted to `trustbridge_app` and `trustbridge_owner`), and the inert `tenant_isolation` and
 `owner_all` policies. `tb_delete_tenant` arrives with tenant data deletion (NG6h), and
-`tb_list_tenants` gets its real `admin_disabled_at` and `deleting` values from NG6e and NG6h.
+`tb_get_tenant(uuid)` (migration `a1c4e8d27b53`, NG6d-2) is its single-row twin with the same columns. `tb_list_tenants` and `tb_get_tenant` get their real `admin_disabled_at` and `deleting` values from NG6e and NG6h.
 
 ## Grants
 

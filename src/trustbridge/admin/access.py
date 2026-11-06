@@ -6,16 +6,24 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from trustbridge.rbac import TenantRef
-from trustbridge.tenancy import TenantInfo, list_tenants, tenant_context
+from trustbridge.rbac import Principal, TenantRef
+from trustbridge.tenancy import TenantInfo, tenant_context
 
-_ONE = text("SELECT id, host, org FROM tb_list_tenants() WHERE id = :id")
+_ONE = text("SELECT id, host, org FROM tb_get_tenant(:id)")
+_PAGE = text(
+    "SELECT id, host, installation_id, org, org_id, state, admin_disabled_at, deleting "
+    "FROM tb_list_tenants() "
+    "WHERE (CAST(:after AS uuid) IS NULL OR id > CAST(:after AS uuid)) "
+    "AND (CAST(:every AS boolean) OR (lower(host), lower(org)) IN "
+    "(SELECT * FROM unnest(CAST(:hosts AS text[]), CAST(:orgs AS text[])))) "
+    "ORDER BY id LIMIT :limit"
+)
 
 
 class SqlTenantAccess:
     """What `require_role` needs: the tenant row by id and the tenant context.
 
-    `get_tenant` reads through `tb_list_tenants()` in its own short transaction with no context
+    `get_tenant` reads through `tb_get_tenant()` in its own short transaction with no context
     and closes it before returning (ADR 0031: the `after_begin` hook only fires when a
     transaction begins, so the check must not leave one open for the handler).
     """
@@ -53,6 +61,38 @@ def tenant_ref(info: TenantInfo) -> TenantRef:
     return TenantRef(info.id, info.host, info.org or None)
 
 
-async def all_tenants(factory: async_sessionmaker[AsyncSession]) -> list[TenantInfo]:
-    """Every tenant, ordered by id."""
-    return sorted(await list_tenants(factory), key=lambda t: str(t.id))
+async def tenants_page(
+    factory: async_sessionmaker[AsyncSession],
+    principal: Principal,
+    *,
+    after: UUID | None,
+    limit: int,
+) -> list[TenantInfo]:
+    """Up to `limit` tenants the principal holds some grant on, ordered by id, after `after`.
+
+    Every role confers `viewer`, so any grant reaches a tenant: an instance grant reaches all,
+    an organisation grant the tenants with that (case-insensitive) host and org. The filter and
+    the keyset run in the database, so the cost is the page, not the tenant table. A principal
+    with no grants gets none without a query.
+    """
+    if not principal.grants:
+        return []
+    every = any(grant.instance for grant in principal.grants)
+    pairs = sorted(
+        {(g.host, g.org) for g in principal.grants if g.host is not None and g.org is not None}
+    )
+    with tenant_context(None):
+        async with factory() as session, session.begin():
+            rows = (
+                await session.execute(
+                    _PAGE,
+                    {
+                        "after": after,
+                        "every": every,
+                        "hosts": [host for host, _ in pairs],
+                        "orgs": [org for _, org in pairs],
+                        "limit": limit,
+                    },
+                )
+            ).all()
+    return [TenantInfo(*row) for row in rows]

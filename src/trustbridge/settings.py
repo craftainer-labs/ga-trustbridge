@@ -87,6 +87,19 @@ def _split_proxies(value: Any) -> Any:  # noqa: ANN401 -- pydantic hook
 TrustedProxies = Annotated[list[str] | None, NoDecode, BeforeValidator(_split_proxies)]
 
 
+def _split_names(value: Any) -> Any:  # noqa: ANN401 -- pydantic hook
+    """Accept `ADAPTERS_ENABLED` as a JSON list or a comma-separated string of adapter names."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("["):
+            return json.loads(text)
+        return [item.strip() for item in text.split(",") if item.strip()]
+    return value
+
+
+AdapterNames = Annotated[list[str], NoDecode, BeforeValidator(_split_names)]
+
+
 class TrustbridgeSettings(Settings):
     """The template's settings plus hosts, signers, queue, retention, limiter and tuning.
 
@@ -150,6 +163,10 @@ class TrustbridgeSettings(Settings):
     audit_retention_days: int = Field(default=365, ge=0)
     audit_retention_min_days: int = Field(default=90, ge=1)
     audit_export_lag_seconds: float = Field(default=30.0, gt=0)
+
+    # Adapters the api process loads for the admin API's capability summaries (ADR 0029: an
+    # adapter not listed is never imported). Entry-point names, for example `ghcr,jfrog`.
+    adapters_enabled: AdapterNames = Field(default_factory=list)
 
     # Leases and adapter calls.
     lease_ttl_seconds: float = Field(default=120.0, gt=0)

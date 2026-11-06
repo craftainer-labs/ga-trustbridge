@@ -22,6 +22,10 @@ _LIST_TENANTS = text(
     "SELECT id, host, installation_id, org, org_id, state, admin_disabled_at, deleting "
     "FROM tb_list_tenants()"
 )
+_GET_TENANT = text(
+    "SELECT id, host, installation_id, org, org_id, state, admin_disabled_at, deleting "
+    "FROM tb_get_tenant(:id)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +66,19 @@ async def list_tenants(session_factory: async_sessionmaker[AsyncSession]) -> lis
         async with session_factory() as session, session.begin():
             rows = (await session.execute(_LIST_TENANTS)).all()
     return [TenantInfo(*row) for row in rows]
+
+
+async def get_tenant(
+    session_factory: async_sessionmaker[AsyncSession], tenant_id: UUID
+) -> TenantInfo | None:
+    """One tenant by id through `tb_get_tenant()` (a primary-key lookup), or None.
+
+    Like `list_tenants`: one short transaction with no context, closed before returning.
+    """
+    with tenant_context(None):
+        async with session_factory() as session, session.begin():
+            row = (await session.execute(_GET_TENANT, {"id": tenant_id})).first()
+    return None if row is None else TenantInfo(*row)
 
 
 async def iterate_tenants(

@@ -12,6 +12,10 @@ is a separate package under `adapters/<name>/` (NG5) that registers itself in th
   core sets it, and an adapter returns an `OidcTrust` exactly when it is true.
 - `loader.py` — entry-point discovery (`ADAPTERS_ENABLED` only), the `api_version` range
   (`MIN_SUPPORTED_API_VERSION..API_VERSION`) and capability validation (A7).
+- Admin API (ADR 0033): the api process loads only the adapters named by `ADAPTERS_ENABLED` through
+  `loader.load_adapter_classes` (`trustbridge.main`) and `GET /tenants/{t}/adapters` reports their
+  capabilities (read from the class, `capabilities()` is a constant) and whether a tenant has
+  connection data (a listing of the secret store, never a value). No adapter behaviour changes.
 - `core.py` — `CredentialCore`: write-ahead `credential_operations`, parked values, lease use,
   two-phase rotation with `retire_after`, OIDC eligibility and the trust/secret switching rule,
   host-kind and privileged-credential checks, the credential limit, call timeouts, orphan and
