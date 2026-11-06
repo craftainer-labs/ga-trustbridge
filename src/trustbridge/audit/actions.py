@@ -29,6 +29,11 @@ class Action(StrEnum):
     CREDENTIAL_ROTATE = "credential.rotate"
     DELIVERY_REQUEUE = "delivery.requeue"
     HOST_REGISTRATION_START = "host.registration.start"
+    # Named for the NG6e routes (ADR 0033); user decision, 2026-11-06.
+    TENANT_ENABLE = "tenant.enable"
+    TENANT_RECONCILE = "tenant.reconcile"
+    HOST_REGISTRATION_MANUAL = "host.registration.manual"
+    HOST_REGISTRATION_COMPLETE = "host.registration.complete"
 
 
 class SystemActor(StrEnum):

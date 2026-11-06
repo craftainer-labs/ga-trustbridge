@@ -6,7 +6,9 @@ definer functions work for the app role, and `/tenants` filters and pages in the
 CI's stack; reuses the tenancy suite's scratch database (tenants `a` and `b` on host `tb.test`).
 """
 
+import importlib.util
 import json
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -14,7 +16,11 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import DBAPIError
 
 from tests.trustbridge.admin.helpers import build, token
 from tests.trustbridge.tenancy import test_rls_integration as rls
@@ -22,7 +28,7 @@ from trustbridge.admin.access import SqlTenantAccess, tenants_page
 from trustbridge.audit import Action, ActorType, AuditEvent, AuditWriter, Outcome
 from trustbridge.audit.store import get_event
 from trustbridge.rbac import Grant, Principal, Role
-from trustbridge.tenancy import get_tenant, install_tenant_hook
+from trustbridge.tenancy import get_tenant, install_tenant_hook, list_tenants, tenant_context
 
 pytestmark = pytest.mark.integration
 
@@ -267,9 +273,9 @@ async def test_the_new_functions_are_definer_functions_granted_to_the_two_roles(
     rows = await _admin(
         db,
         "SELECT proname, prosecdef, proconfig FROM pg_proc "
-        "WHERE proname IN ('tb_audit_get', 'tb_get_tenant')",
+        "WHERE proname IN ('tb_audit_get', 'tb_get_tenant', 'tb_set_tenant_disabled')",
     )
-    assert {r.proname for r in rows} == {"tb_audit_get", "tb_get_tenant"}
+    assert {r.proname for r in rows} == {"tb_audit_get", "tb_get_tenant", "tb_set_tenant_disabled"}
     for row in rows:
         assert row.prosecdef is True
         assert "search_path=pg_catalog, public" in row.proconfig
@@ -279,7 +285,11 @@ async def test_the_new_functions_are_definer_functions_granted_to_the_two_roles(
         "(SELECT 1 FROM unnest(proacl) AS a WHERE a::text LIKE '=%') "
         "FROM pg_proc WHERE oid = CAST(:fn AS regprocedure)"
     )
-    for function in ("tb_audit_get(uuid)", "tb_get_tenant(uuid)"):
+    for function in (
+        "tb_audit_get(uuid)",
+        "tb_get_tenant(uuid)",
+        "tb_set_tenant_disabled(uuid, text, text, boolean)",
+    ):
         for role in (rls.APP_ROLE, rls.OWNER_ROLE):
             assert (await _admin(db, probe, role=role, fn=function))[0][0] is True, (function, role)
         assert (await _admin(db, public, fn=function))[0][0] is True, function
@@ -322,3 +332,145 @@ async def test_tenants_are_filtered_and_paged_in_the_database(db: rls.Db) -> Non
         assert body["admin_disabled_by"] is None
         assert body["admin_disable_reason"] is None
         assert (await everything.get(f"/admin/v1/tenants/{UUID(int=5)}")).status_code == 404
+
+
+# ---- the admin-disable columns and tb_set_tenant_disabled (NG6e-1) ---------------------------
+
+_SET = text("SELECT * FROM tb_set_tenant_disabled(:id, :by, :reason, :disable)")
+
+
+async def _set(
+    db: rls.Db, tenant: UUID, *, disable: bool, by: str = "u-1", reason: str = "hold"
+) -> Any:  # noqa: ANN401 -- a result row
+    with tenant_context(None):
+        async with db.app() as session, session.begin():
+            result = await session.execute(
+                _SET, {"id": tenant, "by": by, "reason": reason, "disable": disable}
+            )
+            return result.one()
+
+
+async def test_disable_is_atomic_keeps_the_first_actor_and_enable_clears_all_three(
+    db: rls.Db,
+) -> None:
+    """Before and after come back for the audit event; a repeat disable changes nothing."""
+    try:
+        first = await _set(db, db.a, disable=True, by="u-1", reason="billing hold")
+        assert first.tenant_found is True
+        assert first.before_disabled_at is None
+        assert (first.after_disabled_by, first.after_disable_reason) == ("u-1", "billing hold")
+        again = await _set(db, db.a, disable=True, by="u-2", reason="other")
+        assert again.before_disabled_by == "u-1"
+        assert (again.after_disabled_at, again.after_disabled_by, again.after_disable_reason) == (
+            first.after_disabled_at,
+            "u-1",
+            "billing hold",
+        )
+        info = await get_tenant(db.app, db.a)
+        assert info is not None
+        assert (info.admin_disabled_at, info.admin_disabled_by, info.admin_disable_reason) == (
+            first.after_disabled_at,
+            "u-1",
+            "billing hold",
+        )
+        listed = {t.id: t for t in await list_tenants(db.app)}
+        assert listed[db.a].admin_disabled_by == "u-1"
+        assert listed[db.b].admin_disabled_at is None
+        # the installation sync's upsert never touches the columns (ADR 0031 invariant 7)
+        with tenant_context(None):
+            async with db.app() as session, session.begin():
+                await session.execute(
+                    text("SELECT tb_upsert_tenant('tb.test', 1, 'a', 1, 'suspended')")
+                )
+        info = await get_tenant(db.app, db.a)
+        assert info is not None
+        assert info.admin_disabled_by == "u-1"
+        assert info.state == "suspended"
+    finally:
+        cleared = await _set(db, db.a, disable=False)
+        await _admin(db, "UPDATE tenants SET state = 'active' WHERE id = :t", t=db.a)
+    assert cleared.before_disabled_by == "u-1"
+    assert (cleared.after_disabled_at, cleared.after_disabled_by) == (None, None)
+    info = await get_tenant(db.app, db.a)
+    assert info is not None
+    assert (info.admin_disabled_at, info.admin_disabled_by, info.admin_disable_reason) == (
+        None,
+        None,
+        None,
+    )
+
+
+async def test_an_unknown_tenant_is_not_found_and_a_bad_request_is_refused(db: rls.Db) -> None:
+    """No row: `tenant_found` is false. An empty or oversized reason or actor is refused."""
+    missing = await _set(db, uuid4(), disable=True)
+    assert missing.tenant_found is False
+    for kwargs in ({"reason": ""}, {"reason": "x" * 501}, {"by": ""}, {"by": "y" * 256}):
+        with pytest.raises(DBAPIError, match="invalid disable request"):
+            await _set(db, db.b, disable=True, **kwargs)
+    info = await get_tenant(db.app, db.b)
+    assert info is not None
+    assert info.admin_disabled_at is None
+
+
+async def test_the_columns_are_all_set_or_all_null(db: rls.Db) -> None:
+    """The CHECK refuses a partial write, even from the table owner."""
+    with pytest.raises(DBAPIError, match="ck_tenants_admin_disabled"):
+        await _admin(db, "UPDATE tenants SET admin_disabled_at = now() WHERE id = :t", t=db.b)
+
+
+def _body(source: str, pattern: str) -> str:
+    match = re.search(pattern + r".*?AS \$\$(.*?)\$\$", source, re.DOTALL)
+    assert match is not None
+    return match.group(1)
+
+
+def _revision(prefix: str) -> str:
+    return next((rls.ROOT / "alembic" / "versions").glob(f"{prefix}_*.py")).read_text()
+
+
+def _run_ng6e_migration(sync_conn: Connection, direction: str) -> None:
+    path = next((rls.ROOT / "alembic" / "versions").glob("b7d3f5a19c68_*.py"))
+    spec = importlib.util.spec_from_file_location("ng6e_admin_disable_revision", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with Operations.context(MigrationContext.configure(sync_conn)):
+        getattr(module, direction)()
+
+
+async def test_the_downgrade_restores_the_old_function_bodies_exactly(db: rls.Db) -> None:
+    """N-1: the previous release's `tb_list_tenants` and `tb_get_tenant`, byte for byte.
+
+    Runs in a transaction that is rolled back, so the module's database is left as it was.
+    """
+    probe = text(
+        "SELECT proname, prosrc, pg_get_function_result(oid) AS result FROM pg_proc "
+        "WHERE proname IN ('tb_list_tenants', 'tb_get_tenant', 'tb_set_tenant_disabled')"
+    )
+    old_list = _body(_revision("d4b8f1e60a27"), r"CREATE OR REPLACE FUNCTION tb_list_tenants\(\)")
+    old_get = _body(_revision("a1c4e8d27b53"), r"CREATE OR REPLACE FUNCTION tb_get_tenant")
+    async with db.admin.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(_run_ng6e_migration, "downgrade")
+            rows = {r.proname: r for r in (await conn.execute(probe)).all()}
+            assert set(rows) == {"tb_list_tenants", "tb_get_tenant"}
+            assert rows["tb_list_tenants"].prosrc == old_list
+            assert rows["tb_get_tenant"].prosrc == old_get
+            assert "admin_disabled_by" not in rows["tb_list_tenants"].result
+            columns = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM information_schema.columns "
+                        "WHERE table_name = 'tenants' AND column_name LIKE 'admin_disable%'"
+                    )
+                )
+            ).scalar_one()
+            assert columns == 0
+            await conn.run_sync(_run_ng6e_migration, "upgrade")
+            rows = {r.proname: r for r in (await conn.execute(probe)).all()}
+            assert set(rows) == {"tb_list_tenants", "tb_get_tenant", "tb_set_tenant_disabled"}
+            assert "admin_disabled_by" in rows["tb_list_tenants"].result
+        finally:
+            await trans.rollback()

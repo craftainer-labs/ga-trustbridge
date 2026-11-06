@@ -6,12 +6,20 @@ NG6d-1 and NG6d-2). Mounted by `trustbridge.main` under `/admin/v1`; authenticat
 `trustbridge.audit`. Imports `app.oidc` and `app.problem_details`; nothing in `src/app/` is edited.
 
 - `routes.py`: the router and the handlers (read only; every route is a `GET`).
-- `guards.py`: `guard(role, bucket, tenant_param=...)` returns a route's `dependencies`: first
+- `guards.py`: `guard(role, bucket, tenant_param=..., instance_only=...)` returns a route's `dependencies`: first
   `get_principal` (authentication), then the principal's rate-limit bucket (keyed on a hash of
   `(iss, sub)`; it runs before the role check so an over-limit caller costs no tenant lookup),
   then the RBAC dependency. Role guards are recorded in `GUARDED`, limit dependencies in
   `LIMITS`; the router-walk test fails for a route whose dependencies are not those three in that
   order (ADR 0033 invariant 1). `guard_any_grant` is for `/tenants`, which is filtered per grant.
+  `instance_only=True` (with `tenant_param`) is for tenant disable and enable: the role is needed at
+  instance scope (a tenant-scoped `admin` gets 403), a tenant the caller has no grant on is the same
+  404 as an unknown one, and the tenant context is entered after the checks. `BoundedRoute` (the
+  router's `route_class`) bounds every request body: a `Content-Length` over
+  `ADMIN_MAX_BODY_BYTES` (default 16384) is a 413 before any byte is read, a malformed one a 400,
+  and a chunked body is cut off with a 413 as it grows past the limit. A mutating handler is marked
+  with `emits(action)` and uses `guard(..., "mutation")`; `mutations_without_emitter` is the router
+  walk that fails for one that is not (ADR 0032 invariant 8). No mutating route exists yet.
 - `runtime.py`: `AdminRuntime` (`app.state.admin`: limiters, the host view, the session factory,
   the audit writer, the export lag and page size) and `build_limits`.
 - `access.py`: `SqlTenantAccess`, the `TenantAccess` over `tb_get_tenant()`; `NoTenants` for
@@ -65,9 +73,8 @@ worker's: an api without it answers with an empty list, not "unknown".
 **Tenants.** `/tenants` filters by grant and pages in the database. `/me` lists the first 200 tenants
 the grants reach (by id) and sets `tenants_truncated` to true when more exist; use `/tenants` to
 page through all of them. `TenantOut` has `admin_disabled_by`
-and `admin_disable_reason`, both `null` until NG6e adds the columns and the disable action
-(`tb_list_tenants()` and `tb_get_tenant()` return constants for the admin-disable columns until
-then).
+and `admin_disable_reason`, set with `admin_disabled_at` by the disable action (NG6e-2) and `null`
+otherwise; `tb_list_tenants()` and `tb_get_tenant()` return the stored values.
 
 **The OpenAPI snapshot** `docs/openapi/admin-v1.json` is what `/openapi.json` serves. After any
 route or schema change regenerate it with `python -m trustbridge.admin.spec >
@@ -108,6 +115,7 @@ Every error under `/admin/v1` is `application/problem+json` (ADR 0004) with `typ
 | `forbidden` | 403 | a valid token whose roles are not enough |
 | `not-found` | 404 | unknown route, host, tenant, delivery or audit event; also a tenant the caller has no grant on |
 | `conflict` | 409 | reserved (NG6e) |
+| `payload-too-large` | 413 | a request body over `ADMIN_MAX_BODY_BYTES` |
 | `validation` | 422 | a query parameter the schema rejects |
 | `rate-limited` | 429 | over a bucket; `Retry-After` is the whole seconds left in the window |
 | `internal` | 500 | an unhandled error (the detail is redacted outside `MODE=dev`) |
@@ -118,8 +126,8 @@ The classes are open: v1 may add one. Errors off `/admin/v1` keep the template's
 ## Rate limits (decision 5)
 
 Fixed windows in Valkey through `trustbridge.ratelimit` (key prefix `tb:rl:admin:`), fail open with
-a metric. Per principal (`iss` and `sub`, hashed): reads 600/min, exports 6/min (mutations 60/min, for
-NG6e). Per source address: 30/min for unauthenticated requests (a 401, or a route that does not exist;
+a metric. Per principal (`iss` and `sub`, hashed): reads 600/min, exports 6/min, mutations 60/min
+(`guard(..., "mutation")`). Per source address: 30/min for unauthenticated requests (a 401, or a route that does not exist;
 over the limit the rejection becomes a 429). A 403 or 404 for an authenticated principal counts
 against that principal's read bucket instead, so callers behind one address (a NAT, the BFF) do
 not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_REQUESTS`,
@@ -130,7 +138,8 @@ not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_
 
 - `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
   (ADR 0034); NG6h.
-- Every `POST` (NG6e), which also fills `admin_disabled_by` and `admin_disable_reason`.
+- Every `POST` (NG6e-2 to NG6e-5), except the tenant-deletion ones (NG6h). The columns, the
+  instance-only tenant guard and the body bound they need exist (NG6e-1).
 - The `transaction_timeout` / `AUDIT_EXPORT_LAG_SECONDS` startup check: NG6h.
 - ADR 0033 stays Proposed until the mutating routes (NG6e) and the deletion reads (NG6h) exist.
 

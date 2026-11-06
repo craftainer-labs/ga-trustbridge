@@ -11,7 +11,11 @@ and tenant deletion (NG6h). SIEM push is a follow-up.
   (what is read; `to_json` and `to_ndjson_line` are the export shape), `AuditQuery` (filters and
   the `seq` cursor), `AuditPage`.
 - `actions.py`: `Action`, the closed set of actions, and `SystemActor`, the fixed system names.
-- `redact.py`: `project` (allow-list per shape), `scrub_text`, `truncate`.
+- `redact.py`: `project` (allow-list per shape), `scrub_text`, `truncate`, and the shared policy
+  helpers `printable` and `has_secret_word` (`SECRET_WORDS`), also used by `admin/views.py`. The shapes
+  added for the admin mutations are `tenant_admin` (the admin-disable columns), `delivery` (retry state,
+  never headers or the body) and `connection` (`{"configured": true}` only; no route writes connection
+  data, so it has no emitter).
 - `denial.py`: `Denial` and `DenialSink`, a dependency-free leaf. `trustbridge.rbac` imports them
   from here (re-exporting them); `audit` never imports `rbac` (an import-linter contract), so the
   worker, which imports `audit`, does not load the FastAPI app.
@@ -134,8 +138,7 @@ ADR names them, with no emitter:
 
 | Event | Owner |
 | --- | --- |
-| Every mutating admin API call with before/after (`tenant.disable`, `delivery.requeue`, `credential.rotate`, ...) and the router-walk test (inv. 8) | NG6e |
-| `host.registration.start` and adapter configuration changes through the API | NG6e |
+| Every mutating admin API call with before/after (`tenant.disable`, `tenant.enable`, `tenant.reconcile`, `delivery.requeue`, `credential.rotate`, `host.registration.start`, `.manual`, `.complete`). The router walk (`admin.guards.mutations_without_emitter`, inv. 8) exists and passes vacuously; each route marks its handler with `emits(action)` | NG6e-2 to NG6e-5 |
 | The deletion's own events (0034) | NG6h |
 | The reconciler duty calling `purge_expired` (ADR 0032 "Retention") | NG6h |
 | A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export"). No such timeout exists on main and the engine is the template's (`app.db`) | NG6h (api and deletion batches). Left out of NG6d: the read routes do not need it, and no connection on main sets a timeout to check against |

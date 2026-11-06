@@ -14,6 +14,7 @@ from trustbridge.ratelimit import FixedWindowLimiter, WindowCounter
 from trustbridge.settings import TrustbridgeSettings
 
 DEFAULT_EXPORT_PAGE = 500
+DEFAULT_MAX_BODY_BYTES = 16384
 
 
 class HostStatuses(Protocol):
@@ -39,6 +40,7 @@ class AdminRuntime:
     """Collaborators of the admin routes. `session_factory` and `writer` are None in mock mode.
 
     `adapters` is the enabled-adapter catalog for `GET /tenants/{t}/adapters` (None: none).
+    `max_body_bytes` bounds a request body (`ADMIN_MAX_BODY_BYTES`).
     """
 
     limits: AdminLimits
@@ -48,6 +50,7 @@ class AdminRuntime:
     export_lag_seconds: float
     export_page_size: int = DEFAULT_EXPORT_PAGE
     adapters: AdapterCatalog | None = None
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
 
 
 def build_limits(settings: TrustbridgeSettings, counter: WindowCounter) -> AdminLimits:

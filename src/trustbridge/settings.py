@@ -199,6 +199,9 @@ class TrustbridgeSettings(Settings):
         default_factory=list
     )
 
+    # Largest request body an admin route reads (413 above it, chunked bodies included; NG6e).
+    admin_max_body_bytes: int = Field(default=16384, gt=0)
+
     # Bound on `authz.denied` rows (ADR 0032, NG6d): per (subject, reason) and window, the first
     # `burst` denials are recorded in full, the rest are counted and summarised in one row.
     audit_denied_window_seconds: int = Field(default=60, gt=0)

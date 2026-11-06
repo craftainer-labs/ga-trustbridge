@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from tests.trustbridge.admin import helpers
 from tests.trustbridge.admin.helpers import ACME, OTHER, build, problem
-from trustbridge.admin import routes
+from trustbridge.admin import guards, routes
 from trustbridge.admin.access import NoTenants, tenant_ref
 from trustbridge.admin.cursor import encode_cursor
 from trustbridge.admin.guards import GUARDED, LIMITS
@@ -98,7 +98,7 @@ def test_every_admin_route_authenticates_limits_then_checks_the_role_under_v1() 
         assert calls[0] is get_principal, route.path
         assert calls[1] in LIMITS, route.path
         assert calls[2] in GUARDED, route.path
-        assert route.methods == {"GET"}, route.path  # NG6d is the read side
+    assert guards.mutations_without_emitter(routes.router.routes) == []  # inv. 17 (ADR 0032 inv. 8)
 
 
 def test_the_spec_lists_only_admin_routes_and_needs_a_token() -> None:

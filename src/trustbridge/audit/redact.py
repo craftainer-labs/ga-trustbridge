@@ -25,6 +25,8 @@ _SECRET_PAIR = re.compile(
     r"[\"']?(\s*[=:]\s*|\s+)[\"']?(?:(?:bearer|basic)\s+)?\S+"
 )
 _OPAQUE_RUN = re.compile(r"[A-Za-z0-9+/_=-]{40,}")
+SECRET_WORDS = ("token", "password", "passwd", "secret", "authorization", "credential", "key")
+"""Substrings that mark a mapping key as secret-bearing; a read drops such a key (fail closed)."""
 
 ALLOW_LISTS: Mapping[str, frozenset[str]] = {
     "tenant": frozenset({"state"}),
@@ -41,6 +43,13 @@ ALLOW_LISTS: Mapping[str, frozenset[str]] = {
         }
     ),
     "oidc_trust": frozenset({"adapter", "operation_id"}),
+    # NG6e: the admin-disable columns of a tenant (ADR 0033 "Tenant disable"), before and after.
+    "tenant_admin": frozenset({"admin_disabled_at", "admin_disabled_by", "admin_disable_reason"}),
+    # NG6e: a webhook delivery's retry state (requeue). The headers and the body never appear.
+    "delivery": frozenset({"status", "attempts", "next_attempt_at", "dead_at", "last_error"}),
+    # Connection data is recorded as `{"configured": true}` and nothing else (ADR 0032). No
+    # admin route writes it; the shape exists so any future writer cannot record a value.
+    "connection": frozenset({"configured"}),
     "authz_denial": frozenset(
         {"reason", "required_role", "scope", "suppressed", "window_seconds", "window", "sample"}
     ),
@@ -72,6 +81,17 @@ def truncate(value: str, limit: int = MAX_TEXT) -> str:
     return value[: limit - len(TRUNCATION_MARKER)] + TRUNCATION_MARKER
 
 
+def printable(value: str) -> str:
+    """`value` with every non-printable character replaced by a space (no masking, no cut)."""
+    return "".join(c if c.isprintable() else " " for c in value)
+
+
+def has_secret_word(key: str) -> bool:
+    """True when `key` contains a secret word (`SECRET_WORDS`), compared case-insensitively."""
+    lowered = key.lower()
+    return any(word in lowered for word in SECRET_WORDS)
+
+
 def scrub_text(value: str, limit: int = MAX_TEXT) -> str:
     """Free text made safe to store: control characters dropped, secret-shaped parts masked.
 
@@ -81,8 +101,7 @@ def scrub_text(value: str, limit: int = MAX_TEXT) -> str:
     """
     if "-----BEGIN" in value:
         return REDACTED
-    printable = "".join(c if c.isprintable() else " " for c in value)
-    masked = _SECRET_PAIR.sub(lambda m: f"{m.group(1)}={REDACTED}", printable)
+    masked = _SECRET_PAIR.sub(lambda m: f"{m.group(1)}={REDACTED}", printable(value))
     return truncate(_OPAQUE_RUN.sub(REDACTED, masked), limit)
 
 

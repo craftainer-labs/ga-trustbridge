@@ -72,7 +72,7 @@ class TenantOut(BaseModel):
     `state` is the installation state written by webhook sync; `admin_disabled_at` is the
     separate admin-disable column (ADR 0033 "Tenant disable"); `effective_state` combines them:
     `disabled` when disabled, otherwise `state`. `admin_disabled_by` (the actor's `sub`) and
-    `admin_disable_reason` are null until the disable action exists (NG6e adds the columns).
+    `admin_disable_reason` (scrubbed free text) are set with `admin_disabled_at`, else null.
     """
 
     id: UUID
