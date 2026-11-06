@@ -279,4 +279,5 @@ async def delivery(
         return None
     values = dict(row)
     body = values.pop("body")
-    return DeliveryDetailOut(**_delivery_values(values), payload=_payload(body) if with_payload else None)
+    payload = _payload(body) if with_payload else None
+    return DeliveryDetailOut(**_delivery_values(values), payload=payload)
