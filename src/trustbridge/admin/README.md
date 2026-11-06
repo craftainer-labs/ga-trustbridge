@@ -48,7 +48,9 @@ NG6d-1 and NG6d-2). Mounted by `trustbridge.main` under `/admin/v1`; authenticat
 timestamps; JSONB columns come back as objects). Orders and cursors: repositories by numeric id;
 resources and credentials by `(adapter, key)`; operations and deliveries newest first
 (`(created_at, id)` and `(received_at, host, delivery_id)`). `credentials` carry state, names of
-delivered outputs and timestamps, never a value. A delivery has no `headers` anywhere; `GET
+delivered outputs and timestamps, never a value: `views.py` allow-lists the keys of each JSONB
+column (unknown keys are dropped) and passes `error`, `manual_action` and a delivery's `last_error`
+through the audit log's `scrub_text`. A delivery has no `headers` anywhere; `GET
 /deliveries/{host}/{delivery_id}` adds `payload` (the stored body parsed as JSON) for a caller
 holding `operator` at instance scope, and `null` for a viewer, a purged body or a body that is not
 JSON. `has_body` says whether a body is stored.
@@ -57,7 +59,8 @@ JSON. `has_body` says whether a body is stored.
 names; unset means none, an unknown name stops the process). Each item is `name`, `configured`
 (whether the secret store lists `store:tenants/<uuid>/<adapter>`; only the listing is read, never a
 value, ADR 0033 invariant 8) and `capabilities` (what the adapter class declares; `null` only if it
-cannot say). An unavailable store is a 503.
+cannot say). An unavailable store is a 503. The api's `ADAPTERS_ENABLED` should match the
+worker's: an api without it answers with an empty list, not "unknown".
 
 **Tenants.** `/tenants` filters by grant and pages in the database. `/me` lists the first 200 tenants
 the grants reach (by id) and sets `tenants_truncated` to true when more exist; use `/tenants` to

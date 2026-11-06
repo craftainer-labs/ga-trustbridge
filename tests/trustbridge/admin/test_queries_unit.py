@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import BaseModel
 
 from trustbridge.admin import queries
 from trustbridge.admin.cursor import decode_cursor, encode_cursor
@@ -118,8 +119,103 @@ async def test_credentials_hold_names_and_state() -> None:
     }
     items, cursor = await queries.credentials(Session([row]), T, limit=5, cursor=None)  # type: ignore[arg-type]
     assert cursor is None
-    assert items[0].scope == {"repository_id": 1}
-    assert items[0].outputs == [{"kind": "secret", "name": "X"}]
+    assert items[0].scope == {
+        "repository_id": 1,
+        "repository_owner_id": None,
+        "environment": None,
+        "permission": None,
+    }
+    assert items[0].outputs == [
+        {"kind": "secret", "name": "X", "repository_id": None, "environment": None}
+    ]
+    assert items[0].state == {"current": None, "previous": None}
+
+
+SECRET = "ghp_" + "A1b2C3d4" * 6  # opaque-run shaped
+PLANTED = {"token": SECRET, "password": "hunter2hunter2", "private_key": SECRET}
+
+
+def _everything_shown(model: BaseModel) -> str:
+    return json.dumps(model.model_dump(mode="json"))
+
+
+async def test_credential_reads_drop_unknown_keys_and_scrub_values() -> None:
+    """A planted secret-looking key or value in any JSONB column never reaches the response."""
+    slot = {
+        "generation": 2,
+        "name": "tb-cred",
+        "ref": {"id": "42", **PLANTED, "note": f"token={SECRET}"},
+        "delivered": True,
+        "retire_after": None,
+        **PLANTED,
+    }
+    row = {
+        "tenant_id": T,
+        "adapter": "jfrog",
+        "scope_key": "abc",
+        "scope": {"repository_id": 1, "environment": None, "permission": "read", **PLANTED},
+        "kind": None,
+        "state": {"current": slot, "previous": None, **PLANTED},
+        "outputs": [{"kind": "secret", "name": "X", **PLANTED}, "not-a-mapping"],
+        "updated_at": NOW,
+    }
+    items, _ = await queries.credentials(Session([row]), T, limit=5, cursor=None)  # type: ignore[arg-type]
+    shown = _everything_shown(items[0])
+    assert SECRET not in shown
+    assert "hunter2" not in shown
+    assert "password" not in shown
+    assert "private_key" not in shown
+    assert items[0].state["current"]["ref"] == {"id": "42", "note": "token=[REDACTED]"}
+    assert items[0].state["current"]["generation"] == 2
+    assert [o["name"] for o in items[0].outputs] == ["X"]
+
+
+async def test_resource_state_drops_unknown_keys() -> None:
+    """A resource's state shows its name and reference only."""
+    row = {
+        "tenant_id": T,
+        "adapter": "harbor",
+        "resource_key": "p",
+        "state": {"name": "n", "ref": {"id": "1", "secret": SECRET}, **PLANTED},
+        "updated_at": NOW,
+    }
+    items, _ = await queries.resources(Session([row]), T, limit=5, cursor=None)  # type: ignore[arg-type]
+    assert items[0].state == {"name": "n", "ref": {"id": "1"}}
+    assert SECRET not in _everything_shown(items[0])
+
+
+async def test_operation_reads_scrub_text_and_base_state() -> None:
+    """`error` and `manual_action` are scrubbed; `base_state` is allow-listed like `state`."""
+    row = {
+        **_operation(0),
+        "error": f"platform said 401 Authorization: Bearer {SECRET} and token={SECRET}",
+        "manual_action": f"paste {SECRET} into the console",
+        "base_state": {"current": {"generation": 1, "name": "n", "ref": {}, **PLANTED}},
+    }
+    items, _ = await queries.operations(Session([row]), T, limit=5, cursor=None)  # type: ignore[arg-type]
+    shown = _everything_shown(items[0])
+    assert SECRET not in shown
+    assert "hunter2" not in shown
+    assert items[0].base_state is not None
+    assert items[0].base_state["current"]["generation"] == 1
+    assert items[0].error is not None
+    assert "[REDACTED]" in items[0].error
+
+
+async def test_a_delivery_error_is_scrubbed_and_bounded() -> None:
+    """A viewer sees `last_error`, scrubbed and truncated the way audit free text is."""
+    long = "x " * 400
+    row = _delivery(0, last_error=f"relay failed token={SECRET} {long}")
+    items, _ = await queries.deliveries(Session([row]), limit=5, cursor=None)  # type: ignore[arg-type]
+    error = items[0].last_error
+    assert error is not None
+    assert SECRET not in error
+    assert len(error) <= 256
+    assert error.endswith("[truncated]")
+    one = Session([{**_delivery(0, last_error=f"token={SECRET}"), "body": None}])
+    detail = await queries.delivery(one, "github.com", "d0", with_payload=False)  # type: ignore[arg-type]
+    assert detail is not None
+    assert SECRET not in (detail.last_error or "")
 
 
 def _operation(offset: int) -> dict[str, Any]:

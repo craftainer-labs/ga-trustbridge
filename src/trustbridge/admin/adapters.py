@@ -74,12 +74,10 @@ class AdapterCatalog:
         Raises whatever the secret store raises (it is unavailable: the route answers 503).
         """
         prefix = f"tenants/{tenant_id}/"
-        present = {
-            ref.rsplit("/", 1)[1]
-            for ref in await self.refs.list_refs(prefix)
-            if ref.removeprefix("store:").startswith(prefix)
-        }
-        return [self._out(name, name in present) for name in sorted(self.classes)]
+        present = set(await self.refs.list_refs(prefix))
+        return [
+            self._out(name, f"store:{prefix}{name}" in present) for name in sorted(self.classes)
+        ]
 
     def _out(self, name: str, configured: bool) -> AdapterOut:
         try:

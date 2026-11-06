@@ -313,6 +313,15 @@ def test_adapters_page_and_empty_catalog() -> None:
     problem(client.get(f"/admin/v1/tenants/{OTHER.id}/adapters"), 404, "not-found")
 
 
+async def test_configured_needs_the_exact_adapter_ref() -> None:
+    """A nested ref or a differently prefixed one does not mark an adapter configured."""
+    prefix = f"store:tenants/{ACME.id}/"
+    secrets = MemorySecrets({f"{prefix}ghcr/token": "{}", f"{prefix}jfrog": "{}"})
+    catalog = AdapterCatalog(load_adapter_classes(["ghcr", "jfrog"]), secrets)
+    configured = {a.name: a.configured for a in await catalog.for_tenant(ACME.id)}
+    assert configured == {"ghcr": False, "jfrog": True}
+
+
 def test_an_unavailable_connection_store_is_503() -> None:
     """A store that cannot be listed is not "nothing configured"."""
     secrets = MemorySecrets()
