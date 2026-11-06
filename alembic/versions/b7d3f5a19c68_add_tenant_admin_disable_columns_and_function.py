@@ -198,9 +198,16 @@ def upgrade() -> None:
         "(admin_disabled_at IS NOT NULL AND admin_disabled_by IS NOT NULL "
         "AND admin_disable_reason IS NOT NULL)) NOT VALID"
     )
-    op.execute("ALTER TABLE tenants VALIDATE CONSTRAINT ck_tenants_admin_disabled")
-    op.execute("DROP FUNCTION tb_list_tenants()")
-    op.execute("DROP FUNCTION tb_get_tenant(uuid)")
+    # `tenants` has one row per installation and the three columns are all null, so validating
+    # in the same transaction holds the lock for a moment only.
+    op.execute(
+        "-- squawk-ignore constraint-missing-not-valid\n"
+        "ALTER TABLE tenants VALIDATE CONSTRAINT ck_tenants_admin_disabled"
+    )
+    # Dropped and created again in this transaction (a row type cannot change in place); the
+    # only readers select named columns, so the previous release is unaffected.
+    op.execute("-- squawk-ignore ban-drop-function\nDROP FUNCTION tb_list_tenants()")
+    op.execute("-- squawk-ignore ban-drop-function\nDROP FUNCTION tb_get_tenant(uuid)")
     op.execute(_LIST_FN)
     op.execute(_GET_FN)
     op.execute(_SET_FN)

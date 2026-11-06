@@ -61,4 +61,4 @@ canonical UUID spelling; `source_ip` is the ASGI client address when it is a pla
 `request_id` the caller's `X-Request-ID` when it is up to 128 of `[A-Za-z0-9._:-]`; anything else
 is dropped, not stored. `trustbridge.main` sets the sink when it builds `app.state.rbac`: `AuditDenials` wrapped in
 `audit.throttle.ThrottledDenials` (see `audit/README.md`). `client_ip` and `safe_request_id` are
-the helpers that produce `source_ip` and `request_id`; `admin.guards` reuses them.
+the helpers that produce `source_ip` and `request_id`; `admin.guards` reuses them, and `deny`, `tenant_not_found` and `parse_tenant_id` (the 403, the 404 and the canonical tenant-id spelling), for its instance-only tenant guard.

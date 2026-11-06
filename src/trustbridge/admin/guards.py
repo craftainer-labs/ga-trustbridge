@@ -39,12 +39,12 @@ from trustbridge.rbac import (
 from trustbridge.rbac.deps import (
     Authorized,
     RbacRuntime,
-    _deny,
-    _parse_tenant_id,
-    _tenant_not_found,
     client_ip,
+    deny,
     get_runtime,
+    parse_tenant_id,
     safe_request_id,
+    tenant_not_found,
 )
 
 Bucket = Literal["read", "mutation", "export"]
@@ -118,13 +118,16 @@ def mutations_without_emitter(routes: Sequence[BaseRoute]) -> list[str]:
     """
     bad: list[str] = []
     for route in routes:
-        if not isinstance(route, APIRoute) or route.methods <= SAFE_METHODS:
+        if not isinstance(route, APIRoute):
+            continue
+        methods = route.methods or set()
+        if methods <= SAFE_METHODS:
             continue
         calls = [d.call for d in route.dependant.dependencies]
         limit = calls[1] if len(calls) > 1 else None
         bucket = None if limit is None else LIMIT_BUCKETS.get(limit)
         if route.endpoint not in EMITTERS or bucket != "mutation":
-            bad.append(f"{','.join(sorted(route.methods))} {route.path}")
+            bad.append(f"{','.join(sorted(methods))} {route.path}")
     return bad
 
 
@@ -165,14 +168,14 @@ def require_instance_role_on_tenant(
 
         if tenant_param not in request.path_params:
             raise RuntimeError(f"route has no path parameter {tenant_param!r}")
-        requested = _parse_tenant_id(request.path_params[tenant_param])
+        requested = parse_tenant_id(request.path_params[tenant_param])
         tenant = None if requested is None else await runtime.access.get_tenant(requested)
         if tenant is None or not tenant_roles(principal, tenant):
             await audit("tenant_not_granted", None if requested is None else str(requested))
-            raise _tenant_not_found(request, principal)
+            raise tenant_not_found(request, principal)
         if role not in instance_roles(principal):
             await audit("role_missing", str(tenant.id))
-            raise _deny(request, principal, role)
+            raise deny(request, principal, role)
         with runtime.access.tenant_context(tenant.id):
             yield Authorized(principal, tenant.id)
 

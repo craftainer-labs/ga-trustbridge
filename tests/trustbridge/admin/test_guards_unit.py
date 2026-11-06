@@ -39,6 +39,14 @@ def _env(**settings: Any) -> Env:  # noqa: ANN401 -- settings overrides
     async def disable(tenant_id: str) -> dict[str, str]:
         return {"tenant": tenant_id}
 
+    @extra.post(
+        "/fixture/no-param",
+        dependencies=guard(Role.ADMIN, "mutation", tenant_param="missing", instance_only=True),
+    )
+    @emits(Action.TENANT_DISABLE)
+    async def no_param() -> None:
+        return None
+
     @extra.post("/fixture/echo", dependencies=guard(Role.OPERATOR, "mutation"))
     @emits(Action.DELIVERY_REQUEUE)
     async def echo(body: dict[str, Any]) -> dict[str, Any]:
@@ -96,8 +104,8 @@ def test_a_tenant_without_any_grant_is_the_same_404_as_an_unknown_one() -> None:
 def test_a_non_canonical_tenant_spelling_is_a_404() -> None:
     """One spelling per tenant, as in `require_role`."""
     env = _env()
-    spelled = str(ACME.id).upper()
-    problem(env.client(ADMIN).post(f"/admin/v1/fixture/tenants/{spelled}/disable"), 404)
+    for spelled in (ACME.id.hex, f"urn:uuid:{ACME.id}"):
+        problem(env.client(ADMIN).post(f"/admin/v1/fixture/tenants/{spelled}/disable"), 404)
     problem(env.client(ADMIN).post("/admin/v1/fixture/tenants/not-a-uuid/disable"), 404)
 
 
@@ -202,3 +210,19 @@ def test_the_body_bound_setting_defaults_to_16_kib_and_must_be_positive() -> Non
     assert make_settings().admin_max_body_bytes == 16384
     with pytest.raises(ValueError, match="admin_max_body_bytes"):
         make_settings(admin_max_body_bytes=0)
+
+
+def test_a_route_naming_a_missing_path_parameter_is_a_programming_error() -> None:
+    """The guard refuses to guess which parameter holds the tenant."""
+    env = _env()
+    with pytest.raises(RuntimeError, match="no path parameter"):
+        env.client(ADMIN).post("/admin/v1/fixture/no-param")
+
+
+def test_denials_are_optional_the_answers_do_not_change() -> None:
+    """Without a denial sink (no database) the 403 and 404 are the same."""
+    env = _env()
+    rbac = env.app.state.rbac
+    env.app.state.rbac = dataclasses.replace(rbac, denials=None)
+    problem(env.client(ACME_ADMIN).post(f"/admin/v1/fixture/tenants/{ACME.id}/disable"), 403)
+    problem(env.client(OTHER_ADMIN).post(f"/admin/v1/fixture/tenants/{ACME.id}/disable"), 404)
