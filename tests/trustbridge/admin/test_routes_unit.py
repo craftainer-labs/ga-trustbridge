@@ -597,3 +597,33 @@ def test_a_tenants_cursor_must_name_a_tenant_id(tenants: list[TenantInfo]) -> No
         problem(client.get("/admin/v1/tenants", params={"cursor": bad}), 400, "invalid-cursor")
     ok = client.get("/admin/v1/tenants", params={"cursor": encode_cursor(str(UUID(int=0)), "x")})
     assert ok.status_code == 200
+
+
+def test_me_caps_the_tenants_at_200_and_says_when_more_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User decision (NG6d-2): the first 200, and `tenants_truncated` when there are more."""
+    rows = [_info(ACME)] * 201
+
+    async def many(
+        _factory: object, _principal: Principal, *, after: UUID | None, limit: int
+    ) -> list[TenantInfo]:
+        assert after is None
+        return rows[:limit]
+
+    monkeypatch.setattr(routes, "tenants_page", many)
+    client = build().client(VIEWER)
+    body = client.get("/admin/v1/me").json()
+    assert len(body["tenants"]) == 200
+    assert body["tenants_truncated"] is True
+    rows[:] = rows[:200]
+    exact = client.get("/admin/v1/me").json()
+    assert len(exact["tenants"]) == 200
+    assert exact["tenants_truncated"] is False
+
+
+def test_me_is_not_truncated_for_a_small_list(tenants: list[TenantInfo]) -> None:
+    """Few tenants, no flag."""
+    del tenants
+    body = build().client(VIEWER).get("/admin/v1/me").json()
+    assert body["tenants_truncated"] is False

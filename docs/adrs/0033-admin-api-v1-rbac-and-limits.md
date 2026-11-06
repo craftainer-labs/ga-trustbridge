@@ -194,8 +194,10 @@ the role. The two decisions fit together as follows; no genuine conflict arises.
 **User decision (G-api, 2026-11-03):** keyed on the authenticated principal (`sub`) after
 authentication and on the source address before it. Defaults, all settings
 (`ADMIN_RATE_LIMIT_*`): **600/minute per principal for reads, 60/minute per principal for
-mutations, 30/minute per source address for unauthenticated or rejected requests, about
-6/minute per principal for exports**. Fixed window; 429 Problem Details with `Retry-After`
+mutations, 30/minute per source address for unauthenticated requests (a 401), about
+6/minute per principal for exports**. A 403 or 404 for an authenticated principal counts against
+that principal's read bucket (keyed `(iss, sub)`), not the address's, so callers behind one
+address do not use up each other's budget (user decision, NG6d-2). Fixed window; 429 Problem Details with `Retry-After`
 (whole seconds left in the window, at least 1); **fail open** when Valkey errors or exceeds the
 limiter's budget, with a metric. It reuses NG3's Valkey limiter with the key prefix
 `tb:rl:admin:`; because that limiter lives in `trustbridge.webhooks`, reusing it moves its
@@ -400,8 +402,9 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
 
 14. A request over its bucket gets 429 problem details with `Retry-After` of the seconds left
     in the window (at least 1), reads and mutations count in separate buckets, the key is the
-    principal after authentication and the source address before it, and an exempt address is
-    never limited.
+    principal after authentication and the source address before it (a 401 counts against the
+    address; a 403 or 404 for an authenticated principal against that principal's read bucket),
+    and an exempt address is never limited.
 15. When Valkey errors or exceeds the limiter's timeout, an admin request is served (fail
     open) and a metric increments, as for the webhook route (0028 invariant 28).
 16. Two api replicas sharing one Valkey share each principal's count.

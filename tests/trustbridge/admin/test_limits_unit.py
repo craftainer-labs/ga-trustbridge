@@ -4,12 +4,13 @@ import ipaddress
 
 import pytest
 
-from tests.trustbridge.admin.helpers import build, problem, token
+from tests.trustbridge.admin.helpers import ACME, OTHER, build, problem, token
 from tests.trustbridge.fakes import FakeRedis
 from tests.trustbridge.helpers import as_redis
 from trustbridge.ratelimit import ValkeyWindowCounter
 
 VIEWER = "trustbridge:viewer"
+VIEWER_ON_ACME_ONLY = f"trustbridge:{ACME.host}:{ACME.org}:viewer"
 
 
 def test_reads_over_the_bucket_get_429_with_retry_after() -> None:
@@ -48,12 +49,35 @@ def test_rejected_requests_count_against_the_address_bucket() -> None:
     assert env.client(VIEWER).get("/admin/v1/hosts").status_code == 200
 
 
-def test_denied_requests_count_too() -> None:
-    """A 403 is a rejected request."""
-    env = build(admin_rate_limit_anonymous_requests=1)
-    client = env.client()
-    assert client.get("/admin/v1/hosts").status_code == 403
-    assert client.get("/admin/v1/hosts").status_code == 429
+def test_an_authenticated_403_counts_against_the_principal_not_the_address() -> None:
+    """Decision 5 (NG6d-2): two principals behind one address do not use each other's budget."""
+    env = build(admin_rate_limit_anonymous_requests=1, admin_rate_limit_read_requests=3)
+    alice = env.client(sub="alice")  # a valid token with no role: every route is a 403
+    bob = env.client(sub="bob")
+    # Each 403 costs the guard's read count plus the rejection's: 2 per request, limit 3.
+    assert alice.get("/admin/v1/hosts").status_code == 403
+    assert bob.get("/admin/v1/hosts").status_code == 403  # the address bucket (1) is not used
+    assert bob.get("/admin/v1/hosts").status_code == 429  # bob's own read bucket is spent
+    assert alice.get("/admin/v1/hosts").status_code == 429
+
+
+def test_an_authenticated_404_counts_against_the_principal() -> None:
+    """A tenant the caller has no grant on is a 404 charged to the caller."""
+    env = build(admin_rate_limit_anonymous_requests=1, admin_rate_limit_read_requests=3)
+    client = env.client(VIEWER_ON_ACME_ONLY)
+    missing = f"/admin/v1/tenants/{OTHER.id}"
+    assert client.get(missing).status_code == 404
+    assert client.get(missing).status_code == 429
+
+
+def test_401s_from_one_address_still_hit_the_address_limit() -> None:
+    """No credentials, no principal: the per-address bucket, whatever other callers do."""
+    env = build(admin_rate_limit_anonymous_requests=2, admin_rate_limit_read_requests=3)
+    anonymous = env.client()
+    anonymous.headers.clear()
+    assert [anonymous.get("/admin/v1/hosts").status_code for _ in range(3)] == [401, 401, 429]
+    # The same address, authenticated: its 403s are charged to the principal, not the address.
+    assert env.client(sub="carol").get("/admin/v1/hosts").status_code == 403
 
 
 def test_an_exempt_address_is_never_limited() -> None:

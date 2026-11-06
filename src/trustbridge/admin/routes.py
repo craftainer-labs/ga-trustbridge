@@ -80,15 +80,20 @@ async def get_me(
     principal: Annotated[Principal, Depends(get_principal)],
     runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
 ) -> MeOut:
-    """The caller: `sub`, `iss`, role grants and (up to 200 of) the tenants those grants reach."""
+    """The caller: `sub`, `iss`, role grants and up to 200 of the tenants they reach.
+
+    `tenants_truncated` is true when more exist (page through `GET /tenants`).
+    """
     grants = sorted(principal.grants, key=lambda g: (g.role.value, g.host or "", g.org or ""))
     tenants: list[TenantInfo] = []
     if runtime.session_factory is not None:
         # The first page of the tenants the grants reach (by id); `GET /tenants` pages through
         # all of them. Bounded so an instance-wide grant does not load every tenant per call.
         tenants = await tenants_page(
-            runtime.session_factory, principal, after=None, limit=MAX_LIMIT
+            runtime.session_factory, principal, after=None, limit=MAX_LIMIT + 1
         )
+    truncated = len(tenants) > MAX_LIMIT
+    tenants = tenants[:MAX_LIMIT]
     return MeOut(
         sub=principal.sub,
         iss=principal.iss,
@@ -102,6 +107,7 @@ async def get_me(
             for g in grants
         ],
         tenants=[TenantRefOut(id=t.id, host=t.host, org=t.org or None) for t in tenants],
+        tenants_truncated=truncated,
     )
 
 

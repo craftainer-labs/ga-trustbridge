@@ -39,12 +39,16 @@ class TenantRefOut(BaseModel):
 
 
 class MeOut(BaseModel):
-    """The authenticated caller (`GET /me`)."""
+    """The authenticated caller (`GET /me`).
+
+    `tenants` holds at most 200; `tenants_truncated` is true when more exist.
+    """
 
     sub: str
     iss: str | None
     grants: list[GrantOut]
     tenants: list[TenantRefOut]
+    tenants_truncated: bool = False
 
 
 class HostOut(BaseModel):

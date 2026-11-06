@@ -815,7 +815,7 @@
         "type": "object"
       },
       "MeOut": {
-        "description": "The authenticated caller (`GET /me`).",
+        "description": "The authenticated caller (`GET /me`).\n\n`tenants` holds at most 200; `tenants_truncated` is true when more exist.",
         "properties": {
           "grants": {
             "items": {
@@ -845,6 +845,11 @@
             },
             "title": "Tenants",
             "type": "array"
+          },
+          "tenants_truncated": {
+            "default": false,
+            "title": "Tenants Truncated",
+            "type": "boolean"
           }
         },
         "required": [
@@ -2420,7 +2425,7 @@
     },
     "/admin/v1/me": {
       "get": {
-        "description": "The caller: `sub`, `iss`, role grants and (up to 200 of) the tenants those grants reach.",
+        "description": "The caller: `sub`, `iss`, role grants and up to 200 of the tenants they reach.\n\n`tenants_truncated` is true when more exist (page through `GET /tenants`).",
         "operationId": "get_me_admin_v1_me_get",
         "responses": {
           "200": {

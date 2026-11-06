@@ -22,7 +22,7 @@ NG6d-1 and NG6d-2). Mounted by `trustbridge.main` under `/admin/v1`; authenticat
 - `adapters.py`: `AdapterCatalog` (the enabled adapter classes plus the secret store listing) and
   `describe`, the capabilities an adapter class declares.
 - `spec.py`: `python -m trustbridge.admin.spec` prints the OpenAPI snapshot.
-- `problems.py`: problem `type` URIs and the per-address limit on rejected requests.
+- `problems.py`: problem `type` URIs and the limit on rejected requests (per address for a 401, per principal for an authenticated 403 or 404).
 - `cursor.py`: the opaque cursor and `paginate`.
 - `schemas.py`: one pydantic model per resource.
 - `metrics.py`: the admin counters.
@@ -60,7 +60,8 @@ value, ADR 0033 invariant 8) and `capabilities` (what the adapter class declares
 cannot say). An unavailable store is a 503.
 
 **Tenants.** `/tenants` filters by grant and pages in the database. `/me` lists the first 200 tenants
-the grants reach (by id); use `/tenants` to page through more. `TenantOut` has `admin_disabled_by`
+the grants reach (by id) and sets `tenants_truncated` to true when more exist; use `/tenants` to
+page through all of them. `TenantOut` has `admin_disabled_by`
 and `admin_disable_reason`, both `null` until NG6e adds the columns and the disable action
 (`tb_list_tenants()` and `tb_get_tenant()` return constants for the admin-disable columns until
 then).
@@ -115,8 +116,10 @@ The classes are open: v1 may add one. Errors off `/admin/v1` keep the template's
 
 Fixed windows in Valkey through `trustbridge.ratelimit` (key prefix `tb:rl:admin:`), fail open with
 a metric. Per principal (`iss` and `sub`, hashed): reads 600/min, exports 6/min (mutations 60/min, for
-NG6e). Per source address: 30/min for rejected requests (401, 403, 404 count; over the limit the
-rejection becomes a 429). Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_REQUESTS`,
+NG6e). Per source address: 30/min for unauthenticated requests (a 401, or a route that does not exist;
+over the limit the rejection becomes a 429). A 403 or 404 for an authenticated principal counts
+against that principal's read bucket instead, so callers behind one address (a NAT, the BFF) do
+not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_REQUESTS`,
 `MUTATION_REQUESTS`, `EXPORT_REQUESTS`, `ANONYMOUS_REQUESTS`, `WINDOW_SECONDS`, `TIMEOUT_MS`,
 `EXEMPT_CIDRS`. Behind the BFF the address is the BFF's unless `TRUSTED_PROXIES` lists it.
 
