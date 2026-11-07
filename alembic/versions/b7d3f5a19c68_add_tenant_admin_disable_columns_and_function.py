@@ -92,6 +92,9 @@ DECLARE
     v_row public.tenants%ROWTYPE;
     v_deleting boolean := false;  -- NG6h: true while a non-terminal tenant_deletions row exists
 BEGIN
+    IF p_disable IS NULL THEN
+        RAISE EXCEPTION 'invalid disable request' USING ERRCODE = '22023';
+    END IF;
     IF p_disable THEN
         IF p_by IS NULL OR length(p_by) NOT BETWEEN 1 AND 255
            OR p_reason IS NULL OR length(p_reason) NOT BETWEEN 1 AND 500 THEN
@@ -124,9 +127,12 @@ BEGIN
         IF v_deleting THEN
             RAISE EXCEPTION 'tenant has a deletion in progress' USING ERRCODE = '55000';
         END IF;
-        UPDATE public.tenants
-           SET admin_disabled_at = NULL, admin_disabled_by = NULL, admin_disable_reason = NULL
-         WHERE id = p_id;
+        IF v_row.admin_disabled_at IS NOT NULL THEN
+            UPDATE public.tenants
+               SET admin_disabled_at = NULL, admin_disabled_by = NULL,
+                   admin_disable_reason = NULL
+             WHERE id = p_id;
+        END IF;
     END IF;
     tenant_found := true;
     RETURN NEXT;

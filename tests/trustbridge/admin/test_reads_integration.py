@@ -340,7 +340,7 @@ _SET = text("SELECT * FROM tb_set_tenant_disabled(:id, :by, :reason, :disable)")
 
 
 async def _set(
-    db: rls.Db, tenant: UUID, *, disable: bool, by: str = "u-1", reason: str = "hold"
+    db: rls.Db, tenant: UUID, *, disable: bool | None, by: str = "u-1", reason: str = "hold"
 ) -> Any:  # noqa: ANN401 -- a result row
     with tenant_context(None):
         async with db.app() as session, session.begin():
@@ -410,6 +410,17 @@ async def test_an_unknown_tenant_is_not_found_and_a_bad_request_is_refused(db: r
     info = await get_tenant(db.app, db.b)
     assert info is not None
     assert info.admin_disabled_at is None
+
+
+async def test_a_null_flag_is_refused_and_enabling_an_enabled_tenant_is_a_no_op(
+    db: rls.Db,
+) -> None:
+    """NULL is neither disable nor enable; an enable of an enabled tenant writes nothing."""
+    with pytest.raises(DBAPIError, match="invalid disable request"):
+        await _set(db, db.b, disable=None)
+    row = await _set(db, db.b, disable=False)
+    assert row.tenant_found is True
+    assert (row.before_disabled_at, row.after_disabled_at) == (None, None)
 
 
 async def test_the_columns_are_all_set_or_all_null(db: rls.Db) -> None:
