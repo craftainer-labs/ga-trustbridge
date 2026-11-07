@@ -19,11 +19,13 @@ sweep_failures = metrics.get_meter("trustbridge").create_counter(
     description="Tenants whose per-tenant sweep body raised (the loop continued)",
 )
 _LIST_TENANTS = text(
-    "SELECT id, host, installation_id, org, org_id, state, admin_disabled_at, deleting "
+    "SELECT id, host, installation_id, org, org_id, state, admin_disabled_at, deleting, "
+    "admin_disabled_by, admin_disable_reason "
     "FROM tb_list_tenants()"
 )
 _GET_TENANT = text(
-    "SELECT id, host, installation_id, org, org_id, state, admin_disabled_at, deleting "
+    "SELECT id, host, installation_id, org, org_id, state, admin_disabled_at, deleting, "
+    "admin_disabled_by, admin_disable_reason "
     "FROM tb_get_tenant(:id)"
 )
 
@@ -40,6 +42,8 @@ class TenantInfo:
     state: str
     admin_disabled_at: datetime | None
     deleting: bool
+    admin_disabled_by: str | None = None
+    admin_disable_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

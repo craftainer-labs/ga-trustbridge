@@ -11,7 +11,8 @@ from trustbridge.tenancy import TenantInfo, tenant_context
 
 _ONE = text("SELECT id, host, org FROM tb_get_tenant(:id)")
 _PAGE = text(
-    "SELECT id, host, installation_id, org, org_id, state, admin_disabled_at, deleting "
+    "SELECT id, host, installation_id, org, org_id, state, admin_disabled_at, deleting, "
+    "admin_disabled_by, admin_disable_reason "
     "FROM tb_list_tenants() "
     "WHERE (CAST(:after AS uuid) IS NULL OR id > CAST(:after AS uuid)) "
     "AND (CAST(:every AS boolean) OR (lower(host), lower(org)) IN "

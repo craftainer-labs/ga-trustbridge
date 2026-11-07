@@ -74,6 +74,18 @@ def _app(access: FakeAccess | None, *, config: RbacConfig | None = None) -> Fast
         access.events.append("handler")
         return {"tenant": str(auth.tenant_id)}
 
+    @app.get("/t/{tenant_id}/instance-admin")
+    async def t_instance_admin(
+        tenant_id: str,
+        auth: Annotated[
+            Authorized,
+            Depends(require_role(Role.ADMIN, tenant_param="tenant_id", instance_only=True)),
+        ],
+    ) -> dict[str, Any]:
+        assert access is not None
+        access.events.append("handler")
+        return {"tenant": str(auth.tenant_id)}
+
     return app
 
 
@@ -265,3 +277,41 @@ def test_missing_tenant_param_is_a_server_error_not_a_404() -> None:
 
     client = _client(app, "trustbridge:viewer", raise_errors=False)
     assert client.get("/typo").status_code == 500
+
+
+def test_instance_only_accepts_an_instance_role_and_enters_the_context_after_the_check() -> None:
+    """The role is held at instance scope: the tenant context is entered, then the handler."""
+    access = FakeAccess([ACME])
+    client = _client(_app(access), "trustbridge:admin")
+    assert client.get(f"/t/{ACME.id}/instance-admin").json() == {"tenant": str(ACME.id)}
+    assert access.events == ["get", f"enter:{ACME.id}", "handler", "exit"]
+
+
+def test_instance_only_rejects_a_tenant_scoped_admin_with_403_and_no_context() -> None:
+    """The same grant `require_role` accepts on a tenant route is not instance scope."""
+    access = FakeAccess([ACME])
+    client = _client(_app(access), "trustbridge:github.com:acme:admin")
+    _problem(client.get(f"/t/{ACME.id}/instance-admin"), 403)
+    assert not any(e.startswith("enter") for e in access.events)
+
+
+def test_instance_only_hides_an_ungranted_or_unknown_tenant_behind_one_404() -> None:
+    """No grant on the tenant, an unknown id and a malformed one are the same 404."""
+    access = FakeAccess([ACME, OTHER])
+    client = _client(_app(access), "trustbridge:github.com:acme:admin")
+    on_other = _problem(client.get(f"/t/{OTHER.id}/instance-admin"), 404)
+    unknown = _problem(client.get(f"/t/{uuid4()}/instance-admin"), 404)
+    malformed = _problem(client.get("/t/not-a-uuid/instance-admin"), 404)
+    for body in (unknown, malformed):
+        assert {k: v for k, v in body.items() if k != "instance"} == {
+            k: v for k, v in on_other.items() if k != "instance"
+        }
+    assert not any(e.startswith("enter") for e in access.events)
+
+
+def test_the_default_is_unchanged_and_instance_only_needs_a_parameter() -> None:
+    """`instance_only` is opt-in: `require_role` without it is unchanged."""
+    client = _client(_app(FakeAccess([ACME])), "trustbridge:github.com:acme:operator")
+    assert client.get(f"/t/{ACME.id}/operator").status_code == 200
+    with pytest.raises(ValueError, match="tenant_param"):
+        require_role(Role.ADMIN, instance_only=True)

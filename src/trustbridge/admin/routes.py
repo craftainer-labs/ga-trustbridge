@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from trustbridge.admin import queries
 from trustbridge.admin.access import tenants_page
 from trustbridge.admin.cursor import MAX_SEQ, decode_cursor, encode_cursor, invalid_cursor, paginate
-from trustbridge.admin.guards import guard, guard_any_grant
+from trustbridge.admin.guards import BoundedRoute, guard, guard_any_grant
 from trustbridge.admin.problems import AdminProblem
 from trustbridge.admin.runtime import AdminRuntime, admin_runtime
 from trustbridge.admin.schemas import (
@@ -60,7 +60,7 @@ _PROBLEMS: dict[int | str, dict[str, Any]] = {
     code: {"model": ProblemOut, "description": "Problem Details (application/problem+json)"}
     for code in (400, 401, 403, 404, 422, 429)
 }
-router = APIRouter(prefix="/admin/v1", responses=_PROBLEMS)
+router = APIRouter(prefix="/admin/v1", responses=_PROBLEMS, route_class=BoundedRoute)
 
 Limit = Annotated[int, Query(ge=1, le=MAX_LIMIT, description="Page size (1 to 200)")]
 Cursor = Annotated[str | None, Query(max_length=512, description="Opaque cursor")]
@@ -184,6 +184,8 @@ def _tenant_out(info: TenantInfo) -> TenantOut:
         org_id=info.org_id,
         state=info.state,
         admin_disabled_at=info.admin_disabled_at,
+        admin_disabled_by=info.admin_disabled_by,
+        admin_disable_reason=info.admin_disable_reason,
         effective_state="disabled" if info.admin_disabled_at is not None else info.state,
         deleting=info.deleting,
     )

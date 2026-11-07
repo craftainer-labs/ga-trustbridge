@@ -98,6 +98,10 @@ class Tenant(Base):
     # `active`, `suspended` or `deleted`.
     state: Mapped[str] = mapped_column(String, server_default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Set together by `tb_set_tenant_disabled` (ADR 0033); the sync never writes them.
+    admin_disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    admin_disabled_by: Mapped[str | None] = mapped_column(Text)
+    admin_disable_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class TenantRepository(Base):

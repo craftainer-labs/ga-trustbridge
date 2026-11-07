@@ -209,7 +209,7 @@ def test_project_accepts_a_finite_float() -> None:
 def test_project_refuses_an_unknown_shape() -> None:
     """No allow-list, no event: never an unfiltered dump."""
     with pytest.raises(ValueError, match="no audit allow-list"):
-        project("connection", {"base_url": CANARY})
+        project("nonexistent", {"base_url": CANARY})
 
 
 def test_truncate_marks_the_cut_and_leaves_short_text_alone() -> None:

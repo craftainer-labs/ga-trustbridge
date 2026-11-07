@@ -18,6 +18,7 @@ from trustbridge.admin.schemas import (
     OperationOut,
     RepositoryOut,
     ResourceOut,
+    TenantOut,
 )
 from trustbridge.audit import ActorType, AuditRecord, Outcome
 from trustbridge.worker.secrets import MemorySecrets, SecretUnavailable
@@ -368,3 +369,24 @@ def test_an_adapter_that_cannot_describe_itself_still_lists() -> None:
     object.__setattr__(env.runtime, "adapters", catalog)
     body = env.client(ACME_VIEWER).get(f"/admin/v1/tenants/{ACME.id}/adapters").json()
     assert body["items"] == [{"name": "broken", "configured": True, "capabilities": None}]
+
+
+def test_a_tenants_disable_reason_is_scrubbed_on_read() -> None:
+    """Whatever the column holds, the response shows no more than the logs would."""
+    base: dict[str, Any] = {
+        "id": uuid4(),
+        "host": "github.com",
+        "installation_id": 1,
+        "org": "acme",
+        "org_id": 2,
+        "state": "active",
+        "admin_disabled_at": when(),
+        "admin_disabled_by": "u-1",
+        "effective_state": "disabled",
+        "deleting": False,
+    }
+    shown = TenantOut(**base, admin_disable_reason="hold\x00\x1b[31m token=abc123def456")
+    assert shown.admin_disable_reason is not None
+    assert "\x1b" not in shown.admin_disable_reason
+    assert "abc123def456" not in shown.admin_disable_reason
+    assert TenantOut(**base, admin_disable_reason=None).admin_disable_reason is None

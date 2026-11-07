@@ -108,8 +108,8 @@ the save's own session. Audit writes use the same tenant context as the action (
 `before` and `after` are built by an **allow-list per resource type** in code (a function from
 the model to the fields that may be recorded), never by dumping a row and removing names. A
 new column is therefore absent from the audit until someone adds it. Secrets never appear:
-connection data is recorded as `{"configured": true}` (the allow-list for it arrives with the
-connection endpoints, NG6e), credentials as their adapter, kind, operation id and kind,
+connection data is recorded as `{"configured": true}` (`redact.ALLOW_LISTS["connection"]`; no admin
+route writes connection data, so the shape has no emitter), credentials as their adapter, kind, operation id and kind,
 generation, delivered flag, previous generation and retire-after timestamp (`redact.ALLOW_LISTS`:
 `tenant`, `credential`, `oidc_trust`, `authz_denial`), webhook bodies not at all. Every string
 value goes through `scrub_text` (the same policy the logs apply, ADR 0007: control characters
