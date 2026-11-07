@@ -8,7 +8,9 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from trustbridge.audit.redact import scrub_text
 
 
 class ProblemOut(BaseModel):
@@ -86,6 +88,12 @@ class TenantOut(BaseModel):
     admin_disable_reason: str | None = None
     effective_state: str
     deleting: bool
+
+    @field_validator("admin_disable_reason")
+    @classmethod
+    def _scrub_reason(cls, value: str | None) -> str | None:
+        """The reason is shown no more openly than it is logged (`scrub_text`, ADR 0032)."""
+        return None if value is None else scrub_text(value)
 
 
 class TenantPage(BaseModel):

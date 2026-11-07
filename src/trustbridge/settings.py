@@ -55,6 +55,10 @@ __all__ = [
 ]
 
 
+DEFAULT_ADMIN_MAX_BODY_BYTES = 16384
+"""The default of `ADMIN_MAX_BODY_BYTES`; `admin.runtime.DEFAULT_MAX_BODY_BYTES` is this value."""
+
+
 class SettingsError(ValueError):
     """The process environment holds a setting the process must refuse to start with."""
 
@@ -200,7 +204,7 @@ class TrustbridgeSettings(Settings):
     )
 
     # Largest request body an admin route reads (413 above it, chunked bodies included; NG6e).
-    admin_max_body_bytes: int = Field(default=16384, gt=0)
+    admin_max_body_bytes: int = Field(default=DEFAULT_ADMIN_MAX_BODY_BYTES, gt=0)
 
     # Bound on `authz.denied` rows (ADR 0032, NG6d): per (subject, reason) and window, the first
     # `burst` denials are recorded in full, the rest are counted and summarised in one row.

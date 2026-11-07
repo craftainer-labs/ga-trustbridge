@@ -11,12 +11,13 @@ import httpx
 import pytest
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
-from starlette.routing import Route
+from starlette.routing import Mount, Route
 
 from tests.trustbridge.admin.helpers import ACME, OTHER, Env, build, problem, token
 from tests.trustbridge.helpers import make_settings
 from trustbridge.admin import guards
 from trustbridge.admin.guards import BoundedRoute, emits, guard, mutations_without_emitter
+from trustbridge.admin.runtime import DEFAULT_MAX_BODY_BYTES
 from trustbridge.audit import Action
 from trustbridge.rbac import Role
 
@@ -208,7 +209,7 @@ def test_mutations_count_against_their_own_bucket() -> None:
 
 def test_the_body_bound_setting_defaults_to_16_kib_and_must_be_positive() -> None:
     """`ADMIN_MAX_BODY_BYTES`."""
-    assert make_settings().admin_max_body_bytes == 16384
+    assert make_settings().admin_max_body_bytes == 16384 == DEFAULT_MAX_BODY_BYTES
     with pytest.raises(ValueError, match="admin_max_body_bytes"):
         make_settings(admin_max_body_bytes=0)
 
@@ -233,6 +234,76 @@ async def _plain(request: Any) -> None:  # noqa: ANN401 -- a Starlette endpoint
     return None
 
 
-def test_the_mutation_walk_skips_routes_that_are_not_api_routes() -> None:
-    """Only `APIRoute`s carry the guards; a plain mount or route is not this router's."""
-    assert mutations_without_emitter([Route("/plain", _plain, methods=["POST"])]) == []
+def test_the_mutation_walk_fails_a_route_under_the_admin_prefix_that_is_not_an_api_route() -> None:
+    """A plain route or mount under `/admin/v1` carries none of the guards: reported."""
+    plain = Route("/admin/v1/plain", _plain, methods=["GET"])
+    mount = Mount("/admin/v1/sub", routes=[Route("/x", _plain, methods=["POST"])])
+    outside = Route("/elsewhere", _plain, methods=["POST"])
+    assert mutations_without_emitter([plain, mount, outside]) == [
+        "* /admin/v1/plain",
+        "* /admin/v1/sub",
+    ]
+
+
+def test_the_mutation_walk_finds_the_limit_by_identity_not_by_position() -> None:
+    """The mutation bucket counts wherever it sits; a read bucket or two limits do not."""
+    router = APIRouter(prefix="/admin/v1", route_class=BoundedRoute)
+    first = guard(Role.OPERATOR, "mutation")
+    reordered = [first[2], first[0], first[1]]  # role check, principal, mutation limit
+
+    @router.post("/reordered", dependencies=reordered)
+    @emits(Action.DELIVERY_REQUEUE)
+    async def reordered_route() -> None:
+        return None
+
+    two_limits = [*guard(Role.OPERATOR, "mutation"), *guard(Role.OPERATOR, "read")[1:2]]
+
+    @router.post("/two-limits", dependencies=two_limits)
+    @emits(Action.DELIVERY_REQUEUE)
+    async def two_limits_route() -> None:
+        return None
+
+    @router.post("/none", dependencies=[first[0]])
+    @emits(Action.DELIVERY_REQUEUE)
+    async def none_route() -> None:
+        return None
+
+    assert mutations_without_emitter(router.routes) == [
+        "POST /admin/v1/two-limits",
+        "POST /admin/v1/none",
+    ]
+    assert reordered_route in guards.EMITTERS
+    assert two_limits_route in guards.EMITTERS
+    assert none_route in guards.EMITTERS
+
+
+def test_a_denied_tenant_request_consumes_the_principals_mutation_bucket() -> None:
+    """Order is authenticate, limit, then the role and tenant check (ADR 0033 invariant 1)."""
+    env = _env(admin_rate_limit_mutation_requests=2)
+    url = f"/admin/v1/fixture/tenants/{ACME.id}/disable"
+    forbidden = env.client(ACME_ADMIN, sub="u-forbidden")
+    problem(forbidden.post(url), 403)
+    problem(forbidden.post(url), 403)
+    problem(forbidden.post(url), 429, "rate-limited")  # the third is stopped before the check
+    ungranted = env.client(OTHER_ADMIN, sub="u-ungranted")
+    problem(ungranted.post(url), 404)
+    problem(ungranted.post(url), 404)
+    problem(ungranted.post(url), 429, "rate-limited")
+    assert len(env.sink.denials) == 4  # the limited requests cost no tenant lookup or denial
+
+
+def test_a_read_with_a_large_content_length_is_not_bounded() -> None:
+    """Only POST, PUT, PATCH and DELETE are bounded; a GET passes through."""
+    env = _env()
+    response = env.client(ADMIN).get("/admin/v1/hosts", headers={"content-length": "999999"})
+    assert response.status_code == 200
+
+
+def test_an_unauthenticated_oversized_post_is_a_413_before_authentication() -> None:
+    """Documented in admin/README.md: the bound is a memory bound and runs before auth."""
+    env = _env()
+    problem(
+        TestClient(env.app).post("/admin/v1/fixture/echo", json={"a": "x" * 200}),
+        413,
+        "payload-too-large",
+    )

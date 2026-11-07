@@ -14,12 +14,21 @@ NG6d-1 and NG6d-2). Mounted by `trustbridge.main` under `/admin/v1`; authenticat
   order (ADR 0033 invariant 1). `guard_any_grant` is for `/tenants`, which is filtered per grant.
   `instance_only=True` (with `tenant_param`) is for tenant disable and enable: the role is needed at
   instance scope (a tenant-scoped `admin` gets 403), a tenant the caller has no grant on is the same
-  404 as an unknown one, and the tenant context is entered after the checks. `BoundedRoute` (the
-  router's `route_class`) bounds every request body: a `Content-Length` over
+  404 as an unknown one, and the tenant context is entered after the checks (it is
+  `rbac.deps.require_role(..., instance_only=True)`; the order stays authenticate, limit, role and
+  tenant check, so a denied 404 or 403 counts against the principal's bucket).
+  `BoundedRoute` (the router's `route_class`) bounds the request body of `POST`, `PUT`, `PATCH` and
+  `DELETE` (a read is not bounded): a `Content-Length` over
   `ADMIN_MAX_BODY_BYTES` (default 16384) is a 413 before any byte is read, a malformed one a 400,
-  and a chunked body is cut off with a 413 as it grows past the limit. A mutating handler is marked
+  and a chunked body is cut off with a 413 as it grows past the limit. The check runs before
+  authentication (FastAPI reads the body before it resolves dependencies), so an unauthenticated
+  caller can get a 413 or 400 that is not rate-limited or audited; that is the memory bound, accepted
+  on purpose. A mutating handler is marked
   with `emits(action)` and uses `guard(..., "mutation")`; `mutations_without_emitter` is the router
-  walk that fails for one that is not (ADR 0032 invariant 8). No mutating route exists yet.
+  walk that fails for one that is not (ADR 0032 invariant 8). It finds the limit dependency by
+  identity (the route needs exactly one, on the `mutation` bucket) and reports any route under
+  `/admin/v1` that is not an `APIRoute` (a mount, a plain route), since the guards cannot be seen
+  inside it. No mutating route exists yet.
 - `runtime.py`: `AdminRuntime` (`app.state.admin`: limiters, the host view, the session factory,
   the audit writer, the export lag and page size) and `build_limits`.
 - `access.py`: `SqlTenantAccess`, the `TenantAccess` over `tb_get_tenant()`; `NoTenants` for

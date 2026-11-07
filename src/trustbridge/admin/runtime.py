@@ -11,10 +11,10 @@ from trustbridge.admin.adapters import AdapterCatalog
 from trustbridge.audit.emit import AuditWriter
 from trustbridge.github.availability import HostStatus
 from trustbridge.ratelimit import FixedWindowLimiter, WindowCounter
-from trustbridge.settings import TrustbridgeSettings
+from trustbridge.settings import DEFAULT_ADMIN_MAX_BODY_BYTES, TrustbridgeSettings
 
 DEFAULT_EXPORT_PAGE = 500
-DEFAULT_MAX_BODY_BYTES = 16384
+DEFAULT_MAX_BODY_BYTES = DEFAULT_ADMIN_MAX_BODY_BYTES
 
 
 class HostStatuses(Protocol):

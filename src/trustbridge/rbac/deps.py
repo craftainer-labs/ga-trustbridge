@@ -132,7 +132,7 @@ def tenant_not_found(request: Request, principal: Principal) -> HTTPException:
 
 
 def require_role(
-    role: Role, *, tenant_param: str | None = None
+    role: Role, *, tenant_param: str | None = None, instance_only: bool = False
 ) -> Callable[..., AsyncIterator[Authorized]]:
     """Build a dependency requiring `role` (or a role that includes it).
 
@@ -146,7 +146,16 @@ def require_role(
     Each denial of an authenticated principal is first handed to `RbacRuntime.denials` (the
     `authz.denied` audit event, ADR 0032), which runs before the response is chosen; if it
     fails, the request fails with it.
+
+    `instance_only` (needs `tenant_param`) is for a route whose path names a tenant but whose
+    action is instance-scoped (ADR 0033 tenant disable and enable): `role` must be held at
+    instance scope, a tenant-scoped grant never counts. The tenant checks stay as above: an
+    unknown, unparsable or wholly ungranted tenant is the 404 (so the ids stay unenumerable), a
+    caller with a grant on it but no instance-scope `role` is the 403, and the denial's scope is
+    `instance`. The tenant context is entered only after both checks.
     """
+    if instance_only and tenant_param is None:
+        raise ValueError("instance_only needs a tenant_param")
 
     async def _dependency(
         request: Request,
@@ -163,7 +172,7 @@ def require_role(
                         iss=principal.iss,
                         reason=reason,
                         required_role=role.value,
-                        scope="instance" if tenant_param is None else "tenant",
+                        scope="instance" if tenant_param is None or instance_only else "tenant",
                         tenant_id=tenant_id,
                         source_ip=client_ip(request),
                         request_id=safe_request_id(request),
@@ -184,7 +193,7 @@ def require_role(
         if tenant is None or not held:
             await audit("tenant_not_granted", None if requested is None else str(requested))
             raise tenant_not_found(request, principal)
-        if role not in held:
+        if role not in (instance_roles(principal) if instance_only else held):
             await audit("role_missing", str(tenant.id))
             raise deny(request, principal, role)
         with runtime.access.tenant_context(tenant.id):

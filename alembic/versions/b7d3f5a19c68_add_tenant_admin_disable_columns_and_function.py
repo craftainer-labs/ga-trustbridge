@@ -97,7 +97,10 @@ BEGIN
     END IF;
     IF p_disable THEN
         IF p_by IS NULL OR length(p_by) NOT BETWEEN 1 AND 255
-           OR p_reason IS NULL OR length(p_reason) NOT BETWEEN 1 AND 500 THEN
+           OR p_reason IS NULL OR length(p_reason) NOT BETWEEN 1 AND 500
+           OR octet_length(p_reason) > 2000
+           OR p_by ~ '[\\x01-\\x1f\\x7f-\\x9f]'
+           OR p_reason ~ '[\\x01-\\x1f\\x7f-\\x9f]' THEN
             RAISE EXCEPTION 'invalid disable request' USING ERRCODE = '22023';
         END IF;
     END IF;
@@ -221,7 +224,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
+    """Downgrade schema; refused while any tenant is admin-disabled."""
+    # The previous release has no admin-disable column, so dropping them would silently enable
+    # the tenant again. Enable them (or accept it by clearing the columns) before going back.
+    op.execute(
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM tenants WHERE admin_disabled_at IS NOT NULL) THEN "
+        "RAISE EXCEPTION 'cannot downgrade: tenants are admin-disabled; enable them first' "
+        "USING ERRCODE = '55000'; END IF; END $$"
+    )
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute("SET LOCAL statement_timeout = '120s'")
     op.execute(f"DROP FUNCTION IF EXISTS {SET_FUNCTION}")

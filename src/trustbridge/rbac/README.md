@@ -13,10 +13,13 @@ No endpoints here: `trustbridge.admin` mounts the routes and `trustbridge.main` 
   `trustbridge<sep><host><sep><org><sep><role>` is tenant scope (host and org case-insensitive, role
   exact); template personas (`viewer`, `security`, `detective`, `editor`, `maintainer`) alias to
   instance roles when `RBAC_ALIAS_TEMPLATE_PERSONAS` is on; everything else grants nothing.
-- `deps.py`: `require_role(role, tenant_param=None)`. Instance routes need an instance grant
+- `deps.py`: `require_role(role, tenant_param=None, instance_only=False)`. Instance routes need an instance grant
   (403 otherwise). Tenant routes (`tenant_param` names the path parameter) accept an instance grant
   or a grant on that tenant; an unknown, malformed or ungranted tenant is the same 404, a too-weak
   grant is 403, and only then is `TenantAccess.tenant_context` entered. The actor is `sub`.
+  `instance_only=True` (needs `tenant_param`) is for a route that names a tenant but acts at
+  instance scope (tenant disable and enable): the 404 checks are the same, but the role must be held
+  at instance scope, so a tenant-scoped `admin` gets 403, and the `authz.denied` scope is `instance`.
 
 ## Wiring
 

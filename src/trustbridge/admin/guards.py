@@ -9,7 +9,7 @@ in this order. `get_principal` is cached per request, so the role check reuses i
 """
 
 import hashlib
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, HTTPException, Request
@@ -28,24 +28,8 @@ from trustbridge.admin.runtime import (
 )
 from trustbridge.audit.actions import Action
 from trustbridge.audit.denial import Denial
-from trustbridge.rbac import (
-    Principal,
-    Role,
-    get_principal,
-    instance_roles,
-    require_role,
-    tenant_roles,
-)
-from trustbridge.rbac.deps import (
-    Authorized,
-    RbacRuntime,
-    client_ip,
-    deny,
-    get_runtime,
-    parse_tenant_id,
-    safe_request_id,
-    tenant_not_found,
-)
+from trustbridge.rbac import Principal, Role, get_principal, require_role
+from trustbridge.rbac.deps import RbacRuntime, client_ip, get_runtime, safe_request_id
 
 Bucket = Literal["read", "mutation", "export"]
 GUARDED: dict[Callable[..., object], tuple[Role | None, str | None]] = {}
@@ -62,6 +46,8 @@ EMITTERS: dict[Callable[..., object], Action] = {}
 """Each mutating route handler and the audit action it writes (`emits`), ADR 0032 invariant 8."""
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+BODY_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+ADMIN_PREFIX = "/admin/v1"
 
 INSTANCE_ONLY: set[Callable[..., object]] = set()
 """The guard dependencies built with `instance_only=True` (an instance grant on a tenant route)."""
@@ -111,75 +97,30 @@ def emits[F: Callable[..., object]](action: Action) -> Callable[[F], F]:
 
 
 def mutations_without_emitter(routes: Sequence[BaseRoute]) -> list[str]:
-    """`"METHOD path"` of every mutating route that has no emitter or not the mutation bucket.
+    """`"METHOD path"` of every route under `/admin/v1` that breaks the mutation rules.
 
     A route is mutating when it answers any method outside `SAFE_METHODS`. It needs a handler
-    marked with `emits` and, as its second dependency, the `mutation` rate-limit bucket.
+    marked with `emits` and exactly one rate-limit dependency (found by identity in
+    `LIMIT_BUCKETS`, wherever it sits in the list), on the `mutation` bucket. A route under
+    `/admin/v1` that is not an `APIRoute` (a `Mount`, a plain `Route`, a websocket) carries none
+    of the guards and is reported too, as `"* path"`: the walk cannot see inside it.
     """
     bad: list[str] = []
     for route in routes:
+        path = getattr(route, "path", "")
         if not isinstance(route, APIRoute):
+            if path == ADMIN_PREFIX or path.startswith(f"{ADMIN_PREFIX}/"):
+                bad.append(f"* {path}")
             continue
         methods = route.methods or set()
         if methods <= SAFE_METHODS:
             continue
-        calls = [d.call for d in route.dependant.dependencies]
-        limit = calls[1] if len(calls) > 1 else None
-        bucket = None if limit is None else LIMIT_BUCKETS.get(limit)
-        if route.endpoint not in EMITTERS or bucket != "mutation":
-            bad.append(f"{','.join(sorted(methods))} {route.path}")
+        buckets = [
+            LIMIT_BUCKETS[d.call] for d in route.dependant.dependencies if d.call in LIMIT_BUCKETS
+        ]
+        if route.endpoint not in EMITTERS or buckets != ["mutation"]:
+            bad.append(f"{','.join(sorted(methods))} {path}")
     return bad
-
-
-def require_instance_role_on_tenant(
-    role: Role, *, tenant_param: str
-) -> Callable[..., AsyncIterator[Authorized]]:
-    """Build a dependency for a `{tenant_id}` route that needs `role` at **instance scope**.
-
-    ADR 0033 lists tenant disable and enable as "instance scope" although their path names a
-    tenant. A tenant that is unknown, unparsable, or on which the caller holds no grant at all
-    is a 404 with the same body (the ids stay unenumerable, and `authz.denied` records
-    `tenant_not_granted`). A caller with a grant on the tenant but no instance-scope `role`
-    (a tenant-scoped admin) is a 403 (`role_missing`). Only after both checks is the tenant
-    context entered, as in `require_role`.
-    """
-
-    async def _dependency(
-        request: Request,
-        principal: Annotated[Principal, Depends(get_principal)],
-        runtime: Annotated[RbacRuntime, Depends(get_runtime)],
-    ) -> AsyncIterator[Authorized]:
-        async def audit(
-            reason: Literal["role_missing", "tenant_not_granted"], tenant: str | None
-        ) -> None:
-            if runtime.denials is not None:
-                await runtime.denials.denied(
-                    Denial(
-                        sub=principal.sub,
-                        iss=principal.iss,
-                        reason=reason,
-                        required_role=role.value,
-                        scope="instance",
-                        tenant_id=tenant,
-                        source_ip=client_ip(request),
-                        request_id=safe_request_id(request),
-                    )
-                )
-
-        if tenant_param not in request.path_params:
-            raise RuntimeError(f"route has no path parameter {tenant_param!r}")
-        requested = parse_tenant_id(request.path_params[tenant_param])
-        tenant = None if requested is None else await runtime.access.get_tenant(requested)
-        if tenant is None or not tenant_roles(principal, tenant):
-            await audit("tenant_not_granted", None if requested is None else str(requested))
-            raise tenant_not_found(request, principal)
-        if role not in instance_roles(principal):
-            await audit("role_missing", str(tenant.id))
-            raise deny(request, principal, role)
-        with runtime.access.tenant_context(tenant.id):
-            yield Authorized(principal, tenant.id)
-
-    return _dependency
 
 
 def guard(
@@ -196,13 +137,10 @@ def guard(
     """
     if role is None:
         auth: Callable[..., object] = get_principal
-    elif instance_only:
-        if tenant_param is None:
-            raise ValueError("instance_only needs a tenant_param")
-        auth = require_instance_role_on_tenant(role, tenant_param=tenant_param)
-        INSTANCE_ONLY.add(auth)
     else:
-        auth = require_role(role, tenant_param=tenant_param)
+        auth = require_role(role, tenant_param=tenant_param, instance_only=instance_only)
+        if instance_only:
+            INSTANCE_ONLY.add(auth)
     GUARDED[auth] = (role, tenant_param)
     return [Depends(get_principal), Depends(_limit(bucket)), Depends(auth)]
 
@@ -265,6 +203,11 @@ def _too_large(limit: int) -> AdminProblem:
 class BoundedRoute(APIRoute):
     """An `APIRoute` that bounds the request body (`AdminRuntime.max_body_bytes`, ADR 0033).
 
+    Only `POST`, `PUT`, `PATCH` and `DELETE` are bounded; a read is passed through. The check
+    runs before authentication (FastAPI reads the body before it resolves dependencies), so an
+    unauthenticated caller gets the 413 or 400 without a rate-limit count or an audit event;
+    that is the price of a memory bound that holds before any work is done.
+
     A `Content-Length` over the limit is a 413 before any byte is read, a malformed one a 400,
     and a body without a length (chunked) is cut off with a 413 when it grows past the limit.
     FastAPI reads the body before the dependencies run, so the bound has to sit here.
@@ -275,6 +218,8 @@ class BoundedRoute(APIRoute):
         original = super().get_route_handler()
 
         async def handler(request: Request) -> Any:  # noqa: ANN401 -- a Starlette response
+            if request.method not in BODY_METHODS:
+                return await original(request)
             runtime = get_admin_runtime(request.app)
             limit = DEFAULT_MAX_BODY_BYTES if runtime is None else runtime.max_body_bytes
             declared = request.headers.get("content-length")
@@ -303,5 +248,4 @@ __all__ = [
     "guard_any_grant",
     "mutations_without_emitter",
     "principal_key",
-    "require_instance_role_on_tenant",
 ]

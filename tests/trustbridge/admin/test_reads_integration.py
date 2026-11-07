@@ -404,7 +404,14 @@ async def test_an_unknown_tenant_is_not_found_and_a_bad_request_is_refused(db: r
     """No row: `tenant_found` is false. An empty or oversized reason or actor is refused."""
     missing = await _set(db, uuid4(), disable=True)
     assert missing.tenant_found is False
-    for kwargs in ({"reason": ""}, {"reason": "x" * 501}, {"by": ""}, {"by": "y" * 256}):
+    controls = ({"reason": "a\nb"}, {"reason": "a\x1b[0m"}, {"by": "u\x7f"}, {"by": "u\x85"})
+    for kwargs in (
+        {"reason": ""},
+        {"reason": "x" * 501},
+        {"by": ""},
+        {"by": "y" * 256},
+        *controls,
+    ):
         with pytest.raises(DBAPIError, match="invalid disable request"):
             await _set(db, db.b, disable=True, **kwargs)
     info = await get_tenant(db.app, db.b)
@@ -448,6 +455,21 @@ def _run_ng6e_migration(sync_conn: Connection, direction: str) -> None:
     spec.loader.exec_module(module)
     with Operations.context(MigrationContext.configure(sync_conn)):
         getattr(module, direction)()
+
+
+async def test_the_downgrade_is_refused_while_a_tenant_is_admin_disabled(db: rls.Db) -> None:
+    """Dropping the columns would silently enable the tenant again on the old release."""
+    await _set(db, db.b, disable=True)
+    try:
+        async with db.admin.connect() as conn:
+            trans = await conn.begin()
+            try:
+                with pytest.raises(DBAPIError, match="cannot downgrade"):
+                    await conn.run_sync(_run_ng6e_migration, "downgrade")
+            finally:
+                await trans.rollback()
+    finally:
+        await _set(db, db.b, disable=False)
 
 
 async def test_the_downgrade_restores_the_old_function_bodies_exactly(db: rls.Db) -> None:
