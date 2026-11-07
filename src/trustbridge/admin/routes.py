@@ -247,6 +247,7 @@ async def get_tenant_route(
 # ---- tenant disable and enable (ADR 0033 "Tenant disable") ---------------------------------
 
 _SET_DISABLED = text("SELECT * FROM tb_set_tenant_disabled(:id, :by, :reason, :disable)")
+_GET_TENANT = text("SELECT * FROM tb_get_tenant(:id)")
 _REASON_MAX = 500
 
 
@@ -322,14 +323,17 @@ async def _set_disabled(  # noqa: PLR0913 - the request, the caller and what to 
                 ),
             )
             await append(session, with_trace(event))
+            # Read in the same transaction, after the write: the response is the committed
+            # state, and a failed read rolls the change back with a `failure` event.
+            fresh = (await session.execute(_GET_TENANT, {"id": tenant_id})).first()
+            if fresh is None:
+                raise AdminProblem(404, "not-found", "Tenant not found")
+            info = TenantInfo(*fresh)
     except AdminProblem:
         raise
     except Exception:
         await _record_failure(request, principal, runtime, tenant_id, action)
         raise
-    info = await get_tenant(factory, tenant_id)
-    if info is None:
-        raise AdminProblem(404, "not-found", "Tenant not found")
     return _tenant_out(info)
 
 

@@ -1,6 +1,6 @@
 """Tenant disable and enable over fakes (ADR 0033 "Tenant disable", invariant 19)."""
 
-from dataclasses import replace
+from dataclasses import astuple, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -57,11 +57,14 @@ class World:
 
         class Session(FakeSession):
             async def execute(self, statement: object, params: dict[str, Any]) -> Any:  # noqa: ANN401
-                del statement
-                world.params.append(params)
+                if "tb_set_tenant_disabled" in str(statement):
+                    world.params.append(params)
                 if world.error is not None:
                     raise world.error
-                return SimpleNamespace(one=lambda: world.row)
+                return SimpleNamespace(
+                    one=lambda: world.row,
+                    first=lambda: None if world.info is None else astuple(world.info),
+                )
 
         return Session
 
@@ -113,12 +116,7 @@ def _client(
         world.events.append(event)
         return event.id
 
-    async def get_tenant(factory: object, tenant_id: UUID) -> TenantInfo | None:
-        del factory, tenant_id
-        return world.info
-
     monkeypatch.setattr(routes, "append", append)
-    monkeypatch.setattr(routes, "get_tenant", get_tenant)
     client = env.client(*roles)
     if not server_errors:
         client = TestClient(

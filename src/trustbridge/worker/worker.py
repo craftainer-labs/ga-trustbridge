@@ -25,9 +25,10 @@ from datetime import timedelta
 from uuid import UUID
 
 from craftainer_observability.health.redact import log_failure
-from sqlalchemy import text
+from sqlalchemy import TextClause, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from trustbridge.adapters.store import OperationKind
 from trustbridge.github.availability import HostMonitor
 from trustbridge.github.handlers import EventContext, HandlerRegistry
 from trustbridge.settings import TrustbridgeSettings
@@ -81,10 +82,10 @@ class SqlTenantGate:
         """Read through `session_factory`."""
         self._sf = session_factory
 
-    async def _flag(self, statement: object, params: dict[str, object]) -> bool:
+    async def _flag(self, statement: TextClause, params: dict[str, object]) -> bool:
         with tenant_context(None):
             async with self._sf() as session, session.begin():
-                return bool((await session.execute(statement, params)).scalar())  # type: ignore[call-overload]
+                return bool((await session.execute(statement, params)).scalar())
 
     async def disabled(self, host: str, installation_id: int) -> bool:
         """True when the tenant of `(host, installation_id)` is admin-disabled."""
@@ -92,7 +93,7 @@ class SqlTenantGate:
             _DISABLED_BY_INSTALLATION, {"host": host, "installation": installation_id}
         )
 
-    async def allows(self, tenant_id: UUID, kind: object) -> bool:
+    async def allows(self, tenant_id: UUID, kind: OperationKind | None) -> bool:
         """True when a new adapter operation of `kind` may start for the tenant."""
         del kind  # NG6h: a deletion's own delete and revoke operations are the exception
         return not await self._flag(_DISABLED_BY_ID, {"id": tenant_id})
