@@ -390,3 +390,22 @@ def test_a_tenants_disable_reason_is_scrubbed_on_read() -> None:
     assert "\x1b" not in shown.admin_disable_reason
     assert "abc123def456" not in shown.admin_disable_reason
     assert TenantOut(**base, admin_disable_reason=None).admin_disable_reason is None
+
+
+def test_a_long_disable_reason_is_shown_up_to_its_500_character_bound() -> None:
+    """The stored bound is 500 characters; the read must not cut it at the 256 default."""
+    reason = "ticket " * 70  # 490 characters
+    shown = TenantOut(
+        id=uuid4(),
+        host="github.com",
+        installation_id=1,
+        org="acme",
+        org_id=2,
+        state="active",
+        admin_disabled_at=when(),
+        admin_disabled_by="u-1",
+        admin_disable_reason=reason,
+        effective_state="disabled",
+        deleting=False,
+    )
+    assert shown.admin_disable_reason == reason

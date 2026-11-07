@@ -93,7 +93,7 @@ class TenantOut(BaseModel):
     @classmethod
     def _scrub_reason(cls, value: str | None) -> str | None:
         """The reason is shown no more openly than it is logged (`scrub_text`, ADR 0032)."""
-        return None if value is None else scrub_text(value)
+        return None if value is None else scrub_text(value, 500)
 
 
 class TenantPage(BaseModel):

@@ -32,8 +32,8 @@ from trustbridge.rbac import Principal, Role, get_principal, require_role
 from trustbridge.rbac.deps import RbacRuntime, client_ip, get_runtime, safe_request_id
 
 Bucket = Literal["read", "mutation", "export"]
-GUARDED: dict[Callable[..., object], tuple[Role | None, str | None]] = {}
-"""Each guard dependency and the `(role, tenant_param)` it requires (`None` role: any caller)."""
+GUARDED: dict[Callable[..., object], tuple[Role | None, str | None, bool]] = {}
+"""Each guard dependency and its `(role, tenant_param, instance_only)` (`None` role: any caller)."""
 
 
 LIMITS: set[Callable[..., object]] = set()
@@ -46,11 +46,7 @@ EMITTERS: dict[Callable[..., object], Action] = {}
 """Each mutating route handler and the audit action it writes (`emits`), ADR 0032 invariant 8."""
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-BODY_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 ADMIN_PREFIX = "/admin/v1"
-
-INSTANCE_ONLY: set[Callable[..., object]] = set()
-"""The guard dependencies built with `instance_only=True` (an instance grant on a tenant route)."""
 
 
 def principal_key(iss: str | None, sub: str) -> str:
@@ -96,20 +92,31 @@ def emits[F: Callable[..., object]](action: Action) -> Callable[[F], F]:
     return mark
 
 
+def _covers_admin(path: str) -> bool:
+    """True when `path` is `/admin/v1`, under it, or a prefix of it (a mount at `/admin`, `""`)."""
+    trimmed = path.rstrip("/")
+    return (
+        trimmed == ADMIN_PREFIX
+        or trimmed.startswith(f"{ADMIN_PREFIX}/")
+        or ADMIN_PREFIX.startswith(f"{trimmed}/")
+    )
+
+
 def mutations_without_emitter(routes: Sequence[BaseRoute]) -> list[str]:
     """`"METHOD path"` of every route under `/admin/v1` that breaks the mutation rules.
 
     A route is mutating when it answers any method outside `SAFE_METHODS`. It needs a handler
-    marked with `emits` and exactly one rate-limit dependency (found by identity in
-    `LIMIT_BUCKETS`, wherever it sits in the list), on the `mutation` bucket. A route under
-    `/admin/v1` that is not an `APIRoute` (a `Mount`, a plain `Route`, a websocket) carries none
-    of the guards and is reported too, as `"* path"`: the walk cannot see inside it.
+    marked with `emits`, a guard dependency from `GUARDED`, and exactly one rate-limit dependency
+    (found by identity in `LIMIT_BUCKETS`, wherever it sits in the list), on the `mutation`
+    bucket. A route that is not an `APIRoute` (a `Mount`, a plain `Route`, a websocket) whose path
+    is `/admin/v1`, under it, or a prefix of it (`/admin`, the root) carries none of the guards
+    and is reported too, as `"* path"`: the walk cannot see inside it.
     """
     bad: list[str] = []
     for route in routes:
         path = getattr(route, "path", "")
         if not isinstance(route, APIRoute):
-            if path == ADMIN_PREFIX or path.startswith(f"{ADMIN_PREFIX}/"):
+            if _covers_admin(path):
                 bad.append(f"* {path}")
             continue
         methods = route.methods or set()
@@ -118,7 +125,8 @@ def mutations_without_emitter(routes: Sequence[BaseRoute]) -> list[str]:
         buckets = [
             LIMIT_BUCKETS[d.call] for d in route.dependant.dependencies if d.call in LIMIT_BUCKETS
         ]
-        if route.endpoint not in EMITTERS or buckets != ["mutation"]:
+        guarded = any(d.call in GUARDED for d in route.dependant.dependencies)
+        if route.endpoint not in EMITTERS or buckets != ["mutation"] or not guarded:
             bad.append(f"{','.join(sorted(methods))} {path}")
     return bad
 
@@ -139,9 +147,7 @@ def guard(
         auth: Callable[..., object] = get_principal
     else:
         auth = require_role(role, tenant_param=tenant_param, instance_only=instance_only)
-        if instance_only:
-            INSTANCE_ONLY.add(auth)
-    GUARDED[auth] = (role, tenant_param)
+    GUARDED[auth] = (role, tenant_param, instance_only)
     return [Depends(get_principal), Depends(_limit(bucket)), Depends(auth)]
 
 
@@ -174,7 +180,7 @@ async def any_grant(
 
 def guard_any_grant(bucket: Bucket = "read") -> list[DependsParam]:
     """Dependencies for a route whose result is filtered by the caller's grants."""
-    GUARDED[any_grant] = (Role.VIEWER, "per-grants")
+    GUARDED[any_grant] = (Role.VIEWER, "per-grants", False)
     return [Depends(get_principal), Depends(_limit(bucket)), Depends(any_grant)]
 
 
@@ -203,7 +209,8 @@ def _too_large(limit: int) -> AdminProblem:
 class BoundedRoute(APIRoute):
     """An `APIRoute` that bounds the request body (`AdminRuntime.max_body_bytes`, ADR 0033).
 
-    Only `POST`, `PUT`, `PATCH` and `DELETE` are bounded; a read is passed through. The check
+    Every method outside `SAFE_METHODS` is bounded (the same rule as the mutation walk); a read
+    is passed through. The check
     runs before authentication (FastAPI reads the body before it resolves dependencies), so an
     unauthenticated caller gets the 413 or 400 without a rate-limit count or an audit event;
     that is the price of a memory bound that holds before any work is done.
@@ -218,7 +225,7 @@ class BoundedRoute(APIRoute):
         original = super().get_route_handler()
 
         async def handler(request: Request) -> Any:  # noqa: ANN401 -- a Starlette response
-            if request.method not in BODY_METHODS:
+            if request.method in SAFE_METHODS:
                 return await original(request)
             runtime = get_admin_runtime(request.app)
             limit = DEFAULT_MAX_BODY_BYTES if runtime is None else runtime.max_body_bytes
@@ -236,7 +243,6 @@ class BoundedRoute(APIRoute):
 __all__ = [
     "EMITTERS",
     "GUARDED",
-    "INSTANCE_ONLY",
     "LIMITS",
     "LIMIT_BUCKETS",
     "SAFE_METHODS",

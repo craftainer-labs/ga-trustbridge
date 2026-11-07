@@ -98,7 +98,6 @@ BEGIN
     IF p_disable THEN
         IF p_by IS NULL OR length(p_by) NOT BETWEEN 1 AND 255
            OR p_reason IS NULL OR length(p_reason) NOT BETWEEN 1 AND 500
-           OR octet_length(p_reason) > 2000
            OR p_by ~ '[\\x01-\\x1f\\x7f-\\x9f]'
            OR p_reason ~ '[\\x01-\\x1f\\x7f-\\x9f]' THEN
             RAISE EXCEPTION 'invalid disable request' USING ERRCODE = '22023';
@@ -225,6 +224,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema; refused while any tenant is admin-disabled."""
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute("SET LOCAL statement_timeout = '120s'")
+    # The lock keeps a concurrent disable out between the check and the column drop.
+    op.execute("LOCK TABLE tenants IN SHARE ROW EXCLUSIVE MODE")
     # The previous release has no admin-disable column, so dropping them would silently enable
     # the tenant again. Enable them (or accept it by clearing the columns) before going back.
     op.execute(
@@ -232,8 +235,6 @@ def downgrade() -> None:
         "RAISE EXCEPTION 'cannot downgrade: tenants are admin-disabled; enable them first' "
         "USING ERRCODE = '55000'; END IF; END $$"
     )
-    op.execute("SET LOCAL lock_timeout = '5s'")
-    op.execute("SET LOCAL statement_timeout = '120s'")
     op.execute(f"DROP FUNCTION IF EXISTS {SET_FUNCTION}")
     op.execute("DROP FUNCTION IF EXISTS tb_get_tenant(uuid)")
     op.execute("DROP FUNCTION IF EXISTS tb_list_tenants()")

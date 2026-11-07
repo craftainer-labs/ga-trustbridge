@@ -74,6 +74,13 @@ def _app(access: FakeAccess | None, *, config: RbacConfig | None = None) -> Fast
         access.events.append("handler")
         return {"tenant": str(auth.tenant_id)}
 
+    @app.get("/t/{tenant_id}/admin")
+    async def t_admin(
+        tenant_id: str,
+        auth: Annotated[Authorized, Depends(require_role(Role.ADMIN, tenant_param="tenant_id"))],
+    ) -> dict[str, Any]:
+        return {"tenant": str(auth.tenant_id)}
+
     @app.get("/t/{tenant_id}/instance-admin")
     async def t_instance_admin(
         tenant_id: str,
@@ -315,3 +322,10 @@ def test_the_default_is_unchanged_and_instance_only_needs_a_parameter() -> None:
     assert client.get(f"/t/{ACME.id}/operator").status_code == 200
     with pytest.raises(ValueError, match="tenant_param"):
         require_role(Role.ADMIN, instance_only=True)
+
+
+def test_a_tenant_scoped_admin_passes_the_default_tenant_guard_on_its_own_tenant() -> None:
+    """Without `instance_only`, the grant that instance-only refuses is accepted on its tenant."""
+    client = _client(_app(FakeAccess([ACME, OTHER])), "trustbridge:github.com:acme:admin")
+    assert client.get(f"/t/{ACME.id}/admin").json() == {"tenant": str(ACME.id)}
+    _problem(client.get(f"/t/{OTHER.id}/admin"), 404)

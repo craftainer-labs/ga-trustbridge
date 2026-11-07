@@ -245,6 +245,66 @@ def test_the_mutation_walk_fails_a_route_under_the_admin_prefix_that_is_not_an_a
     ]
 
 
+def test_the_mutation_walk_fails_a_mount_that_is_a_prefix_of_the_admin_prefix() -> None:
+    """A mount at `/admin` or at the root can serve `/v1` inside it, out of the walk's sight."""
+    inner = [Route("/v1/x", _plain, methods=["POST"])]
+    assert mutations_without_emitter(
+        [Mount("/admin", routes=inner), Mount("", routes=inner), Mount("/adminx", routes=inner)]
+    ) == ["* /admin", "* "]
+
+
+def test_the_mutation_walk_requires_a_guard_dependency() -> None:
+    """The limit and the emitter alone are not enough: an unguarded mutation is reported."""
+    router = APIRouter(prefix="/admin/v1", route_class=BoundedRoute)
+    limit_only = guard(Role.OPERATOR, "mutation")[1]
+
+    @router.post("/unguarded", dependencies=[limit_only])
+    @emits(Action.DELIVERY_REQUEUE)
+    async def unguarded() -> None:
+        return None
+
+    @router.post("/guarded", dependencies=guard(Role.OPERATOR, "mutation"))
+    @emits(Action.DELIVERY_REQUEUE)
+    async def guarded() -> None:
+        return None
+
+    assert mutations_without_emitter(router.routes) == ["POST /admin/v1/unguarded"]
+    assert unguarded in guards.EMITTERS
+    assert guarded in guards.EMITTERS
+
+
+def test_guarded_records_whether_a_guard_is_instance_only() -> None:
+    """The flag is data the route tests can assert on (tenant disable and enable need it)."""
+    (_, _, plain) = guard(Role.ADMIN, "mutation", tenant_param="t")
+    (_, _, instance) = guard(Role.ADMIN, "mutation", tenant_param="t", instance_only=True)
+    assert plain.dependency is not None
+    assert instance.dependency is not None
+    assert guards.GUARDED[plain.dependency][2] is False
+    assert guards.GUARDED[instance.dependency][2] is True
+
+
+def test_an_unusual_method_is_bounded_like_a_mutation() -> None:
+    """Only the safe methods skip the bound; any other verb is cut at the limit."""
+    env = _env()
+    app = env.app
+    extra = APIRouter(prefix="/admin/v1", route_class=BoundedRoute)
+
+    @extra.api_route(
+        "/fixture/link", methods=["LINK"], dependencies=guard(Role.OPERATOR, "mutation")
+    )
+    @emits(Action.DELIVERY_REQUEUE)
+    async def link(body: dict[str, Any]) -> dict[str, Any]:
+        return body
+
+    app.include_router(extra)
+    problem(
+        env.client(OPERATOR).request("LINK", "/admin/v1/fixture/link", json={"a": "x" * 200}),
+        413,
+        "payload-too-large",
+    )
+    assert link in guards.EMITTERS
+
+
 def test_the_mutation_walk_finds_the_limit_by_identity_not_by_position() -> None:
     """The mutation bucket counts wherever it sits; a read bucket or two limits do not."""
     router = APIRouter(prefix="/admin/v1", route_class=BoundedRoute)
