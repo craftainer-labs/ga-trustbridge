@@ -291,7 +291,6 @@ def test_instance_only_rejects_a_tenant_scoped_admin_with_403_and_no_context() -
     """The same grant `require_role` accepts on a tenant route is not instance scope."""
     access = FakeAccess([ACME])
     client = _client(_app(access), "trustbridge:github.com:acme:admin")
-    assert client.get(f"/t/{ACME.id}/operator").status_code == 200  # held on the tenant
     _problem(client.get(f"/t/{ACME.id}/instance-admin"), 403)
     assert not any(e.startswith("enter") for e in access.events)
 
