@@ -247,7 +247,10 @@ async def get_tenant_route(
 # ---- tenant disable and enable (ADR 0033 "Tenant disable") ---------------------------------
 
 _SET_DISABLED = text("SELECT * FROM tb_set_tenant_disabled(:id, :by, :reason, :disable)")
-_GET_TENANT = text("SELECT * FROM tb_get_tenant(:id)")
+_GET_TENANT = text(
+    "SELECT id, host, installation_id, org, org_id, state, admin_disabled_at, deleting, "
+    "admin_disabled_by, admin_disable_reason FROM tb_get_tenant(:id)"
+)
 _REASON_MAX = 500
 
 
