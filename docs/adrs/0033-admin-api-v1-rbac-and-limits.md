@@ -8,8 +8,9 @@ the rest of the read side except `/tenant-deletions`: repositories, adapters, re
 credentials, operations, deliveries, `GET /audit-events/{id}` and the committed OpenAPI snapshot.
 NG6e-1 added the foundation for the mutating routes (the tenant admin-disable columns and
 `tb_set_tenant_disabled`, the instance-only tenant guard, the request body bound and the mutation
-router walk); the routes themselves follow in NG6e-2 to NG6e-5. Still open, so this stays Proposed:
-every mutating route except the deletion ones (NG6e), and the tenant-deletion routes, reads and
+router walk). NG6e-2 added tenant disable and enable with their enforcement in the worker and the
+adapter core; the other routes follow in NG6e-3 to NG6e-5. Still open, so this stays Proposed:
+the other mutating routes (NG6e-3 to NG6e-5), and the tenant-deletion routes, reads and
 writes (`GET /tenant-deletions`, `GET /tenant-deletions/{id}`, `POST /tenants/{t}/deletion`,
 `POST /tenant-deletions/{id}/cancel`, `POST /tenant-deletions/{id}/skip-step`; NG6h, with
 [0034](0034-tenant-data-deletion.md)).

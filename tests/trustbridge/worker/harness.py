@@ -9,7 +9,12 @@ from tests.trustbridge.helpers import as_redis, host, make_monitor, make_setting
 from trustbridge.github.handlers import Handler, HandlerRegistry
 from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.settings import TrustbridgeSettings
-from trustbridge.worker.deliveries import DeliveryKey, InMemoryDeliveryStore, NewDelivery
+from trustbridge.worker.deliveries import (
+    DeliveryKey,
+    InMemoryDeliveryStore,
+    NewDelivery,
+    TenantGate,
+)
 from trustbridge.worker.lease import InMemoryLeaseStore, LeaseManager
 from trustbridge.worker.queue import StreamQueue
 from trustbridge.worker.relay import Relay
@@ -33,6 +38,7 @@ class Harness:
         handlers: Mapping[str, Handler] | None = None,
         hosts: list[GitHubHostConfig] | None = None,
         failing_hosts: set[str] | None = None,
+        gate: TenantGate | None = None,
         **settings_kw: Any,  # noqa: ANN401
     ) -> None:
         """Initialise."""
@@ -69,6 +75,7 @@ class Harness:
                 hosts=self.hosts,
                 registry=self.registry,
                 clock=self.clock,
+                gate=gate,
             ),
             "c1",
         )

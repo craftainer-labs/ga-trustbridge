@@ -141,6 +141,8 @@ class TrustbridgeSettings(Settings):
     retry_backoff_base_seconds: float = Field(default=30.0, gt=0)
     retry_backoff_max_seconds: float = Field(default=1800.0, gt=0)
     busy_retry_seconds: float = Field(default=10.0, gt=0)
+    # A delivery of an admin-disabled tenant is deferred this long and checked again (ADR 0033).
+    disabled_tenant_retry_seconds: float = Field(default=15.0, gt=0)
     worker_block_ms: int = Field(default=5000, gt=0)
     worker_batch_size: int = Field(default=10, gt=0)
     # Pending entries idle at least this long are claimed from a dead consumer.

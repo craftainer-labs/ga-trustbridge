@@ -593,3 +593,11 @@ def backoff_seconds(attempts: int, base: float, cap: float) -> float:
 def retry_at(now: datetime, attempts: int, base: float, cap: float) -> datetime:
     """When a delivery that has failed `attempts` times is retried."""
     return now + timedelta(seconds=backoff_seconds(attempts, base, cap))
+
+
+class TenantGate(Protocol):
+    """Whether a tenant is admin-disabled (ADR 0033 "Tenant disable"); read by the worker."""
+
+    async def disabled(self, host: str, installation_id: int) -> bool:
+        """True when the tenant of `(host, installation_id)` is admin-disabled."""
+        ...

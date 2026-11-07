@@ -446,6 +446,34 @@ async def test_concurrent_upserts_of_an_installation_agree_on_one_tenant_and_it_
             )
 
 
+async def test_the_installation_sync_never_changes_the_admin_disable_columns() -> None:
+    """ADR 0033 invariant 19: upserts and state changes leave the disable columns alone."""
+    tenants = SqlTenants(session_factory, _github_host)
+    host = f"it-{uuid.uuid4().hex[:8]}"
+    tenant_id = await tenants.upsert_installation(host, 5150, "acme", 9)
+    try:
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE tenants SET admin_disabled_at = now(), admin_disabled_by = 'u1', "
+                    "admin_disable_reason = 'hold' WHERE id = :id"
+                ),
+                {"id": tenant_id},
+            )
+        await tenants.upsert_installation(host, 5150, "acme-renamed", 9, suspended=True)
+        await tenants.set_installation_state(host, 5150, "deleted")
+        await tenants.upsert_installation(host, 5150, "acme-again", 9)
+        async with session_factory() as session:
+            row = await session.get(Tenant, tenant_id)
+        assert row is not None
+        assert (row.state, row.org) == ("active", "acme-again")
+        assert row.admin_disabled_at is not None
+        assert (row.admin_disabled_by, row.admin_disable_reason) == ("u1", "hold")
+    finally:
+        async with session_factory() as session, session.begin():
+            await session.execute(delete(Tenant).where(Tenant.host == host))
+
+
 async def test_repository_changes_are_applied_renamed_and_removed() -> None:
     """Repository changes are applied renamed and removed."""
     tenants = SqlTenants(session_factory, _github_host)

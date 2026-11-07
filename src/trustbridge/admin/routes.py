@@ -19,12 +19,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import Response, StreamingResponse
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.admin import queries
 from trustbridge.admin.access import tenants_page
 from trustbridge.admin.cursor import MAX_SEQ, decode_cursor, encode_cursor, invalid_cursor, paginate
-from trustbridge.admin.guards import BoundedRoute, guard, guard_any_grant
+from trustbridge.admin.guards import BoundedRoute, emits, guard, guard_any_grant
 from trustbridge.admin.problems import AdminProblem
 from trustbridge.admin.runtime import AdminRuntime, admin_runtime
 from trustbridge.admin.schemas import (
@@ -34,6 +35,7 @@ from trustbridge.admin.schemas import (
     CredentialPage,
     DeliveryDetailOut,
     DeliveryPage,
+    DisableIn,
     GrantOut,
     HostOut,
     HostPage,
@@ -46,8 +48,19 @@ from trustbridge.admin.schemas import (
     TenantPage,
     TenantRefOut,
 )
-from trustbridge.audit import AuditQuery, Outcome, list_events, record_export
-from trustbridge.audit.store import get_event
+from trustbridge.audit import (
+    Action,
+    ActorType,
+    AuditEvent,
+    AuditQuery,
+    Outcome,
+    list_events,
+    project,
+    record_export,
+    scrub_text,
+)
+from trustbridge.audit.emit import with_trace
+from trustbridge.audit.store import append, get_event
 from trustbridge.rbac import Principal, Role, get_principal, instance_roles
 from trustbridge.rbac.deps import client_ip, safe_request_id
 from trustbridge.tenancy import TenantInfo, get_tenant, tenant_session
@@ -229,6 +242,149 @@ async def get_tenant_route(
     if info is None:
         raise AdminProblem(404, "not-found", "Tenant not found")
     return _tenant_out(info)
+
+
+# ---- tenant disable and enable (ADR 0033 "Tenant disable") ---------------------------------
+
+_SET_DISABLED = text("SELECT * FROM tb_set_tenant_disabled(:id, :by, :reason, :disable)")
+_REASON_MAX = 500
+
+
+def _admin_state(at: datetime | None, by: str | None, reason: str | None) -> dict[str, Any]:
+    """The `before` or `after` of a disable or enable, through the `tenant_admin` allow-list."""
+    return project(
+        "tenant_admin",
+        {"admin_disabled_at": at, "admin_disabled_by": by, "admin_disable_reason": reason},
+    )
+
+
+def _tenant_event(  # noqa: PLR0913 - one value per recorded fact
+    request: Request,
+    principal: Principal,
+    tenant_id: UUID,
+    action: Action,
+    outcome: Outcome,
+    *,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+) -> AuditEvent:
+    return AuditEvent(
+        actor_type=ActorType.USER,
+        actor_sub=principal.sub,
+        actor_iss=principal.iss,
+        tenant_id=tenant_id,
+        action=action,
+        resource_type="tenant",
+        resource_id=str(tenant_id),
+        outcome=outcome,
+        before=before,
+        after=after,
+        source_ip=client_ip(request),
+        request_id=safe_request_id(request),
+    )
+
+
+async def _set_disabled(  # noqa: PLR0913 - the request, the caller and what to do
+    request: Request,
+    principal: Principal,
+    runtime: AdminRuntime,
+    tenant_id: UUID,
+    *,
+    disable: bool,
+    reason: str | None,
+) -> TenantOut:
+    """Disable or enable the tenant and audit it in the same transaction.
+
+    `tb_set_tenant_disabled` is one row-locked write that returns the before and after values;
+    a repeat disable keeps the first time, actor and reason, and a call that changes nothing
+    still writes its `success` event (before equal to after). A failure rolls the change back
+    and leaves a `failure` event in its own transaction.
+    """
+    action = Action.TENANT_DISABLE if disable else Action.TENANT_ENABLE
+    factory = _factory(runtime)
+    params = {"id": tenant_id, "by": principal.sub, "reason": reason or "", "disable": disable}
+    try:
+        async with factory() as session, session.begin():
+            row = (await session.execute(_SET_DISABLED, params)).one()
+            if not row.tenant_found:
+                raise AdminProblem(404, "not-found", "Tenant not found")
+            event = _tenant_event(
+                request,
+                principal,
+                tenant_id,
+                action,
+                Outcome.SUCCESS,
+                before=_admin_state(
+                    row.before_disabled_at, row.before_disabled_by, row.before_disable_reason
+                ),
+                after=_admin_state(
+                    row.after_disabled_at, row.after_disabled_by, row.after_disable_reason
+                ),
+            )
+            await append(session, with_trace(event))
+    except AdminProblem:
+        raise
+    except Exception:
+        await _record_failure(request, principal, runtime, tenant_id, action)
+        raise
+    info = await get_tenant(factory, tenant_id)
+    if info is None:
+        raise AdminProblem(404, "not-found", "Tenant not found")
+    return _tenant_out(info)
+
+
+async def _record_failure(
+    request: Request,
+    principal: Principal,
+    runtime: AdminRuntime,
+    tenant_id: UUID,
+    action: Action,
+) -> None:
+    """Best effort: a `failure` event in its own transaction; never hides the original error."""
+    if runtime.writer is None:
+        return
+    try:
+        await runtime.writer.record(
+            _tenant_event(request, principal, tenant_id, action, Outcome.FAILURE)
+        )
+    except Exception:
+        logger.exception("could not record the failed %s event", action.value)
+
+
+@router.post(
+    "/tenants/{tenant_id}/disable",
+    response_model=TenantOut,
+    dependencies=guard(Role.ADMIN, "mutation", tenant_param="tenant_id", instance_only=True),
+)
+@emits(Action.TENANT_DISABLE)
+async def disable_tenant(
+    tenant_id: UUID,
+    body: DisableIn,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> TenantOut:
+    """Disable a tenant (instance `admin`). Its webhooks are stored but not handled, and no new
+    adapter operation starts; the installation sync does not change this. Idempotent: a tenant
+    that is already disabled keeps its first time, actor and reason."""
+    reason = scrub_text(body.reason, _REASON_MAX)
+    return await _set_disabled(request, principal, runtime, tenant_id, disable=True, reason=reason)
+
+
+@router.post(
+    "/tenants/{tenant_id}/enable",
+    response_model=TenantOut,
+    dependencies=guard(Role.ADMIN, "mutation", tenant_param="tenant_id", instance_only=True),
+)
+@emits(Action.TENANT_ENABLE)
+async def enable_tenant(
+    tenant_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> TenantOut:
+    """Enable a tenant again (instance `admin`). Idempotent: an enabled tenant is a no-op."""
+    return await _set_disabled(request, principal, runtime, tenant_id, disable=False, reason=None)
 
 
 # ---- tenant data: repositories, adapters, resources, credentials, operations ------------------

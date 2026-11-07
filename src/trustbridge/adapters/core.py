@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import NoReturn
+from typing import NoReturn, Protocol
 from uuid import UUID, uuid4, uuid5
 
 from trustbridge.adapters.eligibility import (
@@ -129,6 +129,22 @@ class AdapterRegistry:
         )
 
 
+class TenantDisabledError(Exception):
+    """The tenant is admin-disabled: no new adapter operation starts (ADR 0033 invariant 19)."""
+
+
+class OperationGate(Protocol):
+    """Decides whether a new adapter call may start for a tenant (admin disable, ADR 0033).
+
+    `kind` is the operation about to start (`None` for a refresh or an orphan sweep). NG6h's
+    deletion passes its own delete and revoke operations through a disabled tenant here.
+    """
+
+    async def allows(self, tenant_id: UUID, kind: OperationKind | None) -> bool:
+        """True when the call may start."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class CoreDeps:
     """Everything the core needs from the rest of the application."""
@@ -142,6 +158,7 @@ class CoreDeps:
     tenants: TenantResolver
     clock: Callable[[], datetime] = now_utc_default
     orphans: OrphanObserver | None = None
+    gate: OperationGate | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +299,7 @@ class CredentialCore:
         are in the list and unaccounted for in that later read, so a credential created after
         the list is never touched.
         """
+        await self._admit(tenant.id, None)
         bound = await self._d.registry.open(tenant, adapter)
         key = _ADAPTER_WIDE_KEY if bound.caps.credential_limit else _SWEEP_KEY
         async with self._d.leases.hold(tenant_id=tenant.id, adapter=adapter, key=key):
@@ -399,8 +417,15 @@ class CredentialCore:
         await self._d.store.save(ctx.lease, ctx.stored, op)
         raise AdapterConfigurationError(message)
 
+    async def _admit(self, tenant_id: UUID, kind: OperationKind | None) -> None:
+        """Refuse a new adapter call for a tenant the gate does not admit (admin disable)."""
+        if self._d.gate is not None and not await self._d.gate.allows(tenant_id, kind):
+            msg = f"tenant {tenant_id} is disabled; no new adapter operation starts"
+            raise TenantDisabledError(msg)
+
     async def _refresh(self, ctx: _Ctx, *, offered: bool) -> ScopeResult:
         """Re-run `ensure_credential` for an OIDC or no-credential scope and rewrite its outputs."""
+        await self._admit(ctx.tenant.id, None)
         scope = replace(ctx.scope, oidc_eligible=offered)
         adapter = ctx.bound.adapter
         try:
@@ -430,6 +455,7 @@ class CredentialCore:
 
     # ---- starting an operation ------------------------------------------
     async def _start(self, ctx: _Ctx, kind: OperationKind, *, offered: bool) -> ScopeResult:
+        await self._admit(ctx.tenant.id, kind)
         await self._require_privileged(ctx)
         stored = ctx.stored
         old = stored.state.current

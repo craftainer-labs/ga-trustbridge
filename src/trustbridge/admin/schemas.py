@@ -8,7 +8,8 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from trustbridge.audit.redact import scrub_text
 
@@ -66,6 +67,26 @@ class HostPage(BaseModel):
 
     items: list[HostOut]
     next_cursor: str | None
+
+
+class DisableIn(BaseModel):
+    """The body of `POST /tenants/{t}/disable`: why the tenant is being disabled."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(
+        min_length=1,
+        max_length=500,
+        description="Why (1 to 500 printable characters); stored with secret-shaped parts masked",
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def _printable(cls, value: str) -> str:
+        """Printable text only, and not blank."""
+        if not value.isprintable() or not value.strip():
+            raise PydanticCustomError("printable", "reason must be printable text")
+        return value
 
 
 class TenantOut(BaseModel):
