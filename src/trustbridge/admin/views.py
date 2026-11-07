@@ -10,9 +10,8 @@ through. Free text (`error`, `manual_action`, reference values) goes through the
 from collections.abc import Mapping
 from typing import Any
 
-from trustbridge.audit.redact import scrub_text, truncate
+from trustbridge.audit.redact import has_secret_word, printable, scrub_text, truncate
 
-_SECRET_WORDS = ("token", "password", "passwd", "secret", "authorization", "credential", "key")
 _REF_KEY_MAX = 32
 
 
@@ -25,7 +24,7 @@ def _name(value: object) -> str | None:
     deterministic name embeds the tenant id, which the opaque-run mask would wrongly hide)."""
     if not isinstance(value, str):
         return None
-    return truncate("".join(c if c.isprintable() else " " for c in value))
+    return truncate(printable(value))
 
 
 def _number(value: object) -> int | None:
@@ -44,7 +43,7 @@ def _ref(value: object) -> dict[str, str]:
     for key, item in value.items():
         if not isinstance(key, str) or len(key) > _REF_KEY_MAX or not key.isidentifier():
             continue
-        if any(word in key.lower() for word in _SECRET_WORDS):
+        if has_secret_word(key):
             continue
         shown = _text(item)
         if shown is not None:

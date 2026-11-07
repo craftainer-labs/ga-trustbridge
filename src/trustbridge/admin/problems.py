@@ -12,7 +12,7 @@ bucket (the guard recorded its key). Over the limit the answer becomes a 429.
 import json
 from collections.abc import Awaitable, Callable, Mapping
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -29,6 +29,7 @@ CLASSES: Mapping[int, str] = {
     403: "forbidden",
     404: "not-found",
     409: "conflict",
+    413: "payload-too-large",
     422: "validation",
     429: "rate-limited",
     500: "internal",
@@ -44,8 +45,12 @@ def problem_type(kind: str) -> str:
     return f"{TYPE_PREFIX}{kind}"
 
 
-class AdminProblem(StarletteHTTPException):
-    """An HTTP error of a specific problem class (for example `invalid-cursor`)."""
+class AdminProblem(HTTPException):
+    """An HTTP error of a specific problem class (for example `invalid-cursor`).
+
+    A FastAPI `HTTPException`, so one raised while the request body is read is passed on as is
+    instead of becoming a generic 400.
+    """
 
     def __init__(
         self,

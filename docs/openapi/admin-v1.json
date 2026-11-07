@@ -1175,7 +1175,7 @@
         "type": "object"
       },
       "TenantOut": {
-        "description": "A tenant: one GitHub installation on one host.\n\n`state` is the installation state written by webhook sync; `admin_disabled_at` is the\nseparate admin-disable column (ADR 0033 \"Tenant disable\"); `effective_state` combines them:\n`disabled` when disabled, otherwise `state`. `admin_disabled_by` (the actor's `sub`) and\n`admin_disable_reason` are null until the disable action exists (NG6e adds the columns).",
+        "description": "A tenant: one GitHub installation on one host.\n\n`state` is the installation state written by webhook sync; `admin_disabled_at` is the\nseparate admin-disable column (ADR 0033 \"Tenant disable\"); `effective_state` combines them:\n`disabled` when disabled, otherwise `state`. `admin_disabled_by` (the actor's `sub`) and\n`admin_disable_reason` (scrubbed free text) are set with `admin_disabled_at`, else null.",
         "properties": {
           "admin_disable_reason": {
             "anyOf": [

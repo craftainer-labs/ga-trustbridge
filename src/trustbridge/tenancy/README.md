@@ -45,7 +45,16 @@ yet (release N+1), so the app role behaves as before.
 and `tb_list_tenants` (fixed `search_path = pg_catalog, public`, `EXECUTE` revoked from `PUBLIC` and
 granted to `trustbridge_app` and `trustbridge_owner`), and the inert `tenant_isolation` and
 `owner_all` policies. `tb_delete_tenant` arrives with tenant data deletion (NG6h), and
-`tb_get_tenant(uuid)` (migration `a1c4e8d27b53`, NG6d-2) is its single-row twin with the same columns. `tb_list_tenants` and `tb_get_tenant` get their real `admin_disabled_at` and `deleting` values from NG6e and NG6h.
+`tb_get_tenant(uuid)` (migration `a1c4e8d27b53`, NG6d-2) is its single-row twin with the same columns.
+Migration `b7d3f5a19c68` (NG6e-1) adds the nullable `tenants.admin_disabled_at`, `admin_disabled_by` and
+`admin_disable_reason` columns (a CHECK keeps them all set or all null; `tb_upsert_tenant` and the sync never
+write them), drops and recreates both read functions to return them (a function's row type cannot change
+with `CREATE OR REPLACE`; the readers select named columns, so it is N-1 safe) and adds
+`tb_set_tenant_disabled(id, by, reason, disable)`, a definer function that makes the disable or enable one
+row-locked write and returns the before and after values. A repeat disable keeps the first time, actor and
+reason. `TenantInfo` has the two new fields (defaulted, last). `deleting` stays the constant `false`
+until NG6h, which also adds the refusal to enable a tenant with a non-terminal deletion at the
+`v_deleting` hook in `tb_set_tenant_disabled`.
 
 ## Grants
 

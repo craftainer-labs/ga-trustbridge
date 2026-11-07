@@ -6,8 +6,13 @@ Proposed. G-api answers from the user are recorded below (2026-11-03); none are 
 NG6d-1 (#23) implemented `me`, openapi, hosts, tenants and audit read/export. NG6d-2 implemented
 the rest of the read side except `/tenant-deletions`: repositories, adapters, resources,
 credentials, operations, deliveries, `GET /audit-events/{id}` and the committed OpenAPI snapshot.
-Still open, so this stays Proposed: every mutating route (NG6e) and `GET /tenant-deletions`,
-`GET /tenant-deletions/{id}` (NG6h, with [0034](0034-tenant-data-deletion.md)).
+NG6e-1 added the foundation for the mutating routes (the tenant admin-disable columns and
+`tb_set_tenant_disabled`, the instance-only tenant guard, the request body bound and the mutation
+router walk); the routes themselves follow in NG6e-2 to NG6e-5. Still open, so this stays Proposed:
+every mutating route except the deletion ones (NG6e), and the tenant-deletion routes, reads and
+writes (`GET /tenant-deletions`, `GET /tenant-deletions/{id}`, `POST /tenants/{t}/deletion`,
+`POST /tenant-deletions/{id}/cancel`, `POST /tenant-deletions/{id}/skip-step`; NG6h, with
+[0034](0034-tenant-data-deletion.md)).
 It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
 endpoints) merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (instance layout, the abuse
@@ -130,8 +135,11 @@ callback `/admin/github/registration/callback` already lives under `/admin`. The
 `/crud/vN`, `/audit` and `/mock` mounts are untouched. **Note for NG6g:** NFR-0001 says every
 resource is mounted under an explicit `/vN` prefix; `/admin/v1` carries the version as the
 second segment, so NG6g clarifies NFR-0001 to say "a `/vN` path segment immediately after the
-mount prefix, and no unversioned alias". The fixed `CALLBACK_PATH` is a browser redirect, not
-an API call, and stays unversioned.
+mount prefix, and no unversioned alias". The browser redirect that ends the manifest flow
+is the BFF's route, not trustbridge's: **user decision (NG6e, 2026-11-06):** the BFF receives the
+redirect and forwards `code` and `state` with the user's bearer token to
+`POST /admin/v1/hosts/{host}/registration/complete`, so trustbridge mounts no public callback
+and every admin route is under `/admin/v1`.
 
 ### 3. IdP mapping: Keycloak client roles
 
@@ -234,18 +242,20 @@ Read-only (NG6d):
 | `GET /audit-events`, `GET /audit-events/{id}`, `GET /audit-events/export` (all tenants and null-tenant events) | instance | auditor |
 | `GET /openapi.json` | any | any |
 
-Mutating (NG6e):
+Mutating (NG6e, except the rows marked NG6h, which belong to the deletion item because they need
+the `tenant_deletions` table of 0034):
 
 | Endpoint | Scope | Min role |
 | --- | --- | --- |
 | `POST /deliveries/{host}/{id}/requeue` | instance | operator |
 | `POST /tenants/{t}/reconcile` | tenant | operator |
-| `POST /tenants/{t}/credentials/{id}/rotate` | tenant | operator |
+| `POST /tenants/{t}/credentials/{adapter}/{scope_key}/rotate` (`scope_key` path-encoded and bounded) | tenant | operator |
 | `POST /hosts/{host}/registration` (start the manifest flow) | instance | operator |
+| `POST /hosts/{host}/registration/complete` (the BFF forwards the manifest flow's `code` and `state`; 0030) | instance | operator |
 | `POST /hosts/{host}/registration/manual` (App id, PEM, webhook secret; 0030) | instance | admin |
 | `POST /tenants/{t}/disable`, `POST /tenants/{t}/enable` | instance | admin |
-| `POST /tenants/{t}/deletion` (0034; the tenant must be disabled), `POST /tenant-deletions/{id}/cancel` (before the first destructive step) | instance | admin |
-| `POST /tenant-deletions/{id}/skip-step` (0034, user decision 2) | instance | admin |
+| `POST /tenants/{t}/deletion` (0034; the tenant must be disabled), `POST /tenant-deletions/{id}/cancel` (before the first destructive step) **(NG6h)** | instance | admin |
+| `POST /tenant-deletions/{id}/skip-step` (0034, user decision 2) **(NG6h)** | instance | admin |
 
 Not in v1 by design: any write of adapter connection data (decided), a policies endpoint (no
 policy table exists yet; the UI's "policies" screen needs a separate item and ADR), and any
@@ -396,7 +406,7 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
 12. Adding a route under v1 does not change an existing route's schema, and a breaking change
     exists only under a new version prefix (reviewed against the snapshot diff).
 13. No admin route is reachable at an unversioned path; the router walk finds none outside
-    `/admin/v1` except the fixed registration callback.
+    `/admin/v1`.
 
 **Rate limits**
 
