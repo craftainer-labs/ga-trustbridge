@@ -11,6 +11,7 @@ import httpx
 import pytest
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
+from starlette.routing import Route
 
 from tests.trustbridge.admin.helpers import ACME, OTHER, Env, build, problem, token
 from tests.trustbridge.helpers import make_settings
@@ -226,3 +227,12 @@ def test_denials_are_optional_the_answers_do_not_change() -> None:
     env.app.state.rbac = dataclasses.replace(rbac, denials=None)
     problem(env.client(ACME_ADMIN).post(f"/admin/v1/fixture/tenants/{ACME.id}/disable"), 403)
     problem(env.client(OTHER_ADMIN).post(f"/admin/v1/fixture/tenants/{ACME.id}/disable"), 404)
+
+
+async def _plain(request: Any) -> None:  # noqa: ANN401 -- a Starlette endpoint
+    return None
+
+
+def test_the_mutation_walk_skips_routes_that_are_not_api_routes() -> None:
+    """Only `APIRoute`s carry the guards; a plain mount or route is not this router's."""
+    assert mutations_without_emitter([Route("/plain", _plain, methods=["POST"])]) == []
