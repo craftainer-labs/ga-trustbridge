@@ -259,6 +259,7 @@ def _install_admin(  # noqa: PLR0913 - the collaborators main owns
         writer=writer,
         export_lag_seconds=settings.audit_export_lag_seconds,
         max_body_bytes=settings.admin_max_body_bytes,
+        scheduler=core.scheduler,
         # ADR 0029: only the enabled adapters are imported; a bad name stops the process.
         adapters=AdapterCatalog(load_adapter_classes(settings.adapters_enabled), core.secrets),
     )

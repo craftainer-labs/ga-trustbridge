@@ -267,6 +267,12 @@ class DeliveryDetailOut(DeliveryOut):
     payload: Any | None = None
 
 
+class ReconcileOut(BaseModel):
+    """The answer to `POST /tenants/{t}/reconcile`: the request was recorded (202)."""
+
+    requested: bool
+
+
 class DeliveryPage(BaseModel):
     """A page of deliveries, newest first."""
 

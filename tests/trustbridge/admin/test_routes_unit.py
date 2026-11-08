@@ -388,7 +388,7 @@ def test_no_database_is_a_503_problem() -> None:
 
 
 def test_no_audit_route_writes_or_deletes() -> None:
-    """ADR 0032 inv. 14: no audit route writes; the only POSTs are tenant disable and enable."""
+    """ADR 0032 inv. 14: no audit route writes; the only POSTs are the NG6e mutations."""
     posts = {
         r.path
         for r in routes.router.routes
@@ -397,6 +397,8 @@ def test_no_audit_route_writes_or_deletes() -> None:
     assert posts == {
         "/admin/v1/tenants/{tenant_id}/disable",
         "/admin/v1/tenants/{tenant_id}/enable",
+        "/admin/v1/tenants/{tenant_id}/reconcile",
+        "/admin/v1/deliveries/{host}/{delivery_id}/requeue",
     }
     others = {
         m

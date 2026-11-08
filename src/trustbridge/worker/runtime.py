@@ -71,6 +71,7 @@ class Core:
     queue: StreamQueue | None
     relay: Relay | None
     tenant_gate: SqlTenantGate | None = None
+    scheduler: ReconcileRequests | None = None
 
 
 def session_factory_or_none(
@@ -114,6 +115,7 @@ def build_core(
     else:
         store, lease_store = PgDeliveryStore(session_factory), PgLeaseStore(session_factory)
         registrations = SqlRegistrationStore(session_factory)
+    scheduler = ReconcileRequests(redis)
     host_by_name = {h.name: h for h in settings.github_hosts}
 
     def host_projection(name: str) -> GitHubHost:
@@ -146,7 +148,7 @@ def build_core(
         RuntimeDeps(
             installations=tenants,
             installation_ids=tenants,
-            scheduler=ReconcileRequests(redis),
+            scheduler=scheduler,
             registrations=registrations,
             on_ready=readd if readd_on_ready else None,
             checker=checker,
@@ -167,6 +169,7 @@ def build_core(
         queue=queue,
         relay=relay,
         tenant_gate=None if session_factory is None else SqlTenantGate(session_factory),
+        scheduler=scheduler,
     )
 
 
