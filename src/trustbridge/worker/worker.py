@@ -22,14 +22,25 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
+from uuid import UUID
 
 from craftainer_observability.health.redact import log_failure
+from sqlalchemy import TextClause, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from trustbridge.adapters.store import OperationKind
 from trustbridge.github.availability import HostMonitor
 from trustbridge.github.handlers import EventContext, HandlerRegistry
 from trustbridge.settings import TrustbridgeSettings
+from trustbridge.tenancy.context import tenant_context
 from trustbridge.worker import metrics
-from trustbridge.worker.deliveries import PENDING, DeliveryRecord, DeliveryStore, retry_at
+from trustbridge.worker.deliveries import (
+    PENDING,
+    DeliveryRecord,
+    DeliveryStore,
+    TenantGate,
+    retry_at,
+)
 from trustbridge.worker.lease import LeaseBusy
 from trustbridge.worker.queue import StreamEntry, StreamQueue
 from trustbridge.worker.relay import Clock, Relay, utcnow
@@ -48,6 +59,48 @@ class WorkerDeps:
     hosts: HostMonitor
     registry: HandlerRegistry
     clock: Clock = utcnow
+    gate: TenantGate | None = None
+
+
+_DISABLED_BY_INSTALLATION = text(
+    "SELECT admin_disabled_at IS NOT NULL "
+    "FROM tb_get_tenant(tb_resolve_tenant(CAST(:host AS text), CAST(:installation AS bigint)))"
+)
+_DISABLED_BY_ID = text("SELECT admin_disabled_at IS NOT NULL FROM tb_get_tenant(CAST(:id AS uuid))")
+
+
+class SqlTenantGate:
+    """`TenantGate` (and the adapter core's `OperationGate`) over the definer functions.
+
+    One short read per call, in no tenant context (`tb_get_tenant` and `tb_resolve_tenant` are
+    the unscoped paths to `tenants`, ADR 0031). An unknown tenant is not disabled. Whether a
+    deletion's own delete and revoke operations pass a disabled tenant is NG6h's: it replaces
+    the `kind` test in `allows` (ADR 0033 "Tenant disable").
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        """Read through `session_factory`."""
+        self._sf = session_factory
+
+    async def _flag(self, statement: TextClause, params: dict[str, object]) -> bool:
+        with tenant_context(None):
+            async with self._sf() as session, session.begin():
+                return bool((await session.execute(statement, params)).scalar())
+
+    async def disabled(self, host: str, installation_id: int) -> bool:
+        """True when the tenant of `(host, installation_id)` is admin-disabled."""
+        return await self._flag(
+            _DISABLED_BY_INSTALLATION, {"host": host, "installation": installation_id}
+        )
+
+    async def allows(self, tenant_id: UUID, kind: OperationKind | None) -> bool:
+        """True when a new adapter operation of `kind` may start for the tenant."""
+        del kind  # NG6h: a deletion's own delete and revoke operations are the exception
+        return not await self._flag(_DISABLED_BY_ID, {"id": tenant_id})
+
+
+class TenantDisabled(Exception):  # noqa: N818 -- a control-flow signal, not a failure
+    """The delivery's tenant is admin-disabled: it is deferred and no failure is counted."""
 
 
 class Worker:
@@ -123,6 +176,12 @@ class Worker:
         except LeaseBusy:
             await store.defer(row.key, now + timedelta(seconds=self._s.busy_retry_seconds))
             await queue.ack(entry.entry_id)
+        except TenantDisabled:
+            # Stored and acknowledged, not handled: checked again after the retry delay, so
+            # `enable` makes it deliverable again (ADR 0033 invariant 19).
+            retry = now + timedelta(seconds=self._s.disabled_tenant_retry_seconds)
+            await store.defer(row.key, retry)
+            await queue.ack(entry.entry_id)
         except Exception as exc:
             log_failure(logger, "delivery handler failed", exc)
             error = f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
@@ -166,6 +225,7 @@ class Worker:
         payload = json.loads(row.body)
         if not isinstance(payload, dict):
             raise TypeError("webhook payload is not a JSON object")
+        await self._ensure_enabled(row.host, payload)
         action = payload.get("action")
         await self._d.registry.dispatch(
             EventContext(
@@ -176,3 +236,12 @@ class Worker:
                 payload=payload,
             )
         )
+
+    async def _ensure_enabled(self, host: str, payload: dict[str, object]) -> None:
+        """Raise `TenantDisabled` when the payload's installation belongs to a disabled tenant."""
+        installation = payload.get("installation")
+        installation_id = installation.get("id") if isinstance(installation, dict) else None
+        if self._d.gate is None or type(installation_id) is not int:
+            return
+        if await self._d.gate.disabled(host, installation_id):
+            raise TenantDisabled

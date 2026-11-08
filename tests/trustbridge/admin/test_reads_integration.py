@@ -24,11 +24,13 @@ from sqlalchemy.exc import DBAPIError
 
 from tests.trustbridge.admin.helpers import build, token
 from tests.trustbridge.tenancy import test_rls_integration as rls
+from trustbridge.adapters.store import OperationKind
 from trustbridge.admin.access import SqlTenantAccess, tenants_page
 from trustbridge.audit import Action, ActorType, AuditEvent, AuditWriter, Outcome
 from trustbridge.audit.store import get_event
 from trustbridge.rbac import Grant, Principal, Role
 from trustbridge.tenancy import get_tenant, install_tenant_hook, list_tenants, tenant_context
+from trustbridge.worker.worker import SqlTenantGate
 
 pytestmark = pytest.mark.integration
 
@@ -507,3 +509,77 @@ async def test_the_downgrade_restores_the_old_function_bodies_exactly(db: rls.Db
             assert "admin_disabled_by" in rows["tb_list_tenants"].result
         finally:
             await trans.rollback()
+
+
+async def test_the_disable_and_enable_routes_write_the_columns_and_the_event_together(
+    db: rls.Db,
+) -> None:
+    """Through the real stack with row-level security: the change and its audit rows."""
+    path = f"/admin/v1/tenants/{db.a}"
+    secret = "canary-secret-7f3a9c1e"  # noqa: S105 -- a planted canary
+    try:
+        async with _client(db, "trustbridge:admin", sub="admin-1") as client:
+            first = await client.post(f"{path}/disable", json={"reason": f"hold token={secret}"})
+            assert first.status_code == 200, first.text
+            body = first.json()
+            assert body["effective_state"] == "disabled"
+            assert body["admin_disabled_by"] == "admin-1"
+            assert secret not in first.text
+            again = await client.post(f"{path}/disable", json={"reason": "second"})
+            assert again.json()["admin_disabled_at"] == body["admin_disabled_at"]
+            assert again.json()["admin_disable_reason"] == body["admin_disable_reason"]
+            enabled = await client.post(f"{path}/enable")
+            assert enabled.json()["admin_disabled_at"] is None
+            assert (await client.post(f"{path}/enable")).status_code == 200
+        rows = await _admin(
+            db,
+            "SELECT action, outcome, actor_sub, before, after FROM audit_events "
+            "WHERE resource_id = :t AND action IN ('tenant.disable', 'tenant.enable') "
+            "ORDER BY seq",
+            t=str(db.a),
+        )
+        assert [(r.action, r.outcome) for r in rows] == [
+            ("tenant.disable", "success"),
+            ("tenant.disable", "success"),
+            ("tenant.enable", "success"),
+            ("tenant.enable", "success"),
+        ]
+        assert {r.actor_sub for r in rows} == {"admin-1"}
+        assert rows[1].before == rows[1].after  # the repeat changed nothing
+        assert rows[3].before == rows[3].after
+        assert rows[0].before["admin_disabled_at"] is None
+        assert rows[0].after["admin_disabled_by"] == "admin-1"
+        assert secret not in repr([tuple(r) for r in rows])
+    finally:
+        await _set(db, db.a, disable=False)
+
+
+async def test_a_tenant_scoped_admin_cannot_disable_through_the_stack(db: rls.Db) -> None:
+    """403 for an `admin` on the tenant itself, 404 on another tenant; nothing changes."""
+    async with _client(db, "trustbridge:tb.test:a:admin") as client:
+        assert (
+            await client.post(f"/admin/v1/tenants/{db.a}/disable", json={"reason": "x"})
+        ).status_code == 403
+        assert (
+            await client.post(f"/admin/v1/tenants/{db.b}/disable", json={"reason": "x"})
+        ).status_code == 404
+    info = await get_tenant(db.app, db.a)
+    assert info is not None
+    assert info.admin_disabled_at is None
+
+
+async def test_the_sql_tenant_gate_follows_the_disable_flag(db: rls.Db) -> None:
+    """By installation for the worker, by tenant id for the adapter core."""
+    gate = SqlTenantGate(db.app)
+    try:
+        assert await gate.disabled(HOST, 1) is False
+        await _set(db, db.a, disable=True)
+        assert await gate.disabled(HOST, 1) is True
+        assert await gate.disabled(HOST, 2) is False
+        assert await gate.disabled(HOST, 999_999) is False
+        assert await gate.allows(db.a, OperationKind.ISSUE) is False
+        assert await gate.allows(db.b, None) is True
+    finally:
+        await _set(db, db.a, disable=False)
+    assert await gate.disabled(HOST, 1) is False
+    assert await gate.allows(db.a, None) is True

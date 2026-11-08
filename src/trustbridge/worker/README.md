@@ -60,6 +60,7 @@ effective defaults are logged at startup.
 | `MAX_DELIVERY_ATTEMPTS` | 8 | Handler failures before the dead letter, and the stream delivery count that dead-letters a delivery that keeps ending the worker. |
 | `RETRY_BACKOFF_BASE_SECONDS` / `_MAX_SECONDS` | 30 / 1800 | Retry delay `base * 2^(failures-1)`, capped. With 8 attempts a delivery is retried for about an hour (30, 60, 120, 240, 480, 960, 1800 s) before it is dead-lettered; a longer platform outage needs a requeue. |
 | `BUSY_RETRY_SECONDS` | 10 | Delay after a busy lease (not a failure). |
+| `DISABLED_TENANT_RETRY_SECONDS` | 15 | Delay before a disabled tenant's delivery is checked again (not a failure). |
 | `STREAM_CLAIM_IDLE_SECONDS` | 120 | A pending entry idle this long is claimed from a dead consumer. Keep it above the longest handler run (the lease TTL). |
 | `LEASE_TTL_SECONDS` / `ADAPTER_CALL_TIMEOUT_SECONDS` | 120 / 30 | The timeout must be shorter than the TTL (validated). |
 | `BODY_RETENTION_PROCESSED_DAYS` / `_DEAD_DAYS` / `DELIVERY_ID_RETENTION_DAYS` | 7 / 30 / 30 | Bodies are purged after these; the row stays until the id retention elapses. |
@@ -84,7 +85,9 @@ effective defaults are logged at startup.
   cloud secret manager implement the same four methods (`read`, `write`, `delete`,
   `list_refs`) in `secrets.py`'s place.
 - `worker.py`: handlers (registered in the `HandlerRegistry`) must be idempotent; raise `LeaseBusy` for a taken lease (no failure is
-  counted), any other exception is a counted failure.
+  counted), any other exception is a counted failure. A delivery whose payload names an installation
+  of an admin-disabled tenant is deferred by `DISABLED_TENANT_RETRY_SECONDS` (default 15) and
+  acknowledged, without a counted failure (`TenantDisabled`, `SqlTenantGate`; ADR 0033).
 - Migrations: bump the schema-compatibility integer in every revision with
   `INSERT INTO schema_compat (id, version) VALUES (1, N) ON CONFLICT (id) DO UPDATE SET version =
   GREATEST(schema_compat.version, N)` and raise `REQUIRED_SCHEMA_VERSION` in `schema.py` when the

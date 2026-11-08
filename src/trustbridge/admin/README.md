@@ -82,7 +82,7 @@ worker's: an api without it answers with an empty list, not "unknown".
 **Tenants.** `/tenants` filters by grant and pages in the database. `/me` lists the first 200 tenants
 the grants reach (by id) and sets `tenants_truncated` to true when more exist; use `/tenants` to
 page through all of them. `TenantOut` has `admin_disabled_by`
-and `admin_disable_reason`, set with `admin_disabled_at` by the disable action (NG6e-2) and `null`
+and `admin_disable_reason`, set with `admin_disabled_at` by the disable action and `null`
 otherwise; `tb_list_tenants()` and `tb_get_tenant()` return the stored values.
 
 **The OpenAPI snapshot** `docs/openapi/admin-v1.json` is what `/openapi.json` serves. After any
@@ -110,6 +110,42 @@ were added or removed in between.
 `AdminRuntime.export_page_size` rows, only events older than `AUDIT_EXPORT_LAG_SECONDS`. After
 the stream (or when it dies) the route writes the `audit.export` event (`audit/README.md`). An
 error after the first byte cannot change the status; the event then says `complete: false`.
+
+## Tenant disable and enable (NG6e-2)
+
+| Route | Min role / scope | Body |
+| --- | --- | --- |
+| `POST /tenants/{t}/disable` | `admin`, instance scope (`instance_only`) | `{"reason": "..."}` |
+| `POST /tenants/{t}/enable` | `admin`, instance scope (`instance_only`) | none |
+
+Both answer 200 with the `TenantOut`. They call `tb_set_tenant_disabled` and append one
+`tenant.disable` or `tenant.enable` event in the same transaction (`before` and `after` are the
+`tenant_admin` shape). Both are idempotent and a call that changes nothing still writes its
+`success` event, with `before` equal to `after`; a repeat disable keeps the first time, actor and
+reason. `reason` is required, 1 to 500 printable characters, and is stored with secret-shaped
+parts masked (`scrub_text`), so it never comes back verbatim. A failure rolls back and leaves a
+`failure` event in its own transaction. A tenant-scoped `admin` gets 403 and a tenant the caller
+has no grant on 404. Enabling a tenant with a non-terminal deletion (409) is NG6h's: the hook is
+`v_deleting` in `tb_set_tenant_disabled`.
+
+What a disabled tenant means (ADR 0033 invariant 19), enforced in the worker and the adapter
+core, not here:
+
+- **Webhooks** are stored and acknowledged but not handled. The worker looks the tenant up by the
+  payload's installation id (`SqlTenantGate`) and, for a disabled one, defers the delivery by
+  `DISABLED_TENANT_RETRY_SECONDS` (default 15) without counting a failure. The next pass after
+  `enable` handles it, so `enable` takes effect within that delay.
+- **Adapter operations**: `CredentialCore` asks `CoreDeps.gate` (`OperationGate.allows`) before
+  it starts an operation, refreshes a scope or sweeps orphans, and raises `TenantDisabledError`
+  for a disabled tenant. An operation already in flight is resumed and finishes. The gate is
+  given the operation kind so NG6h can let a deletion's own delete and revoke operations
+  through. Nothing builds a `CredentialCore` yet (NG6e-5 does, in the api); it is wired there
+  with `SqlTenantGate`.
+- The installation sync (`_sync`, `SqlTenants.upsert_installation`) never writes the columns.
+
+**N-1 gap.** A pod of the release before this one does not know the columns: while a rolling
+deploy mixes versions, an old worker still handles a disabled tenant's webhooks. Disable and
+enable are complete once every worker runs this release.
 
 ## Problem types
 
@@ -147,8 +183,8 @@ not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_
 
 - `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
   (ADR 0034); NG6h.
-- Every `POST` (NG6e-2 to NG6e-5), except the tenant-deletion ones (NG6h). The columns, the
-  instance-only tenant guard and the body bound they need exist (NG6e-1).
+- Every other `POST` (NG6e-3 to NG6e-5: requeue, reconcile, rotate, host registration), and the
+  tenant-deletion ones (NG6h).
 - The `transaction_timeout` / `AUDIT_EXPORT_LAG_SECONDS` startup check: NG6h.
 - ADR 0033 stays Proposed until the mutating routes (NG6e) and the deletion reads (NG6h) exist.
 

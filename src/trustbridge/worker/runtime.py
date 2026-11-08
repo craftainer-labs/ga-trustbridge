@@ -48,7 +48,7 @@ from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
 from trustbridge.worker.relay import Relay
 from trustbridge.worker.schema import SchemaGate, SchemaWaitTimeout
 from trustbridge.worker.secrets import LocalSecrets, MemorySecrets
-from trustbridge.worker.worker import Worker, WorkerDeps
+from trustbridge.worker.worker import SqlTenantGate, Worker, WorkerDeps
 
 logger = logging.getLogger(__name__)
 ProcessKind = Literal["worker", "reconciler"]
@@ -70,6 +70,7 @@ class Core:
     runtime: HostRuntime
     queue: StreamQueue | None
     relay: Relay | None
+    tenant_gate: SqlTenantGate | None = None
 
 
 def session_factory_or_none(
@@ -165,6 +166,7 @@ def build_core(
         runtime=runtime,
         queue=queue,
         relay=relay,
+        tenant_gate=None if session_factory is None else SqlTenantGate(session_factory),
     )
 
 
@@ -243,6 +245,7 @@ async def run_process(
                     relay=core.relay,
                     hosts=monitor,
                     registry=core.runtime.registry,
+                    gate=core.tenant_gate,
                 )
                 await Worker(settings, deps, consumer_name()).run(stop)
             else:

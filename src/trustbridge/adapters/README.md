@@ -40,6 +40,9 @@ is a separate package under `adapters/<name>/` (NG5) that registers itself in th
 - `github_outputs` is a pure function of `(scope, credential)`.
 - No secret in a `Change.detail`, an exception message or a log line.
 - This package must not import `trustbridge.github`; the GitHub core imports it.
+- `CoreDeps.gate` (an `OperationGate`) refuses a new operation, a refresh and an orphan sweep for an
+  admin-disabled tenant with `TenantDisabledError`; an operation already in flight still resumes
+  (ADR 0033 invariant 19).
 
 ## Rotation when a scope switches kind (settles ADR 0029's open issue)
 

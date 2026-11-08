@@ -709,6 +709,24 @@
         "title": "DeliveryPage",
         "type": "object"
       },
+      "DisableIn": {
+        "additionalProperties": false,
+        "description": "The body of `POST /tenants/{t}/disable`: why the tenant is being disabled.",
+        "properties": {
+          "reason": {
+            "description": "Why (1 to 500 printable characters); stored with secret-shaped parts masked",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "DisableIn",
+        "type": "object"
+      },
       "GrantOut": {
         "description": "One role grant of the caller.",
         "properties": {
@@ -3551,6 +3569,208 @@
           }
         ],
         "summary": "List Credentials"
+      }
+    },
+    "/admin/v1/tenants/{tenant_id}/disable": {
+      "post": {
+        "description": "Disable a tenant (instance `admin`). Its webhooks are stored but not handled, and no new\nadapter operation starts; the installation sync does not change this. Idempotent: a tenant\nthat is already disabled keeps its first time, actor and reason.",
+        "operationId": "disable_tenant_admin_v1_tenants__tenant_id__disable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DisableIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Disable Tenant"
+      }
+    },
+    "/admin/v1/tenants/{tenant_id}/enable": {
+      "post": {
+        "description": "Enable a tenant again (instance `admin`). Idempotent: an enabled tenant is a no-op.",
+        "operationId": "enable_tenant_admin_v1_tenants__tenant_id__enable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Enable Tenant"
       }
     },
     "/admin/v1/tenants/{tenant_id}/operations": {

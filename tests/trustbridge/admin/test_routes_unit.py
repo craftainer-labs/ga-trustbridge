@@ -388,11 +388,24 @@ def test_no_database_is_a_503_problem() -> None:
 
 
 def test_no_audit_route_writes_or_deletes() -> None:
-    """ADR 0032 inv. 14: the admin API has only GET routes."""
-    methods = {
-        m for r in routes.router.routes if isinstance(r, APIRoute) for m in (r.methods or set())
+    """ADR 0032 inv. 14: no audit route writes; the only POSTs are tenant disable and enable."""
+    posts = {
+        r.path
+        for r in routes.router.routes
+        if isinstance(r, APIRoute) and "POST" in (r.methods or set())
     }
-    assert methods == {"GET"}
+    assert posts == {
+        "/admin/v1/tenants/{tenant_id}/disable",
+        "/admin/v1/tenants/{tenant_id}/enable",
+    }
+    others = {
+        m
+        for r in routes.router.routes
+        if isinstance(r, APIRoute)
+        for m in (r.methods or set())
+        if m != "POST"
+    }
+    assert others == {"GET"}
     env = build()
     for method in ("POST", "PUT", "PATCH", "DELETE"):
         assert env.client(AUDITOR).request(method, "/admin/v1/audit-events").status_code in {
