@@ -8,7 +8,7 @@ handlers only read.
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -362,20 +362,28 @@ async def _set_disabled(  # noqa: PLR0913 - the request, the caller and what to 
     except AdminProblem:
         raise
     except Exception:
-        failure = _tenant_event(request, principal, tenant_id, action, Outcome.FAILURE)
-        await _record_failure(runtime, failure)
+        await _record_failure(
+            runtime,
+            action,
+            lambda: _tenant_event(request, principal, tenant_id, action, Outcome.FAILURE),
+        )
         raise
     return _tenant_out(info)
 
 
-async def _record_failure(runtime: AdminRuntime, event: AuditEvent) -> None:
-    """Best effort: a `failure` event in its own transaction; never hides the original error."""
+async def _record_failure(
+    runtime: AdminRuntime, action: Action, build: Callable[[], AuditEvent]
+) -> None:
+    """Best effort: a `failure` event in its own transaction; never hides the original error.
+
+    The event is built inside the guard too, so a failure to build it cannot mask the cause.
+    """
     if runtime.writer is None:
         return
     try:
-        await runtime.writer.record(event)
+        await runtime.writer.record(build())
     except Exception:
-        logger.exception("could not record the failed %s event", event.action.value)
+        logger.exception("could not record the failed %s event", action.value)
 
 
 @router.post(
@@ -468,16 +476,19 @@ async def requeue_delivery(
     except AdminProblem:
         raise
     except Exception:
-        failure = _event(
-            request,
-            principal,
+        await _record_failure(
+            runtime,
             Action.DELIVERY_REQUEUE,
-            Outcome.FAILURE,
-            tenant_id=None,
-            resource_type="delivery",
-            resource_id=resource_id,
+            lambda: _event(
+                request,
+                principal,
+                Action.DELIVERY_REQUEUE,
+                Outcome.FAILURE,
+                tenant_id=None,
+                resource_type="delivery",
+                resource_id=resource_id,
+            ),
         )
-        await _record_failure(runtime, failure)
         raise
     if found is None:  # the row was locked a moment ago: unreachable
         raise AdminProblem(404, "not-found", "Delivery not found")
@@ -521,10 +532,13 @@ async def reconcile_tenant(
     except AdminProblem:
         raise
     except Exception:
-        failure = _tenant_event(
-            request, principal, tenant_id, Action.TENANT_RECONCILE, Outcome.FAILURE
+        await _record_failure(
+            runtime,
+            Action.TENANT_RECONCILE,
+            lambda: _tenant_event(
+                request, principal, tenant_id, Action.TENANT_RECONCILE, Outcome.FAILURE
+            ),
         )
-        await _record_failure(runtime, failure)
         raise
     return ReconcileOut(requested=True)
 
