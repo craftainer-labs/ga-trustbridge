@@ -42,7 +42,7 @@ class MaskManifestCode(logging.Filter):
         return True
 
 
-def _mask_manifest_codes() -> None:
+def mask_manifest_codes() -> None:
     """Attach `MaskManifestCode` to the HTTP client loggers, once (no global config change)."""
     for name in ("httpx2", "httpx"):
         target = logging.getLogger(name)
@@ -50,7 +50,7 @@ def _mask_manifest_codes() -> None:
             target.addFilter(MaskManifestCode())
 
 
-_mask_manifest_codes()
+mask_manifest_codes()
 HTTP_NOT_FOUND = 404
 HTTP_UNPROCESSABLE = 422
 _RATE_LIMITED = frozenset({403, 429})

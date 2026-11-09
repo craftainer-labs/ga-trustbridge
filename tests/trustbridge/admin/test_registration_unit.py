@@ -31,7 +31,12 @@ from trustbridge.admin.registration import (
 from trustbridge.admin.schemas import ManualIn
 from trustbridge.audit import Action, AuditEvent, AuditWriter, Outcome
 from trustbridge.github.availability import HostState
-from trustbridge.github.client import GitHubApi, GitHubRequester, MaskManifestCode
+from trustbridge.github.client import (
+    GitHubApi,
+    GitHubRequester,
+    MaskManifestCode,
+    mask_manifest_codes,
+)
 from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.manifest import AppKind, ManifestFlow, ManifestFlowError, StartRequest
 from trustbridge.main import _registration_runtime
@@ -607,6 +612,7 @@ def test_the_http_clients_request_log_hides_the_manifest_code() -> None:
     plain = logging.LogRecord("httpx2", logging.INFO, __file__, 1, "other %s", ("x",), None)
     assert mask.filter(plain) is True
     assert plain.getMessage() == "other x"
+    mask_manifest_codes()  # attaching again adds nothing
     for name in ("httpx2", "httpx"):
         filters = logging.getLogger(name).filters
         assert sum(isinstance(f, MaskManifestCode) for f in filters) == 1
