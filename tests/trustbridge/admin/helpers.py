@@ -145,6 +145,7 @@ def build(  # noqa: PLR0913 - every collaborator is optional
     access: Any = None,  # noqa: ANN401
     denials: Any = None,  # noqa: ANN401
     export_page_size: int = 2,
+    scheduler: Any = None,  # noqa: ANN401
     **settings_overrides: Any,  # noqa: ANN401
 ) -> Env:
     """The admin router under the template's problem handlers, wired like `main` wires it."""
@@ -164,6 +165,7 @@ def build(  # noqa: PLR0913 - every collaborator is optional
         writer=writer,
         export_lag_seconds=0.5,
         export_page_size=export_page_size,
+        scheduler=scheduler,
     )
     app.state.admin = runtime
 

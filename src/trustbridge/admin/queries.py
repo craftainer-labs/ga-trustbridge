@@ -9,6 +9,7 @@ set (row-level security). Statements are constants; only bound parameters vary.
 
 import json
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from trustbridge.admin import views
 from trustbridge.admin.cursor import decode_cursor, encode_cursor, invalid_cursor
+from trustbridge.admin.problems import AdminProblem
 from trustbridge.admin.schemas import (
     CredentialOut,
     DeliveryDetailOut,
@@ -67,6 +69,17 @@ _DELIVERIES = text(
 _DELIVERY = text(
     f"SELECT {_DELIVERY_COLUMNS}, CASE WHEN CAST(:with_body AS boolean) THEN body END AS body "  # noqa: S608 -- constants only
     "FROM webhook_deliveries WHERE host = :host AND delivery_id = :delivery_id"
+)
+_LOCK_DELIVERY = text(
+    "SELECT status, attempts, dead_at, last_error, body IS NOT NULL AS has_body "
+    "FROM webhook_deliveries WHERE host = :host AND delivery_id = :delivery_id FOR UPDATE"
+)
+# The same values `PgDeliveryStore.requeue` sets, here in the caller's transaction so the audit
+# event commits with the change.
+_REQUEUE = text(
+    "UPDATE webhook_deliveries SET status = 'pending', attempts = 0, dead_at = NULL, "
+    "last_error = NULL, next_attempt_at = NULL, last_relayed_at = NULL "
+    "WHERE host = :host AND delivery_id = :delivery_id"
 )
 _EPOCH_ID = UUID(int=0)
 
@@ -281,3 +294,39 @@ async def delivery(
     body = values.pop("body")
     payload = _payload(body) if with_payload else None
     return DeliveryDetailOut(**_delivery_values(values), payload=payload)
+
+
+@dataclass(frozen=True, slots=True)
+class Requeue:
+    """What `requeue_delivery` found and did; `before` and `after` feed the audit event."""
+
+    before: dict[str, Any]
+    after: dict[str, Any]
+    changed: bool
+
+
+async def requeue_delivery(session: AsyncSession, host: str, delivery_id: str) -> Requeue | None:
+    """Make a dead delivery deliverable again, in the caller's transaction; None if unknown.
+
+    The row is locked first. A dead delivery whose body still exists is reset (status
+    `pending`, no attempts, no error) and the relay or the periodic sweep picks it up. A pending
+    one is already deliverable: nothing changes. A processed one, or one whose body was purged
+    (nothing left to handle), is a 409.
+    """
+    params = {"host": host, "delivery_id": delivery_id}
+    row = (await session.execute(_LOCK_DELIVERY, params)).mappings().first()
+    if row is None:
+        return None
+    before = {
+        "status": row["status"],
+        "attempts": row["attempts"],
+        "dead_at": row["dead_at"],
+        "last_error": row["last_error"],
+    }
+    if row["status"] == "pending":
+        return Requeue(before, before, changed=False)
+    if row["status"] != "dead" or not row["has_body"]:
+        raise AdminProblem(409, "conflict", "Only a dead delivery with its body can be requeued")
+    await session.execute(_REQUEUE, params)
+    after = {"status": "pending", "attempts": 0, "dead_at": None, "last_error": None}
+    return Requeue(before, after, changed=True)

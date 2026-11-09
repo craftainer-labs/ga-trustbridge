@@ -350,3 +350,70 @@ async def test_a_missing_or_non_json_body_is_a_null_payload(body: bytes | None) 
 async def test_an_unknown_delivery_is_none() -> None:
     """No row, no delivery."""
     assert await queries.delivery(Session([]), "github.com", "x", with_payload=True) is None  # type: ignore[arg-type]
+
+
+# ---- requeue (NG6e-3) --------------------------------------------------------------------
+
+
+class Script:
+    """A session that answers the lock query from one row and records every statement."""
+
+    def __init__(self, row: dict[str, Any] | None) -> None:
+        """Serve `row` for the lock query."""
+        self.row = row
+        self.statements: list[str] = []
+
+    async def execute(self, statement: Any, params: dict[str, Any]) -> Rows:  # noqa: ANN401
+        """Record the statement text and answer."""
+        del params
+        self.statements.append(str(statement))
+        return Rows([self.row] if self.row is not None else [])
+
+
+def _row(status: str, *, has_body: bool = True) -> dict[str, Any]:
+    return {
+        "status": status,
+        "attempts": 8,
+        "dead_at": NOW,
+        "last_error": "boom",
+        "has_body": has_body,
+    }
+
+
+async def test_requeue_resets_a_dead_delivery_with_a_body() -> None:
+    """Locked, then updated; before is the dead state and after the reset one."""
+    session = Script(_row("dead"))
+    done = await queries.requeue_delivery(session, "github.com", "d1")  # type: ignore[arg-type]
+    assert done is not None
+    assert done.changed is True
+    assert (done.before["status"], done.before["attempts"]) == ("dead", 8)
+    assert done.after == {"status": "pending", "attempts": 0, "dead_at": None, "last_error": None}
+    assert "FOR UPDATE" in session.statements[0]
+    assert session.statements[1].startswith("UPDATE webhook_deliveries")
+
+
+async def test_requeue_of_a_pending_delivery_changes_nothing() -> None:
+    """Only the lock query runs."""
+    session = Script(_row("pending"))
+    done = await queries.requeue_delivery(session, "github.com", "d1")  # type: ignore[arg-type]
+    assert done is not None
+    assert done.changed is False
+    assert done.before == done.after
+    assert len(session.statements) == 1
+
+
+async def test_requeue_of_an_unknown_delivery_is_none() -> None:
+    """No row, no update."""
+    session = Script(None)
+    assert await queries.requeue_delivery(session, "github.com", "d1") is None  # type: ignore[arg-type]
+    assert len(session.statements) == 1
+
+
+@pytest.mark.parametrize(("status", "has_body"), [("processed", True), ("dead", False)])
+async def test_requeue_refuses_what_cannot_be_handled_again(status: str, has_body: bool) -> None:
+    """A processed delivery, or a dead one whose body was purged, is a 409 and is not updated."""
+    session = Script(_row(status, has_body=has_body))
+    with pytest.raises(AdminProblem) as caught:
+        await queries.requeue_delivery(session, "github.com", "d1")  # type: ignore[arg-type]
+    assert (caught.value.status_code, caught.value.kind) == (409, "conflict")
+    assert len(session.statements) == 1

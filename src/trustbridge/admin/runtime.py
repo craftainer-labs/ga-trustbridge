@@ -10,6 +10,7 @@ from trustbridge.admin import metrics
 from trustbridge.admin.adapters import AdapterCatalog
 from trustbridge.audit.emit import AuditWriter
 from trustbridge.github.availability import HostStatus
+from trustbridge.github.ports import ReconcileScheduler
 from trustbridge.ratelimit import FixedWindowLimiter, WindowCounter
 from trustbridge.settings import DEFAULT_ADMIN_MAX_BODY_BYTES, TrustbridgeSettings
 
@@ -40,7 +41,8 @@ class AdminRuntime:
     """Collaborators of the admin routes. `session_factory` and `writer` are None in mock mode.
 
     `adapters` is the enabled-adapter catalog for `GET /tenants/{t}/adapters` (None: none).
-    `max_body_bytes` bounds a request body (`ADMIN_MAX_BODY_BYTES`).
+    `max_body_bytes` bounds a request body (`ADMIN_MAX_BODY_BYTES`). `scheduler` records a
+    reconcile request (`POST /tenants/{t}/reconcile`; None: the route answers 503).
     """
 
     limits: AdminLimits
@@ -51,6 +53,7 @@ class AdminRuntime:
     export_page_size: int = DEFAULT_EXPORT_PAGE
     adapters: AdapterCatalog | None = None
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
+    scheduler: ReconcileScheduler | None = None
 
 
 def build_limits(settings: TrustbridgeSettings, counter: WindowCounter) -> AdminLimits:

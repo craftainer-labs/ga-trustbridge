@@ -1072,6 +1072,20 @@
         "title": "ProblemOut",
         "type": "object"
       },
+      "ReconcileOut": {
+        "description": "The answer to `POST /tenants/{t}/reconcile`: the request was recorded (202).",
+        "properties": {
+          "requested": {
+            "title": "Requested",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "requested"
+        ],
+        "title": "ReconcileOut",
+        "type": "object"
+      },
       "RepositoryOut": {
         "description": "A repository the tenant's installation can see (`tenant_repositories`).",
         "properties": {
@@ -2225,6 +2239,112 @@
           }
         ],
         "summary": "Get Delivery"
+      }
+    },
+    "/admin/v1/deliveries/{host}/{delivery_id}/requeue": {
+      "post": {
+        "description": "Make a dead delivery deliverable again (instance `operator`).\n\nIdempotent: a pending delivery is a 200 no-op. A processed one, or one whose body was purged,\nis a 409. The change and its `delivery.requeue` event commit together; the answer is the\ndelivery as `GET` shows it (the stored payload for an operator, never the headers).",
+        "operationId": "requeue_delivery_admin_v1_deliveries__host___delivery_id__requeue_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "maxLength": 63,
+              "title": "Host",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "delivery_id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "title": "Delivery Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Requeue Delivery"
       }
     },
     "/admin/v1/hosts": {
@@ -3900,6 +4020,102 @@
           }
         ],
         "summary": "List Operations"
+      }
+    },
+    "/admin/v1/tenants/{tenant_id}/reconcile": {
+      "post": {
+        "description": "Ask for a reconcile of the tenant soon (`operator`, instance or on the tenant).\n\nRecords the request (`ReconcileRequests`, a set, so a repeat is one request) and answers 202;\nthe reconcile loop that consumes the set is NG6i. A disabled tenant is a 409. The event is\nwritten first, then the request recorded, then the transaction commits: a failure to record\nleaves no `success` event.",
+        "operationId": "reconcile_tenant_admin_v1_tenants__tenant_id__reconcile_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcileOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Reconcile Tenant"
       }
     },
     "/admin/v1/tenants/{tenant_id}/repositories": {

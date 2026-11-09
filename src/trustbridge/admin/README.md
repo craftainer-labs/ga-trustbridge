@@ -111,6 +111,29 @@ were added or removed in between.
 the stream (or when it dies) the route writes the `audit.export` event (`audit/README.md`). An
 error after the first byte cannot change the status; the event then says `complete: false`.
 
+## Delivery requeue and tenant reconcile (NG6e-3)
+
+| Route | Min role / scope | Answer |
+| --- | --- | --- |
+| `POST /deliveries/{host}/{delivery_id}/requeue` | `operator`, instance scope | 200, the delivery as `GET` shows it |
+| `POST /tenants/{t}/reconcile` | `operator`, instance or on the tenant | 202 `{"requested": true}` |
+
+**Requeue** resets a `dead` delivery whose body still exists to `pending` (no attempts, no error,
+no `dead_at`) in the request's transaction, together with its `delivery.requeue` event (resource
+`host/delivery_id`, no tenant; `before` and `after` are the `delivery` shape, `last_error`
+scrubbed). The relay or the periodic sweep then picks it up. A `pending` delivery is a 200 no-op
+(its event has `before` equal to `after`); a `processed` one, or a dead one whose body was purged,
+is a 409; an unknown one a 404. `host` is at most 63 and `delivery_id` at most 128 characters (422
+above), so `host/delivery_id` fits an audit `resource_id`. The answer has the stored payload for
+an operator and never the headers.
+
+**Reconcile** records the tenant in the reconcile set (`ReconcileRequests`, Valkey `tb:reconcile`),
+so a repeat is one request, and answers 202. The event (`tenant.reconcile`, no `before`/`after`)
+is appended first, then the request recorded, then the transaction commits, so a queue failure
+leaves no `success` event. A disabled tenant is a 409. **Nothing consumes the set yet**: the
+reconcile loop is NG6i, so today the request is only recorded. Without a queue (no
+`AdminRuntime.scheduler`) the route is a 503.
+
 ## Tenant disable and enable (NG6e-2)
 
 | Route | Min role / scope | Body |
@@ -183,8 +206,8 @@ not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_
 
 - `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
   (ADR 0034); NG6h.
-- Every other `POST` (NG6e-3 to NG6e-5: requeue, reconcile, rotate, host registration), and the
-  tenant-deletion ones (NG6h).
+- Every other `POST` (NG6e-4 and NG6e-5: host registration, rotate), and the tenant-deletion ones
+  (NG6h). The consumer of the reconcile set is NG6i.
 - The `transaction_timeout` / `AUDIT_EXPORT_LAG_SECONDS` startup check: NG6h.
 - ADR 0033 stays Proposed until the mutating routes (NG6e) and the deletion reads (NG6h) exist.
 

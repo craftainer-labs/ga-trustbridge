@@ -62,6 +62,8 @@ def test_the_snapshot_documents_every_read_route_of_adr_0033() -> None:
             "/audit-events/export",
             "/tenants/{tenant_id}/disable",
             "/tenants/{tenant_id}/enable",
+            "/tenants/{tenant_id}/reconcile",
+            "/deliveries/{host}/{delivery_id}/requeue",
         )
     } == paths
 

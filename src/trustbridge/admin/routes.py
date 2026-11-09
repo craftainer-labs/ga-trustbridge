@@ -8,7 +8,7 @@ handlers only read.
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -42,6 +42,7 @@ from trustbridge.admin.schemas import (
     MeOut,
     OperationPage,
     ProblemOut,
+    ReconcileOut,
     RepositoryPage,
     ResourcePage,
     TenantOut,
@@ -262,6 +263,35 @@ def _admin_state(at: datetime | None, by: str | None, reason: str | None) -> dic
     )
 
 
+def _event(  # noqa: PLR0913 - one value per recorded fact
+    request: Request,
+    principal: Principal,
+    action: Action,
+    outcome: Outcome,
+    *,
+    tenant_id: UUID | None,
+    resource_type: str,
+    resource_id: str,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+) -> AuditEvent:
+    """The audit event of a mutating call by `principal` (identity columns only)."""
+    return AuditEvent(
+        actor_type=ActorType.USER,
+        actor_sub=principal.sub,
+        actor_iss=principal.iss,
+        tenant_id=tenant_id,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        outcome=outcome,
+        before=before,
+        after=after,
+        source_ip=client_ip(request),
+        request_id=safe_request_id(request),
+    )
+
+
 def _tenant_event(  # noqa: PLR0913 - one value per recorded fact
     request: Request,
     principal: Principal,
@@ -272,19 +302,16 @@ def _tenant_event(  # noqa: PLR0913 - one value per recorded fact
     before: dict[str, Any] | None = None,
     after: dict[str, Any] | None = None,
 ) -> AuditEvent:
-    return AuditEvent(
-        actor_type=ActorType.USER,
-        actor_sub=principal.sub,
-        actor_iss=principal.iss,
+    return _event(
+        request,
+        principal,
+        action,
+        outcome,
         tenant_id=tenant_id,
-        action=action,
         resource_type="tenant",
         resource_id=str(tenant_id),
-        outcome=outcome,
         before=before,
         after=after,
-        source_ip=client_ip(request),
-        request_id=safe_request_id(request),
     )
 
 
@@ -335,25 +362,26 @@ async def _set_disabled(  # noqa: PLR0913 - the request, the caller and what to 
     except AdminProblem:
         raise
     except Exception:
-        await _record_failure(request, principal, runtime, tenant_id, action)
+        await _record_failure(
+            runtime,
+            action,
+            lambda: _tenant_event(request, principal, tenant_id, action, Outcome.FAILURE),
+        )
         raise
     return _tenant_out(info)
 
 
 async def _record_failure(
-    request: Request,
-    principal: Principal,
-    runtime: AdminRuntime,
-    tenant_id: UUID,
-    action: Action,
+    runtime: AdminRuntime, action: Action, build: Callable[[], AuditEvent]
 ) -> None:
-    """Best effort: a `failure` event in its own transaction; never hides the original error."""
+    """Best effort: a `failure` event in its own transaction; never hides the original error.
+
+    The event is built inside the guard too, so a failure to build it cannot mask the cause.
+    """
     if runtime.writer is None:
         return
     try:
-        await runtime.writer.record(
-            _tenant_event(request, principal, tenant_id, action, Outcome.FAILURE)
-        )
+        await runtime.writer.record(build())
     except Exception:
         logger.exception("could not record the failed %s event", action.value)
 
@@ -392,6 +420,127 @@ async def enable_tenant(
 ) -> TenantOut:
     """Enable a tenant again (instance `admin`). Idempotent: an enabled tenant is a no-op."""
     return await _set_disabled(request, principal, runtime, tenant_id, disable=False, reason=None)
+
+
+# ---- delivery requeue and tenant reconcile (ADR 0033, NG6e-3) ------------------------------
+
+
+def _delivery_state(values: dict[str, Any]) -> dict[str, Any]:
+    """The `before` or `after` of a requeue, through the `delivery` allow-list."""
+    return project("delivery", values)
+
+
+@router.post(
+    "/deliveries/{host}/{delivery_id}/requeue",
+    response_model=DeliveryDetailOut,
+    dependencies=guard(Role.OPERATOR, "mutation"),
+)
+@emits(Action.DELIVERY_REQUEUE)
+async def requeue_delivery(
+    host: Annotated[str, Path(max_length=63)],
+    delivery_id: Annotated[str, Path(max_length=128)],
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> DeliveryDetailOut:
+    """Make a dead delivery deliverable again (instance `operator`).
+
+    Idempotent: a pending delivery is a 200 no-op. A processed one, or one whose body was purged,
+    is a 409. The change and its `delivery.requeue` event commit together; the answer is the
+    delivery as `GET` shows it (the stored payload for an operator, never the headers).
+    """
+    resource_id = f"{host}/{delivery_id}"
+    try:
+        async with _factory(runtime)() as session, session.begin():
+            done = await queries.requeue_delivery(session, host, delivery_id)
+            if done is None:
+                raise AdminProblem(404, "not-found", "Delivery not found")
+            event = _event(
+                request,
+                principal,
+                Action.DELIVERY_REQUEUE,
+                Outcome.SUCCESS,
+                tenant_id=None,
+                resource_type="delivery",
+                resource_id=resource_id,
+                before=_delivery_state(done.before),
+                after=_delivery_state(done.after),
+            )
+            await append(session, with_trace(event))
+            found = await queries.delivery(
+                session,
+                host,
+                delivery_id,
+                with_payload=Role.OPERATOR in instance_roles(principal),
+            )
+    except AdminProblem:
+        raise
+    except Exception:
+        await _record_failure(
+            runtime,
+            Action.DELIVERY_REQUEUE,
+            lambda: _event(
+                request,
+                principal,
+                Action.DELIVERY_REQUEUE,
+                Outcome.FAILURE,
+                tenant_id=None,
+                resource_type="delivery",
+                resource_id=resource_id,
+            ),
+        )
+        raise
+    if found is None:  # the row was locked a moment ago: unreachable
+        raise AdminProblem(404, "not-found", "Delivery not found")
+    return found
+
+
+@router.post(
+    "/tenants/{tenant_id}/reconcile",
+    response_model=ReconcileOut,
+    status_code=202,
+    dependencies=guard(Role.OPERATOR, "mutation", tenant_param="tenant_id"),
+)
+@emits(Action.TENANT_RECONCILE)
+async def reconcile_tenant(
+    tenant_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> ReconcileOut:
+    """Ask for a reconcile of the tenant soon (`operator`, instance or on the tenant).
+
+    Records the request (`ReconcileRequests`, a set, so a repeat is one request) and answers 202;
+    the reconcile loop that consumes the set is NG6i. A disabled tenant is a 409. The event is
+    written first, then the request recorded, then the transaction commits: a failure to record
+    leaves no `success` event.
+    """
+    if runtime.scheduler is None:
+        raise AdminProblem(503, "unavailable", "No reconcile queue is configured")
+    try:
+        async with _factory(runtime)() as session, session.begin():
+            fresh = (await session.execute(_GET_TENANT, {"id": tenant_id})).first()
+            if fresh is None:
+                raise AdminProblem(404, "not-found", "Tenant not found")
+            if TenantInfo(*fresh).admin_disabled_at is not None:
+                raise AdminProblem(409, "conflict", "The tenant is disabled")
+            event = _tenant_event(
+                request, principal, tenant_id, Action.TENANT_RECONCILE, Outcome.SUCCESS
+            )
+            await append(session, with_trace(event))
+            await runtime.scheduler.schedule(tenant_id)
+    except AdminProblem:
+        raise
+    except Exception:
+        await _record_failure(
+            runtime,
+            Action.TENANT_RECONCILE,
+            lambda: _tenant_event(
+                request, principal, tenant_id, Action.TENANT_RECONCILE, Outcome.FAILURE
+            ),
+        )
+        raise
+    return ReconcileOut(requested=True)
 
 
 # ---- tenant data: repositories, adapters, resources, credentials, operations ------------------

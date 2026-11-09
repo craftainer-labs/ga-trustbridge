@@ -51,8 +51,18 @@ def _hook() -> None:
     install_tenant_hook()
 
 
-def _client(db: rls.Db, *roles: str, sub: str = "alice") -> httpx.AsyncClient:
-    env = build(access=SqlTenantAccess(db.app), factory=db.app, writer=AuditWriter(db.app))
+def _client(
+    db: rls.Db,
+    *roles: str,
+    sub: str = "alice",
+    scheduler: Any = None,  # noqa: ANN401
+) -> httpx.AsyncClient:
+    env = build(
+        access=SqlTenantAccess(db.app),
+        factory=db.app,
+        writer=AuditWriter(db.app),
+        scheduler=scheduler,
+    )
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=env.app, raise_app_exceptions=False),
         base_url="http://admin.test",
@@ -583,3 +593,133 @@ async def test_the_sql_tenant_gate_follows_the_disable_flag(db: rls.Db) -> None:
         await _set(db, db.a, disable=False)
     assert await gate.disabled(HOST, 1) is False
     assert await gate.allows(db.a, None) is True
+
+
+# ---- delivery requeue and tenant reconcile (NG6e-3) ----------------------------------------
+
+
+async def _set_status(
+    db: rls.Db, delivery_id: str, status: str, *, body: bool = True, error: str | None = None
+) -> None:
+    await _admin(
+        db,
+        "UPDATE webhook_deliveries SET status = CAST(:s AS text), attempts = 8, last_error = :e, "
+        "dead_at = CASE WHEN CAST(:s AS text) = 'dead' THEN now() END, "
+        "body = CASE WHEN CAST(:keep AS boolean) THEN body END "
+        "WHERE host = :h AND delivery_id = :d",
+        s=status,
+        e=error,
+        keep=body,
+        h=HOST,
+        d=delivery_id,
+    )
+
+
+async def test_requeue_resets_a_dead_delivery_and_audits_it_in_the_same_transaction(
+    db: rls.Db,
+) -> None:
+    """Dead with a body: pending again, no attempts, no error, one event; headers never shown."""
+    await _delivery(db, "rq1", 1, json.dumps({"action": "opened"}).encode())
+    await _set_status(db, "rq1", "dead", error="boom authorization: Bearer canary-secret-7f3a9c1e")
+    async with _client(db, "trustbridge:operator", sub="op-1") as client:
+        response = await client.post(f"/admin/v1/deliveries/{HOST}/rq1/requeue")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert (body["status"], body["attempts"], body["dead_at"]) == ("pending", 0, None)
+        assert body["payload"] == {"action": "opened"}
+        assert SECRET_HEADER not in response.text
+        again = await client.post(f"/admin/v1/deliveries/{HOST}/rq1/requeue")
+        assert again.status_code == 200  # pending: a no-op
+    row = (
+        await _admin(
+            db,
+            "SELECT status, attempts, last_error FROM webhook_deliveries "
+            "WHERE host = :h AND delivery_id = 'rq1'",
+            h=HOST,
+        )
+    )[0]
+    assert tuple(row) == ("pending", 0, None)
+    events = await _admin(
+        db,
+        "SELECT action, outcome, actor_sub, tenant_id, resource_id, before, after "
+        "FROM audit_events WHERE resource_id = :r ORDER BY seq",
+        r=f"{HOST}/rq1",
+    )
+    assert [(e.action, e.outcome, e.actor_sub, e.tenant_id) for e in events] == [
+        ("delivery.requeue", "success", "op-1", None)
+    ] * 2
+    assert events[0].before["status"] == "dead"
+    assert events[0].after["status"] == "pending"
+    assert "canary-secret-7f3a9c1e" not in repr([tuple(e) for e in events])
+    assert events[1].before == events[1].after
+
+
+async def test_requeue_refuses_a_processed_delivery_and_one_without_a_body(db: rls.Db) -> None:
+    """409 with nothing changed and no event; 404 for an unknown delivery; 403 for a viewer."""
+    await _delivery(db, "rq2", 2, b"{}")
+    await _set_status(db, "rq2", "processed")
+    await _delivery(db, "rq3", 3, b"{}")
+    await _set_status(db, "rq3", "dead", body=False)
+    async with _client(db, "trustbridge:operator") as client:
+        for name in ("rq2", "rq3"):
+            refused = await client.post(f"/admin/v1/deliveries/{HOST}/{name}/requeue")
+            assert refused.status_code == 409
+        assert (await client.post(f"/admin/v1/deliveries/{HOST}/none/requeue")).status_code == 404
+    async with _client(db, "trustbridge:viewer") as client:
+        assert (await client.post(f"/admin/v1/deliveries/{HOST}/rq3/requeue")).status_code == 403
+    states = await _admin(
+        db,
+        "SELECT delivery_id, status FROM webhook_deliveries WHERE delivery_id IN ('rq2', 'rq3') "
+        "ORDER BY delivery_id",
+    )
+    assert [tuple(r) for r in states] == [("rq2", "processed"), ("rq3", "dead")]
+    events = await _admin(
+        db,
+        "SELECT 1 FROM audit_events WHERE resource_id IN (:a, :b)",
+        a=f"{HOST}/rq2",
+        b=f"{HOST}/rq3",
+    )
+    assert events == []
+
+
+class Scheduler:
+    """A `ReconcileScheduler` that records."""
+
+    def __init__(self) -> None:
+        """Start empty."""
+        self.tenants: list[UUID] = []
+
+    async def schedule(self, tenant_id: UUID) -> None:
+        """Record the request."""
+        self.tenants.append(tenant_id)
+
+
+async def test_reconcile_records_the_request_and_audits_it_for_a_tenant_operator(
+    db: rls.Db,
+) -> None:
+    """A tenant-scoped operator may ask; the event carries the tenant; a disabled tenant is 409."""
+    scheduler = Scheduler()
+    path = f"/admin/v1/tenants/{db.a}/reconcile"
+    try:
+        async with _client(db, "trustbridge:tb.test:a:operator", scheduler=scheduler) as client:
+            response = await client.post(path)
+            assert (response.status_code, response.json()) == (202, {"requested": True})
+            assert (await client.post(path)).status_code == 202
+            other = await client.post(f"/admin/v1/tenants/{db.b}/reconcile")
+            assert other.status_code == 404
+        assert scheduler.tenants == [db.a, db.a]
+        events = await _admin(
+            db,
+            "SELECT outcome, tenant_id, before, after FROM audit_events "
+            "WHERE action = 'tenant.reconcile' AND resource_id = :t",
+            t=str(db.a),
+        )
+        assert [(e.outcome, e.tenant_id, e.before, e.after) for e in events] == [
+            ("success", db.a, None, None)
+        ] * 2
+        await _set(db, db.a, disable=True)
+        async with _client(db, "trustbridge:operator", scheduler=scheduler) as client:
+            assert (await client.post(path)).status_code == 409
+        assert scheduler.tenants == [db.a, db.a]
+    finally:
+        await _set(db, db.a, disable=False)
