@@ -1,7 +1,7 @@
 """What `app.state.admin` holds: the collaborators the admin routes use (built in `main`)."""
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from fastapi import FastAPI, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -13,6 +13,9 @@ from trustbridge.github.availability import HostStatus
 from trustbridge.github.ports import ReconcileScheduler
 from trustbridge.ratelimit import FixedWindowLimiter, WindowCounter
 from trustbridge.settings import DEFAULT_ADMIN_MAX_BODY_BYTES, TrustbridgeSettings
+
+if TYPE_CHECKING:
+    from trustbridge.admin.registration import RegistrationRuntime
 
 DEFAULT_EXPORT_PAGE = 500
 DEFAULT_MAX_BODY_BYTES = DEFAULT_ADMIN_MAX_BODY_BYTES
@@ -43,6 +46,7 @@ class AdminRuntime:
     `adapters` is the enabled-adapter catalog for `GET /tenants/{t}/adapters` (None: none).
     `max_body_bytes` bounds a request body (`ADMIN_MAX_BODY_BYTES`). `scheduler` records a
     reconcile request (`POST /tenants/{t}/reconcile`; None: the route answers 503).
+    `registration` is the host-registration flow (None: its routes answer 503).
     """
 
     limits: AdminLimits
@@ -54,6 +58,7 @@ class AdminRuntime:
     adapters: AdapterCatalog | None = None
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     scheduler: ReconcileScheduler | None = None
+    registration: RegistrationRuntime | None = None
 
 
 def build_limits(settings: TrustbridgeSettings, counter: WindowCounter) -> AdminLimits:

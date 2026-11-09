@@ -181,6 +181,8 @@ class ManifestDeps:
     public_base_url: str
     api_factory: Callable[[GitHubHostConfig], GitHubRequester] | None = None
     clock: Callable[[], float] = time.time
+    kinds: frozenset[AppKind] = frozenset(AppKind)
+    """The kinds of App this flow starts and completes (the admin API allows only `trustbridge`)."""
 
 
 def _b64(data: bytes) -> str:
@@ -258,6 +260,7 @@ class ManifestFlow:
     # ---- start ----------------------------------------------------------
     async def start(self, host: GitHubHostConfig, request: StartRequest) -> StartedRegistration:
         """Prepare the form the browser submits to GitHub."""
+        self._require_kind(request.kind)
         if request.kind is AppKind.TRUSTBRIDGE:
             self._importer(host)  # fail now: the one-time code cannot be exchanged twice
         elif request.tenant_id is None or request.owner is None:
@@ -286,6 +289,11 @@ class ManifestFlow:
             state=state,
         )
 
+    def _require_kind(self, kind: AppKind) -> None:
+        if kind not in self._d.kinds:
+            msg = f"this flow does not register {kind.value} Apps"
+            raise ManifestFlowError(msg)
+
     def _importer(self, host: GitHubHostConfig) -> KeyImporter:
         signer: object = self._d.signers.get(host.signer)
         if not isinstance(signer, KeyImporter):
@@ -306,6 +314,7 @@ class ManifestFlow:
             msg = "state belongs to another host"
             raise ManifestFlowError(msg)
         kind = AppKind(claims["kind"])
+        self._require_kind(kind)
         if kind is AppKind.TRUSTBRIDGE:
             self._importer(host)
         if not await self._d.nonces.consume(str(claims["nonce"])):

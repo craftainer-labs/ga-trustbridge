@@ -22,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Self
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic.functional_validators import BeforeValidator
 from pydantic_settings import NoDecode, SettingsConfigDict
 
@@ -204,6 +204,13 @@ class TrustbridgeSettings(Settings):
     admin_rate_limit_exempt_cidrs: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = Field(
         default_factory=list
     )
+
+    # Host registration through the admin API (ADR 0030 "Registration", NG6e-4): the manifest's
+    # URLs come from `public_base_url` (the BFF serves `<base>/admin/github/registration/callback`
+    # and forwards code and state to the admin API) and the one-time `state` is signed with
+    # `registration_state_key`, shared by every replica. Both unset: the start route is a 503.
+    public_base_url: str | None = None
+    registration_state_key: SecretStr | None = Field(default=None, min_length=32)
 
     # Largest request body an admin route reads (413 above it, chunked bodies included; NG6e).
     admin_max_body_bytes: int = Field(default=DEFAULT_ADMIN_MAX_BODY_BYTES, gt=0)

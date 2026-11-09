@@ -50,6 +50,8 @@ ALLOW_LISTS: Mapping[str, frozenset[str]] = {
     # Connection data is recorded as `{"configured": true}` and nothing else (ADR 0032). No
     # admin route writes it; the shape exists so any future writer cannot record a value.
     "connection": frozenset({"configured"}),
+    # NG6e-4: a host registration (ids and the secret's reference, never the key or the secret).
+    "host_registration": frozenset({"kind", "app_id", "app_slug", "webhook_secret_ref"}),
     "authz_denial": frozenset(
         {"reason", "required_role", "scope", "suppressed", "window_seconds", "window", "sample"}
     ),

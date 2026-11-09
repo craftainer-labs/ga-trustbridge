@@ -5,10 +5,10 @@ binary data. v1 is additive: new fields may appear, enum-like strings are open s
 """
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_core import PydanticCustomError
 
 from trustbridge.audit.redact import scrub_text
@@ -265,6 +265,54 @@ class DeliveryDetailOut(DeliveryOut):
     """
 
     payload: Any | None = None
+
+
+class RegistrationStartOut(BaseModel):
+    """What the BFF renders to start a manifest registration: no secret.
+
+    The browser POSTs `manifest_json` (form field `manifest`) to `post_url`; `state` is the signed
+    one-time value GitHub returns with the `code`, which the BFF forwards to
+    `POST /hosts/{host}/registration/complete`.
+    """
+
+    post_url: str
+    manifest_json: str
+    state: str
+
+
+class CompleteIn(BaseModel):
+    """The BFF's forward of GitHub's redirect: the temporary `code` and the returned `state`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Annotated[SecretStr, Field(min_length=1, max_length=256)]
+    state: Annotated[str, Field(min_length=1, max_length=2048)]
+
+
+class ManualIn(BaseModel):
+    """A hand-registered App: its id, its private key (PEM) and its webhook secret.
+
+    The key goes straight into the host's signer and the secret into the secret store; neither is
+    stored in the database, recorded in the audit log or returned.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    app_id: Annotated[int, Field(gt=0, le=2**63 - 1)]
+    pem: Annotated[SecretStr, Field(min_length=1, max_length=8192)]
+    webhook_secret: Annotated[SecretStr, Field(min_length=1, max_length=255)]
+    slug: Annotated[str | None, Field(max_length=100)] = None
+
+
+class RegistrationOut(BaseModel):
+    """A stored registration: ids and the secret's reference, never the key or the secret."""
+
+    kind: str
+    host: str
+    app_id: int
+    slug: str
+    html_url: str
+    webhook_secret_ref: str | None
 
 
 class ReconcileOut(BaseModel):

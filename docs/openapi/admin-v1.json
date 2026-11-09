@@ -1086,6 +1086,76 @@
         "title": "ReconcileOut",
         "type": "object"
       },
+      "RegistrationOut": {
+        "description": "A stored registration: ids and the secret's reference, never the key or the secret.",
+        "properties": {
+          "app_id": {
+            "title": "App Id",
+            "type": "integer"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "html_url": {
+            "title": "Html Url",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "webhook_secret_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook Secret Ref"
+          }
+        },
+        "required": [
+          "kind",
+          "host",
+          "app_id",
+          "slug",
+          "html_url",
+          "webhook_secret_ref"
+        ],
+        "title": "RegistrationOut",
+        "type": "object"
+      },
+      "RegistrationStartOut": {
+        "description": "What the BFF renders to start a manifest registration: no secret.\n\nThe browser POSTs `manifest_json` (form field `manifest`) to `post_url`; `state` is the signed\none-time value GitHub returns with the `code`, which the BFF forwards to\n`POST /hosts/{host}/registration/complete`.",
+        "properties": {
+          "manifest_json": {
+            "title": "Manifest Json",
+            "type": "string"
+          },
+          "post_url": {
+            "title": "Post Url",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "post_url",
+          "manifest_json",
+          "state"
+        ],
+        "title": "RegistrationStartOut",
+        "type": "object"
+      },
       "RepositoryOut": {
         "description": "A repository the tenant's installation can see (`tenant_repositories`).",
         "properties": {
@@ -2559,6 +2629,381 @@
           }
         ],
         "summary": "Get Host"
+      }
+    },
+    "/admin/v1/hosts/{host}/registration": {
+      "post": {
+        "description": "Start the GitHub App manifest flow for an unregistered host (instance `operator`).\n\nReturns what the BFF renders: the URL to POST the manifest to, the manifest and a signed\none-time `state` bound to the caller. No secret. A host that already has an App is a 409.",
+        "operationId": "start_registration_admin_v1_hosts__host__registration_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "maxLength": 63,
+              "title": "Host",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistrationStartOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Start Registration"
+      }
+    },
+    "/admin/v1/hosts/{host}/registration/complete": {
+      "post": {
+        "description": "Finish the manifest flow (instance `operator`): the BFF forwards GitHub's `code` and `state`.\n\nThe `state` must be the caller's own, unexpired and unused. The code is exchanged server-side,\nthe PEM goes into the host's signer and the webhook secret into the secret store; the answer\nhas ids and a reference only. An invalid state or code is a 400.",
+        "operationId": "complete_registration_admin_v1_hosts__host__registration_complete_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "maxLength": 63,
+              "title": "Host",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "The BFF's forward of GitHub's redirect: the temporary `code` and the returned `state`.",
+                "properties": {
+                  "code": {
+                    "format": "password",
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "title": "Code",
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "state": {
+                    "maxLength": 2048,
+                    "minLength": 1,
+                    "title": "State",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code",
+                  "state"
+                ],
+                "title": "CompleteIn",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistrationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Complete Registration"
+      }
+    },
+    "/admin/v1/hosts/{host}/registration/manual": {
+      "post": {
+        "description": "Register a hand-made GitHub App (instance `admin`): App id, PEM and webhook secret.\n\nFor where the manifest flow is unavailable (GHES enterprise-owned Apps). The key goes straight\ninto the host's signer; neither it nor the secret is stored in the database, recorded or\nreturned. A host that already has an App is a 409.",
+        "operationId": "register_host_manually_admin_v1_hosts__host__registration_manual_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "maxLength": 63,
+              "title": "Host",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "A hand-registered App: its id, its private key (PEM) and its webhook secret.\n\nThe key goes straight into the host's signer and the secret into the secret store; neither is\nstored in the database, recorded in the audit log or returned.",
+                "properties": {
+                  "app_id": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9223372036854775807,
+                    "title": "App Id",
+                    "type": "integer"
+                  },
+                  "pem": {
+                    "format": "password",
+                    "maxLength": 8192,
+                    "minLength": 1,
+                    "title": "Pem",
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "slug": {
+                    "anyOf": [
+                      {
+                        "maxLength": 100,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Slug"
+                  },
+                  "webhook_secret": {
+                    "format": "password",
+                    "maxLength": 255,
+                    "minLength": 1,
+                    "title": "Webhook Secret",
+                    "type": "string",
+                    "writeOnly": true
+                  }
+                },
+                "required": [
+                  "app_id",
+                  "pem",
+                  "webhook_secret"
+                ],
+                "title": "ManualIn",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistrationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Register Host Manually"
       }
     },
     "/admin/v1/me": {

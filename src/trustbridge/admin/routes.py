@@ -19,10 +19,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from trustbridge.admin import queries
+from trustbridge.admin import queries, registration
 from trustbridge.admin.access import tenants_page
 from trustbridge.admin.cursor import MAX_SEQ, decode_cursor, encode_cursor, invalid_cursor, paginate
 from trustbridge.admin.guards import BoundedRoute, emits, guard, guard_any_grant
@@ -32,6 +33,7 @@ from trustbridge.admin.schemas import (
     AdapterPage,
     AuditEventOut,
     AuditEventPage,
+    CompleteIn,
     CredentialPage,
     DeliveryDetailOut,
     DeliveryPage,
@@ -39,10 +41,13 @@ from trustbridge.admin.schemas import (
     GrantOut,
     HostOut,
     HostPage,
+    ManualIn,
     MeOut,
     OperationPage,
     ProblemOut,
     ReconcileOut,
+    RegistrationOut,
+    RegistrationStartOut,
     RepositoryPage,
     ResourcePage,
     TenantOut,
@@ -420,6 +425,92 @@ async def enable_tenant(
 ) -> TenantOut:
     """Enable a tenant again (instance `admin`). Idempotent: an enabled tenant is a no-op."""
     return await _set_disabled(request, principal, runtime, tenant_id, disable=False, reason=None)
+
+
+# ---- host registration (ADR 0030 "Registration", NG6e-4) ------------------------------------
+
+_HOST = Annotated[str, Path(max_length=63)]
+
+
+def _registration(runtime: AdminRuntime) -> registration.RegistrationRuntime:
+    if runtime.registration is None:
+        raise AdminProblem(503, "unavailable", "Host registration is not configured")
+    return runtime.registration
+
+
+def _body_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """The documented request body of a route that parses its own (secret-bearing) body."""
+    schema = model.model_json_schema()
+    return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
+
+
+@router.post(
+    "/hosts/{host}/registration",
+    response_model=RegistrationStartOut,
+    dependencies=guard(Role.OPERATOR, "mutation"),
+)
+@emits(Action.HOST_REGISTRATION_START)
+async def start_registration(
+    host: _HOST,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> RegistrationStartOut:
+    """Start the GitHub App manifest flow for an unregistered host (instance `operator`).
+
+    Returns what the BFF renders: the URL to POST the manifest to, the manifest and a signed
+    one-time `state` bound to the caller. No secret. A host that already has an App is a 409.
+    """
+    ctx = registration.Context(request, principal, host, _factory(runtime), runtime.writer)
+    return await registration.start(ctx, _registration(runtime))
+
+
+@router.post(
+    "/hosts/{host}/registration/complete",
+    response_model=RegistrationOut,
+    dependencies=guard(Role.OPERATOR, "mutation"),
+    openapi_extra=_body_schema(CompleteIn),
+)
+@emits(Action.HOST_REGISTRATION_COMPLETE)
+async def complete_registration(
+    host: _HOST,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> RegistrationOut:
+    """Finish the manifest flow (instance `operator`): the BFF forwards GitHub's `code` and `state`.
+
+    The `state` must be the caller's own, unexpired and unused. The code is exchanged server-side,
+    the PEM goes into the host's signer and the webhook secret into the secret store; the answer
+    has ids and a reference only. An invalid state or code is a 400.
+    """
+    body = registration.parse_body(await request.body(), CompleteIn)
+    ctx = registration.Context(request, principal, host, _factory(runtime), runtime.writer)
+    return await registration.complete(ctx, _registration(runtime), body)
+
+
+@router.post(
+    "/hosts/{host}/registration/manual",
+    response_model=RegistrationOut,
+    dependencies=guard(Role.ADMIN, "mutation"),
+    openapi_extra=_body_schema(ManualIn),
+)
+@emits(Action.HOST_REGISTRATION_MANUAL)
+async def register_host_manually(
+    host: _HOST,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> RegistrationOut:
+    """Register a hand-made GitHub App (instance `admin`): App id, PEM and webhook secret.
+
+    For where the manifest flow is unavailable (GHES enterprise-owned Apps). The key goes straight
+    into the host's signer; neither it nor the secret is stored in the database, recorded or
+    returned. A host that already has an App is a 409.
+    """
+    body = registration.parse_body(await request.body(), ManualIn)
+    ctx = registration.Context(request, principal, host, _factory(runtime), runtime.writer)
+    return await registration.manual(ctx, _registration(runtime), body)
 
 
 # ---- delivery requeue and tenant reconcile (ADR 0033, NG6e-3) ------------------------------
