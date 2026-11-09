@@ -132,10 +132,18 @@ the PEM must be an unencrypted RSA key (the signer refuses anything else with a 
 
 **Rules.** Only `kind=trustbridge` Apps are offered (an Argo CD App would write connection data,
 which the admin API never does). A host that already has an App (configured with one, registered
-in the database, or not `unregistered` in this replica) is a 409, so a key is never overwritten; the
-registration row is inserted `ON CONFLICT DO NOTHING`, so a registration that appeared meanwhile is
-not replaced either (the PEM and the secret may already have been written in that race, which
-needs a deliberate repeat to hit). A signer that cannot import a key is a 409 ("import it out of
+in the database, or not `unregistered` in this replica) is a 409, so a key is never overwritten.
+A registration (`complete`, `manual`) first takes the host's **claim**, a transaction-scoped Postgres
+advisory lock held in an open transaction until the registration is saved, and only then checks
+that the host is unregistered and writes anything. A second registration of the same host, on any
+replica, finds the claim taken and is a 409 before it touches the key or the secret, so the loser
+can never overwrite the winner's. The claim stores nothing (no row another process could read as a
+registration, no migration) and a crashed process releases it with its connection. The registration
+row is also inserted `ON CONFLICT DO NOTHING`. What can still be left over: if the secret store or
+the database fails after the key was imported or the secret written and before the row is saved, the
+host stays unregistered with a key (and possibly a secret) in place; the next registration attempt
+replaces them. The claim holds one pooled connection for the length of the call (one GitHub
+request for `complete`). A signer that cannot import a key is a 409 ("import it out of
 band"). An invalid, expired, reused or foreign state, or a code GitHub refuses, is a 400 with a
 fixed text. Without `PUBLIC_BASE_URL` and `REGISTRATION_STATE_KEY` (at least 32 characters, shared
 by every replica) the three routes are a 503. The nonce is kept in Valkey (`SET EX`, `GETDEL`), in
@@ -152,9 +160,11 @@ event, like every other validation error.
 **Secrets.** The PEM, the webhook secret and the code are never returned, recorded in the audit
 log or logged by trustbridge. These routes parse their body themselves (`registration.parse_body`)
 because FastAPI's 422 detail echoes the offending input, which here would be the key or the secret;
-a bad body is reported by field name only. One exception to know about: the GitHub client's own
-request log (`httpx`, INFO) contains the one-time code, because the code is part of the URL it is
-exchanged at, and that request spends it.
+a bad body is reported by field name only. The GitHub client logs each request at INFO, URL included, and the conversion URL contains the
+one-time code (whoever holds an unspent one can exchange it for the key and the secret), so
+`trustbridge.github.client` attaches a `logging.Filter` (`MaskManifestCode`) to the `httpx2` and
+`httpx` loggers that rewrites the segment after `/app-manifests/` to `[MASKED]`. Nothing else in the
+logging configuration changes.
 
 ## Delivery requeue and tenant reconcile (NG6e-3)
 

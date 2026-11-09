@@ -6,6 +6,7 @@ definer functions work for the app role, and `/tenants` filters and pages in the
 CI's stack; reuses the tenancy suite's scratch database (tenants `a` and `b` on host `tb.test`).
 """
 
+import asyncio
 import importlib.util
 import json
 import logging
@@ -26,6 +27,7 @@ from sqlalchemy.exc import DBAPIError
 
 from tests.trustbridge.admin import test_registration_unit as reg
 from tests.trustbridge.admin.helpers import build, token
+from tests.trustbridge.signer.test_signers import make_key, pem_of
 from tests.trustbridge.tenancy import test_rls_integration as rls
 from trustbridge.adapters.store import OperationKind
 from trustbridge.admin.access import SqlTenantAccess, tenants_page
@@ -771,7 +773,35 @@ async def test_registration_end_to_end_stores_the_app_audits_it_and_leaks_nothin
         ]
         assert events[1].after["app_id"] == 123
         haystack = repr([tuple(e) for e in events] + [tuple(r) for r in stored]) + caplog.text
-        for canary in (reg.PEM, "BEGIN", reg.WEBHOOK_SECRET):
+        for canary in (reg.PEM, "BEGIN", reg.WEBHOOK_SECRET, reg.CODE):
             assert canary not in haystack
+    finally:
+        await _admin(db, "DELETE FROM github_host_registrations")
+
+
+async def test_two_registrations_of_one_host_cannot_overwrite_each_others_key_or_secret(
+    db: rls.Db, tmp_path: Path
+) -> None:
+    """The claim is a Postgres lock: the loser is a 409 before it writes anything."""
+    world = reg.World(tmp_path)
+    world.secrets.delay = 0.4  # the winner is still writing when the other arrives
+    runtime = world.runtime()
+    keys = {1: (pem_of(make_key()), "secret-one"), 2: (pem_of(make_key()), "secret-two")}
+
+    async def register(app_id: int) -> int:
+        pem, secret = keys[app_id]
+        body = {"app_id": app_id, "pem": pem, "webhook_secret": secret}
+        async with _client(db, "trustbridge:admin", registration=runtime) as client:
+            return (await client.post(reg.MANUAL, json=body)).status_code
+
+    try:
+        statuses = await asyncio.gather(register(1), register(2))
+        assert sorted(statuses) == [200, 409]
+        winner = 1 if statuses[0] == 200 else 2
+        pem, secret = keys[winner]
+        assert world.signer_path.read_text() == pem
+        assert list(world.secrets.items.values()) == [secret]
+        stored = await _admin(db, "SELECT app_id FROM github_host_registrations")
+        assert [r.app_id for r in stored] == [winner]
     finally:
         await _admin(db, "DELETE FROM github_host_registrations")

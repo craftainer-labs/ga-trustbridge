@@ -21,14 +21,15 @@ them, and failures are reported with fixed texts.
 """
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, SecretStr, ValidationError
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
@@ -157,6 +158,26 @@ class Conflict(Exception):  # noqa: N818 -- a result, mapped to a 409
     """The host got a registration while this call was in flight."""
 
 
+_CLAIM = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))")
+
+
+@asynccontextmanager
+async def claim(factory: async_sessionmaker[AsyncSession], host: str) -> AsyncIterator[None]:
+    """Hold the host's registration claim for the length of a registration, or raise `Conflict`.
+
+    A transaction-scoped Postgres advisory lock, taken before anything is written and held (in an
+    open transaction) until the registration has been saved, so a second registration of the same
+    host, on any replica, finds the claim taken and loses before it can touch the key or the
+    secret. Nothing is stored for the claim: it needs no migration, is never read as a
+    registration by another process, and a crashed process releases it with its connection.
+    """
+    async with factory() as session, session.begin():
+        won = (await session.execute(_CLAIM, {"key": f"tb:host-registration:{host}"})).scalar()
+        if not won:
+            raise Conflict
+        yield
+
+
 class _AuditedSink:
     """Saves the registration and appends the call's event in one transaction.
 
@@ -264,21 +285,30 @@ async def _run[T](
     rt: RegistrationRuntime,
     action: Action,
     call: Callable[[ManifestFlow, GitHubHostConfig], Awaitable[T]],
+    *,
+    writes: bool = True,
 ) -> T:
     """Run one registration call and leave exactly one audit event.
 
     The success event is written by the audited sink in the transaction that saves the
     registration (`start` has nothing to save and writes its own). Any other outcome, a refusal
     included, leaves a `failure` event in its own transaction, best effort.
+
+    A call that `writes` (the key, the secret, the row) first takes the host's claim and only then
+    checks that the host is unregistered, so two registrations of one host cannot both get to
+    write: the loser is a 409 before it touches anything.
     """
     try:
         host = _config(rt, ctx.host)
-        await _require_unregistered(rt, host, ctx.factory)
-        sink = _AuditedSink(
-            ctx.factory,
-            lambda reg: ctx.event(action, Outcome.SUCCESS, _registration_state(reg)),
-        )
-        return await call(ManifestFlow(replace(rt.deps, registrations=sink)), host)
+        async with AsyncExitStack() as stack:
+            if writes:
+                await stack.enter_async_context(claim(ctx.factory, ctx.host))
+            await _require_unregistered(rt, host, ctx.factory)
+            sink = _AuditedSink(
+                ctx.factory,
+                lambda reg: ctx.event(action, Outcome.SUCCESS, _registration_state(reg)),
+            )
+            return await call(ManifestFlow(replace(rt.deps, registrations=sink)), host)
     except AdminProblem:
         await _failure(ctx, action)
         raise
@@ -350,7 +380,7 @@ async def start(ctx: Context, rt: RegistrationRuntime) -> RegistrationStartOut:
             post_url=started.post_url, manifest_json=started.manifest_json, state=started.state
         )
 
-    return await _run(ctx, rt, Action.HOST_REGISTRATION_START, call)
+    return await _run(ctx, rt, Action.HOST_REGISTRATION_START, call, writes=False)
 
 
 async def _record_success(ctx: Context, action: Action, after: dict[str, Any]) -> None:

@@ -1,5 +1,6 @@
 """Host registration through the admin API over fakes (ADR 0030, ADR 0033, NG6e-4)."""
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -30,7 +31,7 @@ from trustbridge.admin.registration import (
 from trustbridge.admin.schemas import ManualIn
 from trustbridge.audit import Action, AuditEvent, AuditWriter, Outcome
 from trustbridge.github.availability import HostState
-from trustbridge.github.client import GitHubApi, GitHubRequester
+from trustbridge.github.client import GitHubApi, GitHubRequester, MaskManifestCode
 from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.manifest import AppKind, ManifestFlow, ManifestFlowError, StartRequest
 from trustbridge.main import _registration_runtime
@@ -56,9 +57,15 @@ class Secrets:
         """Start empty."""
         self.items: dict[str, str] = {}
         self.fail = False
+        self.delay = 0.0
+        self.trace: list[str] | None = None
 
     async def write(self, ref: str, value: SecretStr) -> None:
-        """Store a secret, or fail."""
+        """Store a secret (after `delay`), or fail."""
+        if self.trace is not None:
+            self.trace.append("secret")
+        if self.delay:
+            await asyncio.sleep(self.delay)
         if self.fail:
             raise OSError("secret store down")
         self.items[ref] = value.get_secret_value()
@@ -89,6 +96,8 @@ class World:
         self.signer_path = tmp_path / "app.pem"
         self.stored: str | None = None
         self.insert_wins = True
+        self.lock_free = True
+        self.trace: list[str] = []
         self.events: list[AuditEvent] = []
         self.written: list[AuditEvent] = []
         self.writer_error: Exception | None = None
@@ -139,12 +148,22 @@ class World:
         world = self
 
         class Session(FakeSession):
+            locks = False
+
+            async def __aexit__(self, *exc: object) -> None:
+                if self.locks:
+                    world.trace.append("unlock")
+
             async def scalar(self, statement: object) -> str | None:
                 del statement
                 return world.stored
 
-            async def execute(self, statement: object) -> Any:  # noqa: ANN401
-                del statement
+            async def execute(self, statement: object, params: dict[str, Any] | None = None) -> Any:  # noqa: ANN401
+                del params
+                if "pg_try_advisory_xact_lock" in str(statement):
+                    self.locks = True
+                    world.trace.append("lock")
+                    return SimpleNamespace(scalar=lambda: world.lock_free)
                 return SimpleNamespace(first=lambda: ("github.com",) if world.insert_wins else None)
 
         return Session
@@ -259,11 +278,10 @@ def test_start_then_complete_registers_the_host_without_leaking_a_secret(
         "webhook_secret_ref": "store:github-hosts/github.com/webhook-secret",
     }
     haystack = response.text + repr(_all_events(world)) + caplog.text
-    for canary in (PEM, "BEGIN", WEBHOOK_SECRET):
+    for canary in (PEM, "BEGIN", WEBHOOK_SECRET, CODE):
         assert canary not in haystack
-    # The one-time code is in the GitHub client's own request log (it is part of the URL it is
-    # exchanged at, and spent by that very request); it is in no response or audit event.
-    assert CODE not in response.text + repr(_all_events(world))
+    # The GitHub client did log the conversion request, with the code masked.
+    assert "/app-manifests/[MASKED]/conversions" in caplog.text
 
 
 def test_a_state_cannot_be_reused_or_used_by_another_caller_or_after_it_expires(
@@ -533,3 +551,62 @@ def test_the_runtime_is_built_only_when_the_base_url_and_state_key_are_set(
     assert isinstance(shared.deps.nonces, ValkeyNonceStore)
     with pytest.raises(ValidationError):
         make_settings(registration_state_key="short")
+
+
+def test_a_registration_takes_the_claim_before_it_writes_and_releases_it_after(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """lock, then the secret write, then the claim's transaction ends."""
+    world = World(tmp_path)
+    world.secrets.trace = world.trace
+    body = {"app_id": 1, "pem": PEM, "webhook_secret": WEBHOOK_SECRET}
+    assert _client(monkeypatch, world, ADMIN).post(MANUAL, json=body).status_code == 200
+    assert world.trace.index("lock") < world.trace.index("secret")
+    assert world.trace[-1] == "unlock"
+
+
+def test_a_registration_that_loses_the_claim_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """409 and a failure event; the key file and the secret store are untouched."""
+    world = World(tmp_path)
+    world.lock_free = False
+    client = _client(monkeypatch, world, ADMIN)
+    started = _client(monkeypatch, world, OPERATOR).post(START)
+    assert started.status_code == 200  # `start` writes nothing, so it needs no claim
+    body = {"app_id": 1, "pem": PEM, "webhook_secret": WEBHOOK_SECRET}
+    problem(client.post(MANUAL, json=body), 409, "conflict")
+    state = started.json()["state"]
+    problem(client.post(COMPLETE, json={"code": CODE, "state": state}), 409, "conflict")
+    assert not world.signer_path.exists()
+    assert world.secrets.items == {}
+    failed = [e for e in world.written if e.outcome is Outcome.FAILURE]
+    assert [e.action for e in failed] == [
+        Action.HOST_REGISTRATION_MANUAL,
+        Action.HOST_REGISTRATION_COMPLETE,
+    ]
+
+
+def test_the_http_clients_request_log_hides_the_manifest_code() -> None:
+    """The filter rewrites the message and keeps the record; other messages pass untouched."""
+    mask = MaskManifestCode()
+    record = logging.LogRecord(
+        "httpx2",
+        logging.INFO,
+        __file__,
+        1,
+        'HTTP Request: %s %s "%s"',
+        ("POST", "https://api.github.com/app-manifests/c0de-1234/conversions", "HTTP/1.1 201"),
+        None,
+    )
+    assert mask.filter(record) is True
+    assert record.getMessage() == (
+        "HTTP Request: POST https://api.github.com/app-manifests/[MASKED]/conversions "
+        '"HTTP/1.1 201"'
+    )
+    plain = logging.LogRecord("httpx2", logging.INFO, __file__, 1, "other %s", ("x",), None)
+    assert mask.filter(plain) is True
+    assert plain.getMessage() == "other x"
+    for name in ("httpx2", "httpx"):
+        filters = logging.getLogger(name).filters
+        assert sum(isinstance(f, MaskManifestCode) for f in filters) == 1
