@@ -363,9 +363,9 @@ def test_a_github_failure_during_the_exchange_is_a_502_that_never_carries_the_co
         f"{r.exc_text or ''}{r.getMessage()}{r.exc_info!r}" for r in caplog.records
     )
     assert CODE not in response.text + repr(_all_events(world)) + logs
-    assert CODE not in "".join(
-        str(r.exc_info[1]) + repr(r.exc_info[1].__cause__) for r in caplog.records if r.exc_info
-    )
+    for record in caplog.records:
+        error = record.exc_info[1] if record.exc_info else None
+        assert error is None or CODE not in f"{error!s}{error.__cause__!r}"
 
 
 def test_manual_registration_stores_the_app_and_never_echoes_the_key_or_secret(
