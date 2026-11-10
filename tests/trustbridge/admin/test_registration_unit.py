@@ -25,11 +25,13 @@ from trustbridge.admin.registration import (
     MemoryNonceStore,
     RegistrationRuntime,
     ValkeyNonceStore,
+    _AuditedSink,
+    _failure,
     build_deps,
     parse_body,
 )
 from trustbridge.admin.schemas import ManualIn
-from trustbridge.audit import Action, AuditEvent, AuditWriter, Outcome
+from trustbridge.audit import Action, ActorType, AuditEvent, AuditWriter, Outcome
 from trustbridge.github.availability import HostState
 from trustbridge.github.client import (
     GitHubApi,
@@ -488,6 +490,31 @@ def test_an_unexpected_error_leaves_a_failure_event_and_a_failing_writer_hides_n
     assert "could not record the failed host.registration.manual event" in caplog.text
     assert WEBHOOK_SECRET not in caplog.text
     assert PEM not in caplog.text
+
+
+async def test_no_failure_event_follows_a_committed_success_event(tmp_path: Path) -> None:
+    """Once the sink has committed the success event, a later error adds no second event."""
+    world = World(tmp_path)
+    ctx: Any = SimpleNamespace(writer=Writer(world), event=lambda _a, _o: _event())
+    sink: Any = _AuditedSink(None, lambda _reg: _event())  # type: ignore[arg-type]
+    await _failure(ctx, Action.HOST_REGISTRATION_MANUAL, sink)
+    assert len(world.written) == 1
+    sink.recorded = True
+    await _failure(ctx, Action.HOST_REGISTRATION_MANUAL, sink)
+    assert len(world.written) == 1
+
+
+def _event() -> AuditEvent:
+    return AuditEvent(
+        actor_type=ActorType.USER,
+        actor_sub="s",
+        actor_iss="i",
+        tenant_id=None,
+        action=Action.HOST_REGISTRATION_MANUAL,
+        resource_type="host",
+        resource_id="h",
+        outcome=Outcome.FAILURE,
+    )
 
 
 async def test_the_nonce_stores_hand_out_each_nonce_once() -> None:

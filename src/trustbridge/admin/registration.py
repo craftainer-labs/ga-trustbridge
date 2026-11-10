@@ -298,6 +298,7 @@ async def _run[T](
     checks that the host is unregistered, so two registrations of one host cannot both get to
     write: the loser is a 409 before it touches anything.
     """
+    sink: _AuditedSink | None = None
     try:
         host = _config(rt, ctx.host)
         async with AsyncExitStack() as stack:
@@ -310,27 +311,27 @@ async def _run[T](
             )
             return await call(ManifestFlow(replace(rt.deps, registrations=sink)), host)
     except AdminProblem:
-        await _failure(ctx, action)
+        await _failure(ctx, action, sink)
         raise
     except Conflict:
-        await _failure(ctx, action)
+        await _failure(ctx, action, sink)
         raise AdminProblem(409, "conflict", "The host already has a registered App") from None
     except SignerImportUnsupportedError:
-        await _failure(ctx, action)
+        await _failure(ctx, action, sink)
         raise AdminProblem(
             409, "conflict", "The host's signer cannot import a key; import it out of band"
         ) from None
     except SignerError:
-        await _failure(ctx, action)
+        await _failure(ctx, action, sink)
         raise AdminProblem(422, "validation", "The private key could not be read") from None
     except ManifestFlowError as exc:
         logger.warning("registration refused for host %s: %s", ctx.host, exc)
-        await _failure(ctx, action)
+        await _failure(ctx, action, sink)
         raise AdminProblem(
             400, "bad-request", "The registration state or code is invalid, expired or used"
         ) from None
     except Exception:
-        await _failure(ctx, action)
+        await _failure(ctx, action, sink)
         raise
 
 
@@ -346,9 +347,12 @@ def _registration_state(reg: Registration) -> dict[str, Any]:
     )
 
 
-async def _failure(ctx: Context, action: Action) -> None:
-    """Best effort: a `failure` event in its own transaction; never hides the original error."""
-    if ctx.writer is None:
+async def _failure(ctx: Context, action: Action, sink: _AuditedSink | None = None) -> None:
+    """Best effort: a `failure` event in its own transaction; never hides the original error.
+
+    Nothing is written once the sink has committed the success event: one event per call.
+    """
+    if ctx.writer is None or (sink is not None and sink.recorded):
         return
     try:
         await ctx.writer.record(ctx.event(action, Outcome.FAILURE))
