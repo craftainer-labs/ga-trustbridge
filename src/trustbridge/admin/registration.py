@@ -60,6 +60,7 @@ from trustbridge.github.manifest import (
     ManifestDeps,
     ManifestFlow,
     ManifestFlowError,
+    ManifestUpstreamError,
     ManualApp,
     StartRequest,
 )
@@ -324,6 +325,11 @@ async def _run[T](
     except SignerError:
         await _failure(ctx, action, sink)
         raise AdminProblem(422, "validation", "The private key could not be read") from None
+    except ManifestUpstreamError:
+        await _failure(ctx, action, sink)
+        raise AdminProblem(
+            502, "bad-gateway", "GitHub could not be reached or failed to answer"
+        ) from None
     except ManifestFlowError as exc:
         logger.warning("registration refused for host %s: %s", ctx.host, exc)
         await _failure(ctx, action, sink)

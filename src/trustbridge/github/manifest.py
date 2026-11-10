@@ -65,6 +65,9 @@ TRUSTBRIDGE_EVENTS = ["repository"]
 ARGOCD_PERMISSIONS: dict[str, str] = {"contents": "read", "metadata": "read"}
 
 
+_SERVER_ERROR = 500
+
+
 class AppKind(StrEnum):
     """Which App a registration flow creates."""
 
@@ -74,6 +77,14 @@ class AppKind(StrEnum):
 
 class ManifestFlowError(Exception):
     """The flow cannot continue (bad or reused state, no signer import, conversion failed)."""
+
+
+class ManifestUpstreamError(ManifestFlowError):
+    """GitHub could not be reached or failed to answer the conversion (a transport error or 5xx).
+
+    Its text is fixed: the request URL carries the one-time code, so no part of the underlying
+    error is kept.
+    """
 
 
 class RegistrationSink(Protocol):
@@ -332,8 +343,12 @@ class ManifestFlow:
                 "POST", f"/app-manifests/{quote(code, safe='')}/conversions"
             )
         except GitHubApiError as exc:
+            # `from None`: the chained error's text names the request path, which holds the code.
+            if exc.status == 0 or exc.status >= _SERVER_ERROR:
+                msg = "GitHub could not be reached or failed to answer the manifest conversion"
+                raise ManifestUpstreamError(msg) from None
             msg = f"GitHub refused the manifest code (HTTP {exc.status})"
-            raise ManifestFlowError(msg) from exc
+            raise ManifestFlowError(msg) from None
         return ManifestConversion.model_validate(resp.data)
 
     async def _store_trustbridge(

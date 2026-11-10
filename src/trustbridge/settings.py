@@ -56,6 +56,7 @@ __all__ = [
 
 
 DEFAULT_ADMIN_MAX_BODY_BYTES = 16384
+MIN_STATE_KEY_LENGTH = 32
 """The default of `ADMIN_MAX_BODY_BYTES`; `admin.runtime.DEFAULT_MAX_BODY_BYTES` is this value."""
 
 
@@ -210,7 +211,7 @@ class TrustbridgeSettings(Settings):
     # and forwards code and state to the admin API) and the one-time `state` is signed with
     # `registration_state_key`, shared by every replica. Both unset: the start route is a 503.
     public_base_url: str | None = None
-    registration_state_key: SecretStr | None = Field(default=None, min_length=32)
+    registration_state_key: SecretStr | None = None
 
     # Largest request body an admin route reads (413 above it, chunked bodies included; NG6e).
     admin_max_body_bytes: int = Field(default=DEFAULT_ADMIN_MAX_BODY_BYTES, gt=0)
@@ -226,6 +227,17 @@ class TrustbridgeSettings(Settings):
     # Keycloak's acceptance of `:` in client role names is not confirmed by its docs.
     rbac_alias_template_personas: bool = True
     rbac_role_separator: str = ":"
+
+    @field_validator("registration_state_key")
+    @classmethod
+    def _check_state_key(cls, value: SecretStr | None) -> SecretStr | None:
+        """At least 32 characters: the key signs the registration `state` (checked here rather
+        than left to `Field(min_length=...)`, which a `SecretStr | None` union may not apply)."""
+        if value is not None and len(value.get_secret_value()) < MIN_STATE_KEY_LENGTH:
+            raise ValueError(
+                f"REGISTRATION_STATE_KEY must be at least {MIN_STATE_KEY_LENGTH} characters"
+            )
+        return value
 
     @field_validator("rbac_role_separator")
     @classmethod

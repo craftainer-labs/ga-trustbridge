@@ -147,7 +147,8 @@ request for `complete`). A signer that cannot import a key is a 409 ("import it 
 band"). An invalid, expired, reused or foreign state, or a code GitHub refuses, is a 400 with a
 fixed text. Without `PUBLIC_BASE_URL` and `REGISTRATION_STATE_KEY` (at least 32 characters, shared
 by every replica) the three routes are a 503. The nonce is kept in Valkey (`SET EX`, `GETDEL`), in
-the process without Valkey (`MODE=mock`).
+the process without Valkey (`MODE=mock`); a deployment with more than one replica needs Valkey so
+a `state` is one-use across them (the in-process store is per replica and never evicts).
 
 **Audit.** Exactly one event per call that reaches the operation, on `resource_type=host`,
 `resource_id=<host>`, no tenant: `host.registration.start` (after `{kind}`, written once the state is
@@ -242,6 +243,7 @@ Every error under `/admin/v1` is `application/problem+json` (ADR 0004) with `typ
 | `validation` | 422 | a query parameter the schema rejects |
 | `rate-limited` | 429 | over a bucket; `Retry-After` is the whole seconds left in the window |
 | `internal` | 500 | an unhandled error (the detail is redacted outside `MODE=dev`) |
+| `bad-gateway` | 502 | GitHub could not be reached or failed (5xx) while exchanging the manifest code; the one-time code is spent, so the registration is started again |
 | `unavailable` | 503 | no database configured (`MODE=mock`), or the connection store cannot be listed |
 
 The classes are open: v1 may add one. Errors off `/admin/v1` keep the template's `about:blank`.

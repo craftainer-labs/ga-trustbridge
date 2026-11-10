@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
+import httpx2
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
@@ -331,6 +332,42 @@ def test_a_code_github_refuses_is_a_400(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert world.secrets.items == {}
 
 
+@pytest.mark.parametrize("failure", ["transport", "server"])
+def test_a_github_failure_during_the_exchange_is_a_502_that_never_carries_the_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    """The request URL holds the one-time code: no response, audit row or log may."""
+    caplog.set_level(logging.DEBUG)
+    world = World(tmp_path)
+    path = f"/app-manifests/{CODE}/conversions"
+
+    def transport_error(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError(f"cannot reach {request.url}", request=request)
+
+    if failure == "transport":
+        world.gh.on("POST", path, transport_error)
+    else:
+        world.gh.route("POST", path, 503, {"message": "down"})
+    client = _client(monkeypatch, world, OPERATOR)
+    state = client.post(START).json()["state"]
+    response = client.post(COMPLETE, json={"code": CODE, "state": state})
+    problem(response, 502, "bad-gateway")
+    assert not world.signer_path.exists()
+    assert world.secrets.items == {}
+    done = [e for e in _all_events(world) if e.action is Action.HOST_REGISTRATION_COMPLETE]
+    assert [e.outcome for e in done] == [Outcome.FAILURE]
+    logs = caplog.text + "".join(
+        f"{r.exc_text or ''}{r.getMessage()}{r.exc_info!r}" for r in caplog.records
+    )
+    assert CODE not in response.text + repr(_all_events(world)) + logs
+    assert CODE not in "".join(
+        str(r.exc_info[1]) + repr(r.exc_info[1].__cause__) for r in caplog.records if r.exc_info
+    )
+
+
 def test_manual_registration_stores_the_app_and_never_echoes_the_key_or_secret(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -583,6 +620,9 @@ def test_the_runtime_is_built_only_when_the_base_url_and_state_key_are_set(
     assert isinstance(shared.deps.nonces, ValkeyNonceStore)
     with pytest.raises(ValidationError):
         make_settings(registration_state_key="short")
+    with pytest.raises(ValidationError, match="at least 32 characters"):
+        make_settings(registration_state_key="k" * 31)
+    assert make_settings(registration_state_key="k" * 32).registration_state_key is not None
 
 
 def test_a_registration_takes_the_claim_before_it_writes_and_releases_it_after(
