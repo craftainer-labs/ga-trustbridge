@@ -10,7 +10,7 @@
   `privileged_credential` becomes `AdapterConfig.privileged_credential`.
 - `ReconcileRequests`: `ReconcileScheduler`; tenant ids are added to the Valkey set
   `tb:reconcile` (a process-local set without Valkey). Consuming the set is the reconcile
-  loop's job (NG5/NG6); until then requests are recorded, not acted on.
+  loop's job (NG5r); until then requests are recorded, not acted on.
 - The lease needs no adapter: `trustbridge.worker.lease.LeaseManager.hold` and `Lease.guard`
   satisfy the core's `LeaseProvider` and `Lease`.
 """

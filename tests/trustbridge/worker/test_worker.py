@@ -231,7 +231,7 @@ async def test_requeue_refuses_a_row_whose_body_was_purged() -> None:  # inv. 7
     """Requeue refuses a row whose body was purged."""
     h = await Harness({}).start()
     await h.add("d1")
-    await h.store.mark_dead(key("d1"), "x", h.clock())
+    await h.store.mark_dead(key("d1"), "x", h.clock(), attempts=0)
     h.advance(31 * 86400)
     assert await h.store.purge_bodies(h.clock(), h.clock()) == 1
     assert await h.store.requeue(key("d1")) is False
@@ -302,3 +302,47 @@ async def test_an_unusable_body_is_a_counted_handler_failure(
     assert (row.status, row.attempts) == ("pending", 1)
     assert row.last_error is not None
     assert row.last_error.startswith(error)
+
+
+async def test_a_lost_claim_leaves_the_row_alone_on_success(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The row changed under the worker (a counted failure elsewhere): `processed` is skipped."""
+    h = await Harness({}).start()
+
+    async def handler(ctx: EventContext) -> None:
+        # another consumer counted a failure while this one was handling the same delivery
+        await h.store.record_failure(key("d1"), "elsewhere", h.clock(), h.clock())
+
+    h.registry.register("push", handler)
+    await h.add("d1")
+    await h.worker.run_once()
+    row = await h.store.get(key("d1"))
+    assert row is not None
+    assert (row.status, row.attempts) == ("pending", 1)
+    assert "status update skipped" in caplog.text
+    assert (await h.valkey.xpending("tb:events", "tb-workers"))["pending"] == 0
+
+
+async def test_a_lost_claim_does_not_dead_letter_a_row_that_was_settled() -> None:
+    """The last attempt fails, but another consumer already processed the row: no dead letter."""
+    state = {"calls": 0}
+
+    async def handler(ctx: EventContext) -> None:
+        state["calls"] += 1
+        if state["calls"] == 3:
+            # settled by someone else mid-handle
+            await h.store.mark_processed(key("d1"), h.clock(), attempts=2)
+        raise RuntimeError("always")
+
+    h = await Harness({"push": handler}).start()
+    await h.add("d1")
+    for _ in range(3):
+        await h.worker.run_once()
+        h.advance(900)
+        await h.relay.tick()
+    row = await h.store.get(key("d1"))
+    assert row is not None
+    assert row.status == "processed"
+    assert h.valkey.entries("tb:events:dead") == []
+    assert (await h.valkey.xpending("tb:events", "tb-workers"))["pending"] == 0

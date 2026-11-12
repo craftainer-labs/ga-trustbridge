@@ -163,8 +163,9 @@ async def test_the_memory_store_ignores_unknown_ids_and_settled_rows() -> None:
     await store.insert(NewDelivery("d1", "h", "push", {}, b"{}", now))
     other = DeliveryKey("h", "d1")
     await store.mark_relayed([DeliveryKey("h", "missing"), other], now)
-    await store.mark_dead(other, "x", now)
-    await store.mark_processed(other, now)
+    assert await store.mark_dead(other, "x", now, attempts=1) is False  # not the claimed generation
+    assert await store.mark_dead(other, "x", now, attempts=0) is True
+    assert await store.mark_processed(other, now, attempts=0) is False
     row = await store.get(other)
     assert row is not None
     assert (row.status, row.last_relayed_at) == ("dead", now)

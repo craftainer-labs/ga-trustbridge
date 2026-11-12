@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Literal, NamedTuple, Protocol
 
-from sqlalchemy import ColumnElement, and_, delete, or_, select, tuple_, update
+from sqlalchemy import ColumnElement, Update, and_, delete, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -105,8 +105,12 @@ class DeliveryStore(Protocol):
         """The subset of `keys` that has a stored row."""
         ...
 
-    async def mark_processed(self, key: DeliveryKey, now: datetime) -> None:
-        """Mark a pending row processed."""
+    async def mark_processed(self, key: DeliveryKey, now: datetime, *, attempts: int) -> bool:
+        """Mark a row processed only if it is still `pending` with this `attempts` (its claim).
+
+        `attempts` is the row's generation: it changes with every counted failure and a requeue
+        resets it, so a claim whose row moved on affects nothing. Returns whether it updated.
+        """
         ...
 
     async def record_failure(
@@ -119,8 +123,10 @@ class DeliveryStore(Protocol):
         """Delay a row without counting a failure (busy lease)."""
         ...
 
-    async def mark_dead(self, key: DeliveryKey, error: str, now: datetime) -> None:
-        """Move a row to `dead`."""
+    async def mark_dead(
+        self, key: DeliveryKey, error: str, now: datetime, *, attempts: int
+    ) -> bool:
+        """Move a row to `dead` only if it is still `pending` with this `attempts` (its claim)."""
         ...
 
     async def requeue(self, key: DeliveryKey) -> bool:
@@ -244,10 +250,13 @@ class InMemoryDeliveryStore:
         """Replace fields of a row."""
         self.rows[key] = replace(self.rows[key], **changes)  # type: ignore[arg-type]
 
-    async def mark_processed(self, key: DeliveryKey, now: datetime) -> None:
-        """Mark processed."""
-        if self.rows[key].status == PENDING:
-            self._set(key, status=PROCESSED, processed_at=now, next_attempt_at=None)
+    async def mark_processed(self, key: DeliveryKey, now: datetime, *, attempts: int) -> bool:
+        """Mark processed if the claim still holds."""
+        row = self.rows[key]
+        if row.status != PENDING or row.attempts != attempts:
+            return False
+        self._set(key, status=PROCESSED, processed_at=now, next_attempt_at=None)
+        return True
 
     async def record_failure(
         self, key: DeliveryKey, error: str, now: datetime, next_attempt_at: datetime
@@ -266,9 +275,15 @@ class InMemoryDeliveryStore:
         """Delay without counting."""
         self._set(key, next_attempt_at=until)
 
-    async def mark_dead(self, key: DeliveryKey, error: str, now: datetime) -> None:
-        """Move to dead."""
+    async def mark_dead(
+        self, key: DeliveryKey, error: str, now: datetime, *, attempts: int
+    ) -> bool:
+        """Move to dead if the claim still holds."""
+        row = self.rows[key]
+        if row.status != PENDING or row.attempts != attempts:
+            return False
         self._set(key, status=DEAD, dead_at=now, last_error=error, next_attempt_at=None)
+        return True
 
     async def requeue(self, key: DeliveryKey) -> bool:
         """Requeue a dead row whose body is still stored."""
@@ -367,6 +382,30 @@ def _record(row: WebhookDelivery) -> DeliveryRecord:
     )
 
 
+def requeue_statement(key: DeliveryKey) -> Update:
+    """The one UPDATE that makes a dead row with a body deliverable again (counter reset).
+
+    `PgDeliveryStore.requeue` runs it in its own transaction; the admin API runs the same
+    statement in the request's transaction, so the audit event commits with the change.
+    """
+    return (
+        update(WebhookDelivery)
+        .where(
+            _is(key),
+            WebhookDelivery.status == DEAD,
+            WebhookDelivery.body.is_not(None),
+        )
+        .values(
+            status=PENDING,
+            attempts=0,
+            dead_at=None,
+            last_error=None,
+            next_attempt_at=None,
+            last_relayed_at=None,
+        )
+    )
+
+
 class PgDeliveryStore:
     """Postgres-backed outbox; each method is one committed transaction."""
 
@@ -456,13 +495,16 @@ class PgDeliveryStore:
             result = await session.execute(stmt)  # type: ignore[call-overload]
             return int(result.rowcount)
 
-    async def mark_processed(self, key: DeliveryKey, now: datetime) -> None:
-        """Mark processed."""
-        await self._exec(
+    async def mark_processed(self, key: DeliveryKey, now: datetime, *, attempts: int) -> bool:
+        """Mark processed if the row is still pending with the claimed `attempts`."""
+        count = await self._exec(
             update(WebhookDelivery)
-            .where(_is(key), WebhookDelivery.status == PENDING)
+            .where(
+                _is(key), WebhookDelivery.status == PENDING, WebhookDelivery.attempts == attempts
+            )
             .values(status=PROCESSED, processed_at=now, next_attempt_at=None)
         )
+        return count == 1
 
     async def record_failure(
         self, key: DeliveryKey, error: str, now: datetime, next_attempt_at: datetime
@@ -490,33 +532,22 @@ class PgDeliveryStore:
             .values(next_attempt_at=until)
         )
 
-    async def mark_dead(self, key: DeliveryKey, error: str, now: datetime) -> None:
-        """Move a pending row to dead."""
-        await self._exec(
-            update(WebhookDelivery)
-            .where(_is(key), WebhookDelivery.status == PENDING)
-            .values(status=DEAD, dead_at=now, last_error=error, next_attempt_at=None)
-        )
-
-    async def requeue(self, key: DeliveryKey) -> bool:
-        """Requeue a dead row whose body still exists, resetting its counter."""
+    async def mark_dead(
+        self, key: DeliveryKey, error: str, now: datetime, *, attempts: int
+    ) -> bool:
+        """Move a pending row to dead if it still has the claimed `attempts`."""
         count = await self._exec(
             update(WebhookDelivery)
             .where(
-                _is(key),
-                WebhookDelivery.status == DEAD,
-                WebhookDelivery.body.is_not(None),
+                _is(key), WebhookDelivery.status == PENDING, WebhookDelivery.attempts == attempts
             )
-            .values(
-                status=PENDING,
-                attempts=0,
-                dead_at=None,
-                last_error=None,
-                next_attempt_at=None,
-                last_relayed_at=None,
-            )
+            .values(status=DEAD, dead_at=now, last_error=error, next_attempt_at=None)
         )
         return count == 1
+
+    async def requeue(self, key: DeliveryKey) -> bool:
+        """Requeue a dead row whose body still exists, resetting its counter."""
+        return await self._exec(requeue_statement(key)) == 1
 
     async def mark_relayed(self, keys: Sequence[DeliveryKey], now: datetime) -> None:
         """Record relays."""

@@ -101,7 +101,8 @@ failure fails the handler, the delivery is retried and the sync repeats, so the 
 at-least-once and a retry may add a second one) and the orphan sweep's events (the platform
 credential is already deleted; if the write fails the sweep finishes, logs each unaudited
 orphan, then fails). Credential state changes are implemented this way: the event is appended in
-the save's own session. Audit writes use the same tenant context as the action (0031).
+the save's own session, and so is the admin rotate call's own event when the call finishes the
+rotation (`JoinedCallEvent`; NG6i). Audit writes use the same tenant context as the action (0031).
 
 ### Redaction
 

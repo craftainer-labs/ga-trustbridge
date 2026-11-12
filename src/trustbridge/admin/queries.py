@@ -28,6 +28,7 @@ from trustbridge.admin.schemas import (
     RepositoryOut,
     ResourceOut,
 )
+from trustbridge.worker.deliveries import DeliveryKey, requeue_statement
 
 _REPOSITORIES = text(
     "SELECT tenant_id, repository_id, full_name FROM tenant_repositories "
@@ -71,15 +72,9 @@ _DELIVERY = text(
     "FROM webhook_deliveries WHERE host = :host AND delivery_id = :delivery_id"
 )
 _LOCK_DELIVERY = text(
-    "SELECT status, attempts, dead_at, last_error, body IS NOT NULL AS has_body "
+    "SELECT status, attempts, dead_at, last_error, next_attempt_at, "
+    "body IS NOT NULL AS has_body "
     "FROM webhook_deliveries WHERE host = :host AND delivery_id = :delivery_id FOR UPDATE"
-)
-# The same values `PgDeliveryStore.requeue` sets, here in the caller's transaction so the audit
-# event commits with the change.
-_REQUEUE = text(
-    "UPDATE webhook_deliveries SET status = 'pending', attempts = 0, dead_at = NULL, "
-    "last_error = NULL, next_attempt_at = NULL, last_relayed_at = NULL "
-    "WHERE host = :host AND delivery_id = :delivery_id"
 )
 _EPOCH_ID = UUID(int=0)
 
@@ -322,11 +317,22 @@ async def requeue_delivery(session: AsyncSession, host: str, delivery_id: str) -
         "attempts": row["attempts"],
         "dead_at": row["dead_at"],
         "last_error": row["last_error"],
+        "next_attempt_at": row["next_attempt_at"],
     }
     if row["status"] == "pending":
         return Requeue(before, before, changed=False)
     if row["status"] != "dead" or not row["has_body"]:
         raise AdminProblem(409, "conflict", "Only a dead delivery with its body can be requeued")
-    await session.execute(_REQUEUE, params)
-    after = {"status": "pending", "attempts": 0, "dead_at": None, "last_error": None}
+    result = await session.execute(requeue_statement(DeliveryKey(host, delivery_id)))
+    if (
+        result.rowcount != 1
+    ):  # the statement is conditional: never report a reset that did not happen
+        raise AdminProblem(409, "conflict", "Only a dead delivery with its body can be requeued")
+    after = {
+        "status": "pending",
+        "attempts": 0,
+        "dead_at": None,
+        "last_error": None,
+        "next_attempt_at": None,
+    }
     return Requeue(before, after, changed=True)

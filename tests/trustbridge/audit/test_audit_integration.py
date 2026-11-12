@@ -16,7 +16,7 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -63,7 +63,11 @@ from trustbridge.audit import (
     purge_batch,
     purge_expired,
 )
-from trustbridge.audit.credentials import CredentialAuditObserver
+from trustbridge.audit.credentials import (
+    CredentialAuditObserver,
+    JoinedCallEvent,
+    join_call_event,
+)
 from trustbridge.audit.denial import Denial
 from trustbridge.tenancy import install_tenant_hook, tenant_session
 
@@ -961,6 +965,62 @@ async def test_a_credential_event_commits_with_its_change_and_not_without_it(db:
     )
     assert record.after is not None
     assert record.after["operation_id"] == str(operation.id)
+
+
+async def test_the_callers_rotation_event_commits_with_the_finishing_save_or_not_at_all(
+    db: Db,
+) -> None:
+    """Inv. 9 for the admin call: the joined `credential.rotate` event shares the save's fate."""
+    tenant = uuid4()
+    credential, operation = _rotation(tenant)
+    finished = replace(operation, status=OperationStatus.FINISHED)
+    observer = CredentialAuditObserver(AuditWriter(db.app), SystemActor.API)
+
+    def pending() -> JoinedCallEvent:
+        return JoinedCallEvent(
+            tenant,
+            "k1",
+            lambda operation_id: AuditEvent(
+                actor_type=ActorType.USER,
+                actor_sub="u1",
+                actor_iss="https://idp.test",
+                tenant_id=tenant,
+                action=Action.CREDENTIAL_ROTATE,
+                resource_type="credential",
+                resource_id="k1",
+                outcome=Outcome.SUCCESS,
+                after={"operation_id": str(operation_id)},
+            ),
+        )
+
+    async def save() -> None:
+        async with tenant_session(db.app, tenant) as session, session.begin():
+            await observer.saved(
+                session,
+                previous_kind="secret",
+                previous_status=OperationStatus.DELIVERED,
+                credential=credential,
+                operation=finished,
+            )
+
+    rolled_back = pending()
+    with pytest.raises(RuntimeError, match="change failed"), join_call_event(rolled_back):
+        async with tenant_session(db.app, tenant) as session, session.begin():
+            await observer.saved(
+                session,
+                previous_kind="secret",
+                previous_status=OperationStatus.DELIVERED,
+                credential=credential,
+                operation=finished,
+            )
+            raise RuntimeError("change failed")
+    assert await _tenant_events(db, tenant) == []  # neither the finish event nor the call event
+    committed = pending()
+    with join_call_event(committed):
+        await save()
+    assert committed.written is True
+    actions = sorted(r.action.value for r in await _tenant_events(db, tenant))
+    assert actions == ["credential.rotate", "credential.rotate.finish"]
 
 
 async def test_a_canary_in_a_credential_name_reference_or_error_reaches_no_row(db: Db) -> None:

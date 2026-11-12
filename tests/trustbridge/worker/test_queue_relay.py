@@ -18,9 +18,9 @@ async def test_the_resweep_after_stream_loss_re_adds_every_live_row() -> None:  
     for delivery_id in ("d1", "d2", "d3", "d4", "d5"):
         await h.add(delivery_id, relay=False)
     await h.relay.relay_keys([key("d1"), key("d2"), key("d3"), key("d5")])  # d4 was never relayed
-    await h.store.mark_processed(key("d2"), h.clock())
+    await h.store.mark_processed(key("d2"), h.clock(), attempts=0)
     await h.store.defer(key("d3"), h.clock() + timedelta(hours=1))
-    await h.store.mark_dead(key("d5"), "x", h.clock())
+    await h.store.mark_dead(key("d5"), "x", h.clock(), attempts=0)
     await h.valkey.flushall()  # restart without persistence / flush / failover
     await h.queue.ensure_group()
     h.advance(1)

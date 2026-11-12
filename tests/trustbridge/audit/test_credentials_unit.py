@@ -4,6 +4,7 @@ Pure derivation plus the observer with `append` and the writer faked; the same-t
 behaviour against Postgres is in `test_emit_integration.py`.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -300,3 +301,72 @@ async def test_an_orphan_deletion_is_recorded_with_the_platform_name_only() -> N
     )
     assert event.after == {"adapter": "ghcr"}
     assert event.actor_sub == "worker"
+
+
+def _joined(build_calls: list[UUID]) -> creds.JoinedCallEvent:
+    def build(operation_id: UUID) -> AuditEvent:
+        build_calls.append(operation_id)
+        return AuditEvent(
+            actor_type=ActorType.USER,
+            actor_sub="u1",
+            actor_iss="https://idp.test",
+            tenant_id=TENANT,
+            action=Action.CREDENTIAL_ROTATE,
+            resource_type="credential",
+            resource_id="k1",
+            outcome=Outcome.SUCCESS,
+        )
+
+    return creds.JoinedCallEvent(TENANT, "k1", build)
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "scope_key", "joins"),
+    [
+        (OperationKind.ROTATE, OperationStatus.FINISHED, "k1", True),
+        (OperationKind.ROTATE, OperationStatus.DELIVERED, "k1", False),  # still open
+        (OperationKind.ROTATE, OperationStatus.FINISHED, "other", False),  # another scope
+        (OperationKind.DELETE, OperationStatus.FINISHED, "k1", False),  # not a rotation
+    ],
+)
+async def test_the_save_that_finishes_the_callers_rotation_appends_the_joined_event(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: OperationKind,
+    status: OperationStatus,
+    scope_key: str,
+    joins: bool,
+) -> None:
+    """Inv. 9: the call's event goes into the finishing save's session, once, or not at all."""
+    appended: list[tuple[object, AuditEvent]] = []
+
+    async def fake_append(session: object, event: AuditEvent) -> UUID:
+        appended.append((session, event))
+        return event.id
+
+    monkeypatch.setattr(creds, "append", fake_append)
+    built: list[UUID] = []
+    pending = _joined(built)
+    op = replace(_op(kind, status, base_kind="secret", base=OLD), scope_key=scope_key)
+    stored = replace(_stored("secret", CredentialState(current=_slot(2))), scope_key=scope_key)
+    observer = CredentialAuditObserver(cast("AuditWriter", object()), SystemActor.API)
+    session = RecordingSession()
+
+    async def save() -> None:
+        await observer.saved(
+            cast("AsyncSession", session),
+            previous_kind="secret",
+            previous_status=OperationStatus.DELIVERED,
+            credential=stored,
+            operation=op,
+        )
+
+    await save()  # outside the block: nothing is joined
+    assert built == []
+    with creds.join_call_event(pending):
+        await save()
+        await save()  # a second finishing save never appends the call event twice
+    joined = [e for _, e in appended if e.action is Action.CREDENTIAL_ROTATE]
+    assert len(joined) == (1 if joins else 0)
+    assert pending.written is joins
+    assert built == ([op.id] if joins else [])
+    assert all(s is session for s, _ in appended)

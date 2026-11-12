@@ -155,9 +155,20 @@ nothing rotatable (an OIDC scope), a lease held by another unit of work, or an a
 configured for the tenant; **502 `bad-gateway`** when the platform, GitHub or the secret store
 fails (the exception, which may carry anything, is neither chained nor logged beyond its type
 name). The success is one `credential.rotate` event (resource `credential`, id the scope key,
-`after` `{adapter, operation_kind, operation_id}`), written after the core returns; the core's own
-state changes are audited in their transactions. If that event cannot be written the call fails
-(500) and the rotation stays resumable.
+`after` `{adapter, operation_kind, operation_id}`); the core's own state changes are audited in
+their transactions. **Audit-failure policy (NG6i, ADR 0032 invariant 9).** A call that finishes the
+rotation has its `credential.rotate` event appended by the finishing save, in that save's
+transaction (`audit.credentials.JoinedCallEvent`, found by the observer through a context
+variable). If the append fails the save rolls back, the call is a 500 with a `failure` event, the
+rotation is still open and a retry resumes it (it never rotates twice, and a finished rotation is
+never committed without its call event). A call that leaves the rotation open (a two-phase
+overlap, a manual step) writes the event after the core returns; if that fails the call is a 500
+and the open rotation stays resumable. Not covered: a call that finishes a `delete` or `switch`
+operation it found open (it never starts one), whose event is written after the core returns.
+No migration and no API change. Sources: OWASP Logging Cheat Sheet (log events about the change
+with the change; a failure to log is itself an event to handle), NIST SP 800-53 AU-5 (respond to
+audit logging process failures; for a security-relevant change, fail the action rather than
+continue unaudited).
 
 ## Host registration (NG6e-4)
 
@@ -235,17 +246,19 @@ is a 409; an unknown one a 404. `host` is at most 63 and `delivery_id` at most 1
 above), so `host/delivery_id` fits an audit `resource_id`. The answer has the stored payload for
 an operator and never the headers.
 
-**Known limits.** A requeue can race a worker that is handling the same delivery: both may process
-it, or one may overwrite the other's status. Handlers are idempotent (ADR 0029), so this is safe
-today, and NG6i adds conditional status updates in the worker. The `delivery` shape of the event
-does not record `next_attempt_at` (also NG6i). The requeue SQL duplicates `PgDeliveryStore.requeue`
-because it has to run in the request's transaction (NG6i folds it into the store).
+The event's `before` and `after` include `next_attempt_at`. The reset is
+`worker.deliveries.requeue_statement`, the same statement `PgDeliveryStore.requeue` runs, executed
+here in the request's transaction. A requeue can race a worker that is handling the same
+delivery; the worker's `mark_processed` and `mark_dead` update only a row that is still `pending`
+with the `attempts` they claimed (NG6i), so a lost claim changes nothing. Handlers are idempotent
+(ADR 0029), so a double run is still safe.
 
 **Reconcile** records the tenant in the reconcile set (`ReconcileRequests`, Valkey `tb:reconcile`),
 so a repeat is one request, and answers 202. The event (`tenant.reconcile`, no `before`/`after`)
 is appended first, then the request recorded, then the transaction commits, so a queue failure
 leaves no `success` event. A disabled tenant is a 409. **Nothing consumes the set yet**: the
-reconcile loop is NG6i, so today the request is only recorded. Without a queue (no
+consumer and the tenant reconcile body are NG5r (it will re-check `admin_disabled_at`, ADR 0033
+invariant 19), so today the request is only recorded and stays queued. Without a queue (no
 `AdminRuntime.scheduler`) the route is a 503.
 
 ## Tenant disable and enable (NG6e-2)
@@ -359,7 +372,7 @@ not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_
 
 - `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
   (ADR 0034); NG6h.
-- The tenant-deletion `POST`s (NG6h). The consumer of the reconcile set is NG6i.
+- The tenant-deletion `POST`s (NG6h). The consumer of the reconcile set is NG5r.
 - The `transaction_timeout` / `AUDIT_EXPORT_LAG_SECONDS` startup check: NG6h.
 - ADR 0033 stays Proposed until the mutating routes (NG6e) and the deletion reads (NG6h) exist.
 

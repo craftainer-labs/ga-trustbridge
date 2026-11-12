@@ -12,7 +12,7 @@ Implemented on main (NG6, see `src/trustbridge/admin/README.md` for the as-shipp
 - Mutating side (NG6e-1 to NG6e-5): the foundation (tenant admin-disable columns and
   `tb_set_tenant_disabled`, the instance-only tenant guard, the request body bound, the mutation
   router walk); tenant disable and enable with their enforcement in the worker and the adapter
-  core; delivery requeue; tenant reconcile (the request is recorded, its consumer is NG6i); host
+  core; delivery requeue; tenant reconcile (the request is recorded, its consumer is NG5r); host
   registration (start, complete, manual); credential rotate, run in the api.
 - Failure events of every mutating call (registration, rotation, disable, enable, requeue, reconcile) carry a fixed reason code (NG6e-6, 0032).
 
@@ -255,7 +255,7 @@ the `tenant_deletions` table of 0034):
 | Endpoint | Scope | Min role | Implemented |
 | --- | --- | --- | --- |
 | `POST /deliveries/{host}/{id}/requeue` | instance | operator | NG6e-3 |
-| `POST /tenants/{t}/reconcile` | tenant | operator | NG6e-3 (records the request; consumer NG6i) |
+| `POST /tenants/{t}/reconcile` | tenant | operator | NG6e-3 (records the request; consumer NG5r) |
 | `POST /tenants/{t}/credentials/{adapter}/{scope_key}/rotate` (`scope_key` path-encoded and bounded) | tenant | operator | NG6e-5 |
 | `POST /hosts/{host}/registration` (start the manifest flow) | instance | operator | NG6e-4 |
 | `POST /hosts/{host}/registration/complete` (the BFF forwards the manifest flow's `code` and `state`; 0030) | instance | operator | NG6e-4 |

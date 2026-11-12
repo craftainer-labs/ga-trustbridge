@@ -61,6 +61,14 @@ class TenantDisabled(Exception):  # noqa: N818 -- a control-flow signal, not a f
     """The delivery's tenant is admin-disabled: it is deferred and no failure is counted."""
 
 
+def _lost_claim(row: DeliveryRecord, outcome: str) -> None:
+    """Log that the conditional status update found the row changed since it was claimed."""
+    logger.warning(
+        "delivery changed since it was claimed; status update skipped",
+        extra={"host": row.host, "delivery_id": row.delivery_id, "outcome": outcome},
+    )
+
+
 class Worker:
     """One consumer in the `tb-workers` group."""
 
@@ -127,7 +135,9 @@ class Worker:
             from_pending
             and await queue.delivery_count(entry.entry_id) > self._s.max_delivery_attempts
         ):
-            await self._dead(row, entry, "worker ended while handling this delivery repeatedly")
+            await self._dead(
+                row, entry, "worker ended while handling this delivery repeatedly", row.attempts
+            )
             return
         try:
             await self._handle(row)
@@ -145,7 +155,9 @@ class Worker:
             error = f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
             await self._failed(row, entry, error)
         else:
-            await store.mark_processed(row.key, self._d.clock())
+            done = await store.mark_processed(row.key, self._d.clock(), attempts=row.attempts)
+            if not done:
+                _lost_claim(row, "processed")
             await queue.ack(entry.entry_id)
 
     async def _failed(self, row: DeliveryRecord, entry: StreamEntry, error: str) -> None:
@@ -160,13 +172,23 @@ class Worker:
         )
         await self._d.store.record_failure(row.key, error, self._d.clock(), when)
         if attempts >= self._s.max_delivery_attempts:
-            await self._dead(row, entry, error)
+            await self._dead(row, entry, error, attempts)
         else:
             await self._d.queue.ack(entry.entry_id)
 
-    async def _dead(self, row: DeliveryRecord, entry: StreamEntry, error: str) -> None:
-        """Mark dead in Postgres, add `{host, delivery_id, error}` to the dead letter, ack."""
-        await self._d.store.mark_dead(row.key, error, self._d.clock())
+    async def _dead(
+        self, row: DeliveryRecord, entry: StreamEntry, error: str, attempts: int
+    ) -> None:
+        """Mark dead in Postgres, add `{host, delivery_id, error}` to the dead letter, ack.
+
+        `attempts` is the counter the row has now (after a counted failure, one more than the
+        claim). If the row moved on meanwhile (requeued, processed by another consumer) nothing
+        is changed or dead-lettered; the entry is only acknowledged.
+        """
+        if not await self._d.store.mark_dead(row.key, error, self._d.clock(), attempts=attempts):
+            _lost_claim(row, "dead")
+            await self._d.queue.ack(entry.entry_id)
+            return
         await self._d.queue.dead_letter(row.key, error)
         await self._d.queue.ack(entry.entry_id)
         metrics.deliveries_dead.add(1)
