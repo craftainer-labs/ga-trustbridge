@@ -67,6 +67,7 @@ from trustbridge.audit import (
     scrub_text,
 )
 from trustbridge.audit.emit import with_trace
+from trustbridge.audit.redact import FailureReason, failure_after
 from trustbridge.audit.store import append, get_event
 from trustbridge.rbac import Principal, Role, get_principal, instance_roles
 from trustbridge.rbac.deps import client_ip, safe_request_id
@@ -365,16 +366,47 @@ async def _set_disabled(  # noqa: PLR0913 - the request, the caller and what to 
             if fresh is None:
                 raise AdminProblem(404, "not-found", "Tenant not found")
             info = TenantInfo(*fresh)
-    except AdminProblem:
+    except AdminProblem as problem:
+        await _record_failure(
+            runtime, action, _failed_tenant(request, principal, tenant_id, action, problem)
+        )
         raise
     except Exception:
         await _record_failure(
             runtime,
             action,
-            lambda: _tenant_event(request, principal, tenant_id, action, Outcome.FAILURE),
+            lambda: _tenant_event(
+                request,
+                principal,
+                tenant_id,
+                action,
+                Outcome.FAILURE,
+                after=failure_after(FailureReason.INTERNAL),
+            ),
         )
         raise
     return _tenant_out(info)
+
+
+def _problem_reason(problem: AdminProblem) -> FailureReason:
+    """The failure reason of a refusal by its status; anything else (a 503) is `unavailable`."""
+    return FailureReason.for_status(problem.status_code)
+
+
+def _failed_tenant(  # noqa: PLR0913 - one value per recorded fact
+    request: Request,
+    principal: Principal,
+    tenant_id: UUID,
+    action: Action,
+    problem: AdminProblem,
+    *,
+    reason: FailureReason | None = None,
+) -> Callable[[], AuditEvent]:
+    """The builder of a refusal's `failure` event: `reason`, or the one its status implies."""
+    code = reason or _problem_reason(problem)
+    return lambda: _tenant_event(
+        request, principal, tenant_id, action, Outcome.FAILURE, after=failure_after(code)
+    )
 
 
 async def _record_failure(
@@ -603,7 +635,22 @@ async def requeue_delivery(
                 delivery_id,
                 with_payload=Role.OPERATOR in instance_roles(principal),
             )
-    except AdminProblem:
+    except AdminProblem as problem:
+        code = _problem_reason(problem)
+        await _record_failure(
+            runtime,
+            Action.DELIVERY_REQUEUE,
+            lambda: _event(
+                request,
+                principal,
+                Action.DELIVERY_REQUEUE,
+                Outcome.FAILURE,
+                tenant_id=None,
+                resource_type="delivery",
+                resource_id=resource_id,
+                after=failure_after(code),
+            ),
+        )
         raise
     except Exception:
         await _record_failure(
@@ -617,6 +664,7 @@ async def requeue_delivery(
                 tenant_id=None,
                 resource_type="delivery",
                 resource_id=resource_id,
+                after=failure_after(FailureReason.INTERNAL),
             ),
         )
         raise
@@ -647,26 +695,40 @@ async def reconcile_tenant(
     """
     if runtime.scheduler is None:
         raise AdminProblem(503, "unavailable", "No reconcile queue is configured")
+    reason: FailureReason | None = None
     try:
         async with _factory(runtime)() as session, session.begin():
             fresh = (await session.execute(_GET_TENANT, {"id": tenant_id})).first()
             if fresh is None:
                 raise AdminProblem(404, "not-found", "Tenant not found")
             if TenantInfo(*fresh).admin_disabled_at is not None:
+                reason = FailureReason.TENANT_DISABLED
                 raise AdminProblem(409, "conflict", "The tenant is disabled")
             event = _tenant_event(
                 request, principal, tenant_id, Action.TENANT_RECONCILE, Outcome.SUCCESS
             )
             await append(session, with_trace(event))
             await runtime.scheduler.schedule(tenant_id)
-    except AdminProblem:
+    except AdminProblem as problem:
+        await _record_failure(
+            runtime,
+            Action.TENANT_RECONCILE,
+            _failed_tenant(
+                request, principal, tenant_id, Action.TENANT_RECONCILE, problem, reason=reason
+            ),
+        )
         raise
     except Exception:
         await _record_failure(
             runtime,
             Action.TENANT_RECONCILE,
             lambda: _tenant_event(
-                request, principal, tenant_id, Action.TENANT_RECONCILE, Outcome.FAILURE
+                request,
+                principal,
+                tenant_id,
+                Action.TENANT_RECONCILE,
+                Outcome.FAILURE,
+                after=failure_after(FailureReason.INTERNAL),
             ),
         )
         raise

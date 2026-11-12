@@ -1,11 +1,12 @@
 # admin/
 
-The admin API v1, read side ([ADR 0033](../../../docs/adrs/0033-admin-api-v1-rbac-and-limits.md),
-NG6d-1 and NG6d-2). Mounted by `trustbridge.main` under `/admin/v1`; authentication and roles come from
+The admin API v1 ([ADR 0033](../../../docs/adrs/0033-admin-api-v1-rbac-and-limits.md): the read
+side is NG6d-1 and NG6d-2, the mutating routes NG6e-2 to NG6e-5; tenant deletion is NG6h). Mounted by `trustbridge.main` under `/admin/v1`; authentication and roles come from
 `trustbridge.rbac`, the tenant context from `trustbridge.tenancy`, audit data from
 `trustbridge.audit`. Imports `app.oidc` and `app.problem_details`; nothing in `src/app/` is edited.
 
-- `routes.py`: the router and the handlers (read only; every route is a `GET`).
+- `routes.py`: the router and the handlers, reads and the mutating routes.
+- `registration.py`, `credentials.py`: host registration and credential rotation (below).
 - `guards.py`: `guard(role, bucket, tenant_param=..., instance_only=...)` returns a route's `dependencies`: first
   `get_principal` (authentication), then the principal's rate-limit bucket (keyed on a hash of
   `(iss, sub)`; it runs before the role check so an over-limit caller costs no tenant lookup),
@@ -43,6 +44,27 @@ NG6d-1 and NG6d-2). Mounted by `trustbridge.main` under `/admin/v1`; authenticat
 - `cursor.py`: the opaque cursor and `paginate`.
 - `schemas.py`: one pydantic model per resource.
 - `metrics.py`: the admin counters.
+
+## Routes at a glance (v1)
+
+Every route is under `/admin/v1`, declares one role, and answers errors as `application/problem+json`.
+`{t}` is `{tenant_id}`. Scope is where the role must be held: *instance* means an instance-wide
+grant, *tenant* means a grant on that tenant or an instance grant.
+
+| Route | Min role / scope | Section |
+| --- | --- | --- |
+| `GET /me`, `/openapi.json`, `/hosts`, `/hosts/{host}`, `/tenants`, `/tenants/{t}`, `/tenants/{t}/repositories`, `/resources`, `/credentials`, `/operations`, `/adapters`, `/deliveries`, `/deliveries/{host}/{id}` | `viewer` (`/me` and `/openapi.json`: any caller) | Routes (read side) |
+| `GET /audit-events`, `/audit-events/{id}`, `/audit-events/export`, `/tenants/{t}/audit-events`, `/tenants/{t}/audit-events/export` | `auditor` | Routes (read side) |
+| `POST /tenants/{t}/disable`, `/tenants/{t}/enable` | `admin`, instance | Tenant disable and enable |
+| `POST /deliveries/{host}/{id}/requeue` | `operator`, instance | Delivery requeue and tenant reconcile |
+| `POST /tenants/{t}/reconcile` | `operator`, tenant | Delivery requeue and tenant reconcile |
+| `POST /tenants/{t}/credentials/{adapter}/{scope_key}/rotate` | `operator`, tenant | Credential rotation |
+| `POST /hosts/{host}/registration`, `/registration/complete` | `operator`, instance | Host registration |
+| `POST /hosts/{host}/registration/manual` | `admin`, instance | Host registration |
+
+Not built: `GET /tenant-deletions*`, `POST /tenants/{t}/deletion` and the cancel and skip-step
+routes (NG6h, ADR 0034), any write of adapter connection data (decided: operator-only), and a
+policies endpoint (no table). `docs/openapi/admin-v1.json` is the committed contract.
 
 ## Routes (v1, read side)
 
@@ -156,6 +178,10 @@ host's signer and writes the webhook secret to the secret store; the answer has 
 reference only. `manual` does the same storage for a hand-registered App (GHES enterprise Apps);
 the PEM must be an unencrypted RSA key (the signer refuses anything else with a 422).
 
+**`PUBLIC_BASE_URL`** must be an absolute `https` origin (`http` only for `localhost`, `127.0.0.1` or
+`::1`), with no credentials, path, query or fragment; a trailing slash is dropped. Anything else
+stops the settings from loading. Production additionally requires it (template rule).
+
 **Rules.** Only `kind=trustbridge` Apps are offered (an Argo CD App would write connection data,
 which the admin API never does). A host that already has an App (configured with one, registered
 in the database, or not `unregistered` in this replica) is a 409, so a key is never overwritten.
@@ -209,6 +235,12 @@ is a 409; an unknown one a 404. `host` is at most 63 and `delivery_id` at most 1
 above), so `host/delivery_id` fits an audit `resource_id`. The answer has the stored payload for
 an operator and never the headers.
 
+**Known limits.** A requeue can race a worker that is handling the same delivery: both may process
+it, or one may overwrite the other's status. Handlers are idempotent (ADR 0029), so this is safe
+today, and NG6i adds conditional status updates in the worker. The `delivery` shape of the event
+does not record `next_attempt_at` (also NG6i). The requeue SQL duplicates `PgDeliveryStore.requeue`
+because it has to run in the request's transaction (NG6i folds it into the store).
+
 **Reconcile** records the tenant in the reconcile set (`ReconcileRequests`, Valkey `tb:reconcile`),
 so a repeat is one request, and answers 202. The event (`tenant.reconcile`, no `before`/`after`)
 is appended first, then the request recorded, then the transaction commits, so a queue failure
@@ -251,6 +283,44 @@ core, not here:
 **N-1 gap.** A pod of the release before this one does not know the columns: while a rolling
 deploy mixes versions, an old worker still handles a disabled tenant's webhooks. Disable and
 enable are complete once every worker runs this release.
+
+## Failure reasons
+
+A `failure` event of a registration or a rotation carries `after = {"reason": <code>}`, a
+`FailureReason` (`audit/redact.py`), never text from an exception: `not_found`, `conflict`,
+`tenant_disabled`, `not_rotatable`, `not_configured`, `lease_busy`, `lease_lost`, `invalid_state`
+(a bad, expired, reused or foreign registration state or code), `invalid_key` (a PEM the signer
+refuses), `host_not_ready`, `secret_unavailable` (the secret store), `upstream` (the platform or
+GitHub), `unavailable`, `cancelled` (the client went away; the rotation stays open) and `internal`.
+The HTTP answer has its own fixed text; the code is for the audit trail. Every admin failure event has
+this shape, including the four routes that are not rotation or registration: disable, enable,
+requeue and reconcile write one for a 404 (`not_found`), a 409 (`conflict`, or the more specific
+`tenant_disabled` for a reconcile of a disabled tenant), a 503 (`unavailable`) and an unexpected
+error (`internal`). So every call that reaches a handler leaves exactly one event, in its own
+transaction when it is a failure (ADR 0032 invariant 8). The exceptions are a body that fails
+validation (a 422 before the handler, like every other validation error), a refusal by a guard
+(`authz.denied`, 401 and 403), a route precondition such as a missing reconcile queue (503), and
+the unreachable 404 after a requeue's success event has committed.
+
+## Runbook: a registration that left an App behind
+
+`complete` and `manual` first import the key into the signer and write the webhook secret, and only
+then save the registration row (inside the claim, so two attempts cannot interleave). If the save,
+or anything before it, fails, GitHub may already hold an App that the manifest flow created, and
+the signer file and the secret store may hold its key and secret, while the host is still
+`unregistered`. The failure event says why (`reason`). To recover:
+
+1. Find the App on GitHub (the host's `web_url`, *Settings > Developer settings > GitHub Apps*, or
+   the organisation's; its name is `trustbridge-<host>`) and **delete it**, so its key and webhook
+   secret are void. Do not reuse it: trustbridge holds no row for it.
+2. Remove what is left locally: the signer's key file (the host's `SIGNERS` path; the file signer
+   writes it with mode 0600) and the secret `store:github-hosts/<host>/webhook-secret` in the
+   secret store (`SECRET_STORE_DIR`). `GET /hosts/{host}` should show `unregistered`.
+3. Check there is no row: the host must not be listed in `github_host_registrations`. If one
+   exists the registration did succeed; stop here.
+4. Start again with `POST /hosts/{host}/registration` (a fresh `state`) or `.../manual`. Leftovers
+   would be overwritten anyway, but a stale App on GitHub would keep delivering webhooks signed
+   with a secret nobody holds, which is why step 1 comes first.
 
 ## Problem types
 

@@ -49,6 +49,7 @@ from trustbridge.admin.problems import AdminProblem
 from trustbridge.audit import Action, ActorType, AuditEvent, AuditWriter, Outcome, project
 from trustbridge.audit.actions import SystemActor
 from trustbridge.audit.credentials import CredentialAuditObserver
+from trustbridge.audit.redact import FailureReason, failure_after
 from trustbridge.github.availability import HostNotReadyError
 from trustbridge.github.client import GitHubApiError
 from trustbridge.github.writer import GitHubEnvironmentInspector, GitHubOutputWriter
@@ -116,12 +117,24 @@ async def _record(call: Call, outcome: Outcome, after: Mapping[str, object] | No
     await call.writer.record(call.event(outcome, after))
 
 
-async def _failure(call: Call) -> None:
-    """Best effort: a `failure` event in its own transaction; never hides the original error."""
+async def _failure(call: Call, reason: FailureReason) -> None:
+    """Best effort: a `failure` event in its own transaction; never hides the original error.
+
+    The event carries a `FailureReason` code, never a message.
+    """
     try:
-        await _record(call, Outcome.FAILURE)
+        await _record(call, Outcome.FAILURE, failure_after(reason))
     except Exception:
         logger.exception("could not record the failed %s event", Action.CREDENTIAL_ROTATE.value)
+
+
+def _upstream_reason(exc: Exception) -> FailureReason:
+    """Which upstream failed, by type only."""
+    if isinstance(exc, HostNotReadyError):
+        return FailureReason.HOST_NOT_READY
+    if isinstance(exc, SecretUnavailable):
+        return FailureReason.STORE_UNAVAILABLE
+    return FailureReason.UPSTREAM
 
 
 async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
@@ -140,24 +153,29 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
         tenant = await rt.tenants.get_tenant(call.tenant_id)
         result = await rt.core.rotate_scope(tenant, call.adapter, stored.scope)
     except AdminProblem:
-        await _failure(call)
+        await _failure(call, FailureReason.NOT_FOUND)
         raise
     except UnknownTenantError:
-        await _failure(call)
+        await _failure(call, FailureReason.NOT_FOUND)
         raise AdminProblem(404, "not-found", "Tenant not found") from None
     except TenantDisabledError:
-        await _failure(call)
+        await _failure(call, FailureReason.TENANT_DISABLED)
         raise AdminProblem(409, "conflict", "The tenant is disabled") from None
     except RotationNotApplicableError:
-        await _failure(call)
+        await _failure(call, FailureReason.NOT_ROTATABLE)
         raise AdminProblem(409, "conflict", "The credential has no rotatable secret") from None
-    except LeaseBusy, LeaseLost, LeaseLostError:
-        await _failure(call)
+    except LeaseBusy:
+        await _failure(call, FailureReason.LEASE_BUSY)
+        raise AdminProblem(
+            409, "conflict", "The credential is being changed; retry shortly"
+        ) from None
+    except LeaseLost, LeaseLostError:
+        await _failure(call, FailureReason.LEASE_LOST)
         raise AdminProblem(
             409, "conflict", "The credential is being changed; retry shortly"
         ) from None
     except AdapterConfigurationError:
-        await _failure(call)
+        await _failure(call, FailureReason.NOT_CONFIGURED)
         raise AdminProblem(
             409, "conflict", "The adapter is not configured for this tenant"
         ) from None
@@ -171,19 +189,19 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
         SecretUnavailable,
     ) as exc:
         logger.warning("rotation failed for tenant %s: %s", call.tenant_id, type(exc).__name__)
-        await _failure(call)
+        await _failure(call, _upstream_reason(exc))
         raise AdminProblem(
             502, "bad-gateway", "The platform or GitHub failed to complete the rotation"
         ) from None
     except asyncio.CancelledError:
         # The client went away mid-rotation: the operation stays open for the reconciler, but the
         # call still leaves its event (shielded, so the cancellation cannot cut the write short).
-        await asyncio.shield(_failure(call))
+        await asyncio.shield(_failure(call, FailureReason.CANCELLED))
         raise
     except Exception as exc:
         # Unmapped: never let the chain (which may hold a secret) reach the error logger.
         logger.error("rotation crashed for tenant %s: %s", call.tenant_id, type(exc).__name__)
-        await _failure(call)
+        await _failure(call, FailureReason.INTERNAL)
         raise AdminProblem(500, "internal", "The rotation failed unexpectedly") from None
     await _record_success(call, result.operation_id)
     return RotationOut(

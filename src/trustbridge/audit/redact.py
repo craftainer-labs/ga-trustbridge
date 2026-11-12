@@ -11,6 +11,7 @@ import math
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
@@ -27,6 +28,37 @@ _SECRET_PAIR = re.compile(
 _OPAQUE_RUN = re.compile(r"[A-Za-z0-9+/_=-]{40,}")
 SECRET_WORDS = ("token", "password", "passwd", "secret", "authorization", "credential", "key")
 """Substrings that mark a mapping key as secret-bearing; a read drops such a key (fail closed)."""
+
+
+class FailureReason(StrEnum):
+    """Why a mutating admin call failed: a small fixed set, never text from an exception.
+
+    A `failure` event records one of these in `after` (the `failure` shape), so an auditor can
+    tell a refusal from an outage without the event carrying anything a caller or an upstream
+    wrote. Add a member here (and to ADR 0032's list) rather than recording a message.
+    """
+
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+    TENANT_DISABLED = "tenant_disabled"
+    NOT_ROTATABLE = "not_rotatable"
+    NOT_CONFIGURED = "not_configured"
+    LEASE_BUSY = "lease_busy"
+    LEASE_LOST = "lease_lost"
+    INVALID_STATE = "invalid_state"
+    INVALID_KEY = "invalid_key"
+    HOST_NOT_READY = "host_not_ready"
+    STORE_UNAVAILABLE = "secret_unavailable"  # the secret store
+    UPSTREAM = "upstream"
+    UNAVAILABLE = "unavailable"
+    CANCELLED = "cancelled"
+    INTERNAL = "internal"
+
+    @classmethod
+    def for_status(cls, status_code: int) -> FailureReason:
+        """The reason a refusal with this HTTP status implies: 404, 409, else `unavailable`."""
+        return {404: cls.NOT_FOUND, 409: cls.CONFLICT}.get(status_code, cls.UNAVAILABLE)
+
 
 ALLOW_LISTS: Mapping[str, frozenset[str]] = {
     "tenant": frozenset({"state"}),
@@ -52,6 +84,8 @@ ALLOW_LISTS: Mapping[str, frozenset[str]] = {
     "connection": frozenset({"configured"}),
     # NG6e-4: a host registration (ids and the secret's reference, never the key or the secret).
     "host_registration": frozenset({"kind", "app_id", "app_slug", "webhook_secret_ref"}),
+    # NG6e-6: the reason code of a failure event (`FailureReason`, never free text).
+    "failure": frozenset({"reason"}),
     "authz_denial": frozenset(
         {"reason", "required_role", "scope", "suppressed", "window_seconds", "window", "sample"}
     ),
@@ -134,3 +168,13 @@ def project(shape: str, source: Mapping[str, Any]) -> dict[str, Any]:
     if allowed is None:
         raise ValueError(f"no audit allow-list for {shape!r}")
     return {key: _scalar(key, source[key]) for key in sorted(allowed) if key in source}
+
+
+def failure_after(reason: FailureReason) -> dict[str, Any]:
+    """The `after` of a `failure` event: the reason code and nothing else.
+
+    Takes a `FailureReason` only, so a message from an exception cannot get in by this route.
+    """
+    if not isinstance(reason, FailureReason):
+        raise ValueError("a failure reason must be a FailureReason")
+    return project("failure", {"reason": reason.value})

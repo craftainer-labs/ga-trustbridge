@@ -115,7 +115,12 @@ generation, delivered flag, previous generation and retire-after timestamp (`red
 value goes through `scrub_text` (the same policy the logs apply, ADR 0007: control characters
 dropped, secret-shaped parts masked, a PEM block replaced whole) and is truncated at 256
 characters with a marker; an unknown shape or a non-scalar value is an error. A test plants a
-canary secret in every audited input and asserts it appears in no row (invariant 6).
+canary secret in every audited input and asserts it appears in no row (invariant 6). A `failure`
+event of an admin call records a reason code in `after` (`{"reason": ...}`, the `failure` shape),
+one of a small fixed set (`FailureReason` in `audit/redact.py`: `not_found`, `conflict`,
+`tenant_disabled`, `not_rotatable`, `not_configured`, `lease_busy`, `lease_lost`, `invalid_state`,
+`invalid_key`, `host_not_ready`, `secret_unavailable`, `upstream`, `unavailable`, `cancelled`,
+`internal`), and never text from an exception.
 
 ### Append-only enforcement
 

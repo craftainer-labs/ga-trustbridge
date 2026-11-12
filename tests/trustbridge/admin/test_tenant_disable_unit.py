@@ -286,14 +286,20 @@ def test_a_tenant_scoped_admin_and_a_weaker_role_are_rejected(
     assert world.params == []
 
 
-def test_an_unknown_tenant_row_is_a_404_and_writes_no_event(
+def test_an_unknown_tenant_row_is_a_404_with_a_failure_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The tenant vanished between the guard and the write."""
     world = World(_row(tenant_found=False))
     problem(_client(monkeypatch, world, ADMIN).post(ENABLE), 404, "not-found")
     assert world.events == []
-    assert world.written == []
+    (event,) = world.written
+    assert (event.action, event.outcome, event.tenant_id) == (
+        Action.TENANT_ENABLE,
+        Outcome.FAILURE,
+        ACME.id,
+    )
+    assert event.after == {"reason": "not_found"}
 
 
 def test_a_tenant_deleted_after_the_write_is_a_404(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -301,6 +307,7 @@ def test_a_tenant_deleted_after_the_write_is_a_404(monkeypatch: pytest.MonkeyPat
     world = World()
     world.info = None
     problem(_client(monkeypatch, world, ADMIN).post(ENABLE), 404, "not-found")
+    assert [e.after for e in world.written] == [{"reason": "not_found"}]
 
 
 def test_a_failure_rolls_back_and_leaves_a_failure_event(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -311,7 +318,20 @@ def test_a_failure_rolls_back_and_leaves_a_failure_event(monkeypatch: pytest.Mon
     assert world.events == []
     (event,) = world.written
     assert (event.action, event.outcome) == (Action.TENANT_DISABLE, Outcome.FAILURE)
-    assert (event.before, event.after) == (None, None)
+    assert (event.before, event.after) == (None, {"reason": "internal"})
+
+
+def test_a_failed_enable_leaves_a_failure_event_with_a_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enable and disable share the shape: the fixed code, nothing from the error."""
+    world = World(error=RuntimeError(f"db down {CANARY}"))
+    client = _client(monkeypatch, world, ADMIN, server_errors=False)
+    problem(client.post(ENABLE), 500, "internal")
+    (event,) = world.written
+    assert (event.action, event.outcome) == (Action.TENANT_ENABLE, Outcome.FAILURE)
+    assert (event.before, event.after) == (None, {"reason": "internal"})
+    assert CANARY not in repr(event)
 
 
 def test_a_failure_event_that_cannot_be_written_does_not_hide_the_error(

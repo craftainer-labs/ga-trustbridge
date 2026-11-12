@@ -61,7 +61,7 @@ effective defaults are logged at startup.
 | `RETRY_BACKOFF_BASE_SECONDS` / `_MAX_SECONDS` | 30 / 1800 | Retry delay `base * 2^(failures-1)`, capped. With 8 attempts a delivery is retried for about an hour (30, 60, 120, 240, 480, 960, 1800 s) before it is dead-lettered; a longer platform outage needs a requeue. |
 | `BUSY_RETRY_SECONDS` | 10 | Delay after a busy lease (not a failure). |
 | `DISABLED_TENANT_RETRY_SECONDS` | 15 | Delay before a disabled tenant's delivery is checked again (not a failure). |
-| `PUBLIC_BASE_URL` | unset | Public base URL of the deployment, used in the GitHub App manifest (webhook URL and the redirect URL the BFF serves); unset: host registration is a 503 (ADR 0030). |
+| `PUBLIC_BASE_URL` | unset | Public base URL of the deployment, used in the GitHub App manifest (webhook URL and the redirect URL the BFF serves). An absolute https origin (http only for localhost, 127.0.0.1, ::1), no credentials, path, query or fragment; the trailing slash is dropped; a bad value stops the load. Unset: host registration is a 503 (ADR 0030). |
 | `REGISTRATION_STATE_KEY` | unset | At least 32 characters, shared by every api replica; signs the manifest flow's one-time `state`. Unset: host registration is a 503. |
 | `STREAM_CLAIM_IDLE_SECONDS` | 120 | A pending entry idle this long is claimed from a dead consumer. Keep it above the longest handler run (the lease TTL). |
 | `LEASE_TTL_SECONDS` / `ADAPTER_CALL_TIMEOUT_SECONDS` | 120 / 30 | The timeout must be shorter than the TTL (validated). |

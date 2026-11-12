@@ -1,11 +1,19 @@
 """The NG6e audit shapes, the shared redaction helpers and the new action names (ADR 0032, 0033)."""
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
 from trustbridge.audit import Action, project
-from trustbridge.audit.redact import REDACTED, SECRET_WORDS, has_secret_word, printable
+from trustbridge.audit.redact import (
+    REDACTED,
+    SECRET_WORDS,
+    FailureReason,
+    failure_after,
+    has_secret_word,
+    printable,
+)
 
 CANARY = "canary-secret-7f3a9c1e"
 WHEN = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
@@ -82,3 +90,26 @@ def test_the_ng6e_action_names_are_the_decided_ones(member: Action, value: str) 
     """User decision 2026-11-06 (they are part of the export contract)."""
     assert member.value == value
     assert Action(value) is member
+
+
+def test_a_failure_event_records_a_reason_code_and_nothing_else() -> None:
+    """NG6e-6: `failure_after` takes only a `FailureReason`; free text cannot get in."""
+    assert failure_after(FailureReason.UPSTREAM) == {"reason": "upstream"}
+    assert {r.value for r in FailureReason} >= {
+        "host_not_ready",
+        "secret_unavailable",
+        "upstream",
+        "lease_lost",
+        "conflict",
+    }
+    free_text: Any = "boom " + CANARY
+    with pytest.raises(ValueError, match="FailureReason"):
+        failure_after(free_text)
+    assert project("failure", {"reason": "upstream", "detail": CANARY}) == {"reason": "upstream"}
+
+
+def test_failure_reason_for_status_maps_refusals_and_defaults_to_unavailable() -> None:
+    """NG6e-6: the one status-to-reason map; only 404 and 409 are refusals."""
+    assert FailureReason.for_status(404) is FailureReason.NOT_FOUND
+    assert FailureReason.for_status(409) is FailureReason.CONFLICT
+    assert FailureReason.for_status(503) is FailureReason.UNAVAILABLE
