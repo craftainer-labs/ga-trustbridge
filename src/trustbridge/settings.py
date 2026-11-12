@@ -57,10 +57,11 @@ __all__ = [
 
 
 DEFAULT_ADMIN_MAX_BODY_BYTES = 16384
+"""The default of `ADMIN_MAX_BODY_BYTES`; `admin.runtime.DEFAULT_MAX_BODY_BYTES` is this value."""
+MIN_STATE_KEY_LENGTH = 32
+"""The shortest `REGISTRATION_STATE_KEY` accepted."""
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 """The hosts `public_base_url` may reach over plain http (local development only)."""
-MIN_STATE_KEY_LENGTH = 32
-"""The default of `ADMIN_MAX_BODY_BYTES`; `admin.runtime.DEFAULT_MAX_BODY_BYTES` is this value."""
 
 
 class SettingsError(ValueError):

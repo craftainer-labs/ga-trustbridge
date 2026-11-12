@@ -54,6 +54,11 @@ class FailureReason(StrEnum):
     CANCELLED = "cancelled"
     INTERNAL = "internal"
 
+    @classmethod
+    def for_status(cls, status_code: int) -> FailureReason:
+        """The reason a refusal with this HTTP status implies: 404, 409, else `unavailable`."""
+        return {404: cls.NOT_FOUND, 409: cls.CONFLICT}.get(status_code, cls.UNAVAILABLE)
+
 
 ALLOW_LISTS: Mapping[str, frozenset[str]] = {
     "tenant": frozenset({"state"}),

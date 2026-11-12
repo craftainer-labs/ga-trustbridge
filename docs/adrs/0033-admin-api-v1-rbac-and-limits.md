@@ -14,7 +14,7 @@ Implemented on main (NG6, see `src/trustbridge/admin/README.md` for the as-shipp
   router walk); tenant disable and enable with their enforcement in the worker and the adapter
   core; delivery requeue; tenant reconcile (the request is recorded, its consumer is NG6i); host
   registration (start, complete, manual); credential rotate, run in the api.
-- Failure events of registration and rotation carry a fixed reason code (NG6e-6, 0032).
+- Failure events of every mutating call (registration, rotation, disable, enable, requeue, reconcile) carry a fixed reason code (NG6e-6, 0032).
 
 Not implemented, so this stays Proposed: the tenant-deletion routes, reads and writes
 (`GET /tenant-deletions`, `GET /tenant-deletions/{id}`, `POST /tenants/{t}/deletion`,

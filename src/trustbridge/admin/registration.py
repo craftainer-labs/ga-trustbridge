@@ -282,7 +282,6 @@ async def _require_unregistered(
         raise AdminProblem(409, "conflict", "The host already has a registered App")
 
 
-_REASONS = {404: FailureReason.NOT_FOUND, 409: FailureReason.CONFLICT}
 """The reason of an `AdminProblem` by status; anything else (a 503) is `unavailable`."""
 
 
@@ -317,9 +316,7 @@ async def _run[T](
             )
             return await call(ManifestFlow(replace(rt.deps, registrations=sink)), host)
     except AdminProblem as problem:
-        await _failure(
-            ctx, action, _REASONS.get(problem.status_code, FailureReason.UNAVAILABLE), sink
-        )
+        await _failure(ctx, action, FailureReason.for_status(problem.status_code), sink)
         raise
     except Conflict:
         await _failure(ctx, action, FailureReason.CONFLICT, sink)

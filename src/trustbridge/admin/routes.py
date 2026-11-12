@@ -388,12 +388,9 @@ async def _set_disabled(  # noqa: PLR0913 - the request, the caller and what to 
     return _tenant_out(info)
 
 
-_REASONS = {404: FailureReason.NOT_FOUND, 409: FailureReason.CONFLICT}
-"""The failure reason of a refusal by its status; anything else (a 503) is `unavailable`."""
-
-
 def _problem_reason(problem: AdminProblem) -> FailureReason:
-    return _REASONS.get(problem.status_code, FailureReason.UNAVAILABLE)
+    """The failure reason of a refusal by its status; anything else (a 503) is `unavailable`."""
+    return FailureReason.for_status(problem.status_code)
 
 
 def _failed_tenant(  # noqa: PLR0913 - one value per recorded fact
