@@ -278,6 +278,12 @@ class FakeRedis:
             self.expiries[name] = ex
         return True
 
+    async def getdel(self, name: str) -> str | None:
+        """`GETDEL name`: the text value, removed in the same step."""
+        self._check()
+        self.expiries.pop(name, None)
+        return self.texts.pop(name, None)
+
 
 class FakePipeline:
     """`INCR` + `EXPIRE NX`, applied atomically on `execute`."""

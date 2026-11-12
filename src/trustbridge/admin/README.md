@@ -111,6 +111,62 @@ were added or removed in between.
 the stream (or when it dies) the route writes the `audit.export` event (`audit/README.md`). An
 error after the first byte cannot change the status; the event then says `complete: false`.
 
+## Host registration (NG6e-4)
+
+| Route | Min role / scope | Body | Answer |
+| --- | --- | --- | --- |
+| `POST /hosts/{host}/registration` | `operator`, instance | none | 200 `{post_url, manifest_json, state}` |
+| `POST /hosts/{host}/registration/complete` | `operator`, instance | `{code, state}` | 200 ids and a reference |
+| `POST /hosts/{host}/registration/manual` | `admin`, instance | `{app_id, pem, webhook_secret, slug?}` | 200 ids and a reference |
+
+**The manifest flow.** `start` returns what the BFF renders: the URL to POST the manifest to
+(`web_url` of the host), the manifest (its `hook_attributes.url` is `<PUBLIC_BASE_URL>/webhooks/github/<host>`
+and its `redirect_url` `<PUBLIC_BASE_URL>/admin/github/registration/callback`) and a signed one-time
+`state` bound to the caller (`iss` and `sub`). The BFF owns that callback path: GitHub redirects the
+browser there with `code` and `state`, and the BFF forwards both, with the user's bearer token, to
+`complete`. There is no public trustbridge callback. `complete` verifies the state (signature,
+expiry, one use, host, caller), exchanges the code server-side, imports the PEM straight into the
+host's signer and writes the webhook secret to the secret store; the answer has ids and the secret's
+reference only. `manual` does the same storage for a hand-registered App (GHES enterprise Apps);
+the PEM must be an unencrypted RSA key (the signer refuses anything else with a 422).
+
+**Rules.** Only `kind=trustbridge` Apps are offered (an Argo CD App would write connection data,
+which the admin API never does). A host that already has an App (configured with one, registered
+in the database, or not `unregistered` in this replica) is a 409, so a key is never overwritten.
+A registration (`complete`, `manual`) first takes the host's **claim**, a transaction-scoped Postgres
+advisory lock held in an open transaction until the registration is saved, and only then checks
+that the host is unregistered and writes anything. A second registration of the same host, on any
+replica, finds the claim taken and is a 409 before it touches the key or the secret, so the loser
+can never overwrite the winner's. The claim stores nothing (no row another process could read as a
+registration, no migration) and a crashed process releases it with its connection. The registration
+row is also inserted `ON CONFLICT DO NOTHING`. What can still be left over: if the secret store or
+the database fails after the key was imported or the secret written and before the row is saved, the
+host stays unregistered with a key (and possibly a secret) in place; the next registration attempt
+replaces them. The claim holds one pooled connection for the length of the call (one GitHub
+request for `complete`). A signer that cannot import a key is a 409 ("import it out of
+band"). An invalid, expired, reused or foreign state, or a code GitHub refuses, is a 400 with a
+fixed text. Without `PUBLIC_BASE_URL` and `REGISTRATION_STATE_KEY` (at least 32 characters, shared
+by every replica) the three routes are a 503. The nonce is kept in Valkey (`SET EX`, `GETDEL`), in
+the process without Valkey (`MODE=mock`); a deployment with more than one replica needs Valkey so
+a `state` is one-use across them (the in-process store is per replica and never evicts).
+
+**Audit.** Exactly one event per call that reaches the operation, on `resource_type=host`,
+`resource_id=<host>`, no tenant: `host.registration.start` (after `{kind}`, written once the state is
+issued), `host.registration.complete` and `host.registration.manual` (after `{kind, app_id,
+app_slug, webhook_secret_ref}`), written in the transaction that saves the registration. Any other
+outcome (a 409, a bad state, a signer or secret-store error) leaves a `failure` event in its own
+transaction, best effort. A body that does not validate is a 422 before the operation and writes no
+event, like every other validation error.
+
+**Secrets.** The PEM, the webhook secret and the code are never returned, recorded in the audit
+log or logged by trustbridge. These routes parse their body themselves (`registration.parse_body`)
+because FastAPI's 422 detail echoes the offending input, which here would be the key or the secret;
+a bad body is reported by field name only. The GitHub client logs each request at INFO, URL included, and the conversion URL contains the
+one-time code (whoever holds an unspent one can exchange it for the key and the secret), so
+`trustbridge.github.client` attaches a `logging.Filter` (`MaskManifestCode`) to the `httpx2` and
+`httpx` loggers that rewrites the segment after `/app-manifests/` to `[MASKED]`. Nothing else in the
+logging configuration changes.
+
 ## Delivery requeue and tenant reconcile (NG6e-3)
 
 | Route | Min role / scope | Answer |
@@ -182,11 +238,12 @@ Every error under `/admin/v1` is `application/problem+json` (ADR 0004) with `typ
 | `unauthenticated` | 401 | no token or an invalid one (with the RFC 9728 challenge) |
 | `forbidden` | 403 | a valid token whose roles are not enough |
 | `not-found` | 404 | unknown route, host, tenant, delivery or audit event; also a tenant the caller has no grant on |
-| `conflict` | 409 | reserved (NG6e) |
+| `conflict` | 409 | requeue of a delivery that cannot be (processed, body purged), reconcile of a disabled tenant, a host that already has an App, a signer that cannot import a key |
 | `payload-too-large` | 413 | a request body over `ADMIN_MAX_BODY_BYTES` |
 | `validation` | 422 | a query parameter the schema rejects |
 | `rate-limited` | 429 | over a bucket; `Retry-After` is the whole seconds left in the window |
 | `internal` | 500 | an unhandled error (the detail is redacted outside `MODE=dev`) |
+| `bad-gateway` | 502 | GitHub could not be reached or failed (5xx) while exchanging the manifest code; the one-time code is spent, so the registration is started again |
 | `unavailable` | 503 | no database configured (`MODE=mock`), or the connection store cannot be listed |
 
 The classes are open: v1 may add one. Errors off `/admin/v1` keep the template's `about:blank`.
@@ -206,8 +263,8 @@ not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_
 
 - `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
   (ADR 0034); NG6h.
-- Every other `POST` (NG6e-4 and NG6e-5: host registration, rotate), and the tenant-deletion ones
-  (NG6h). The consumer of the reconcile set is NG6i.
+- Rotate (`POST /tenants/{t}/credentials/{adapter}/{scope_key}/rotate`, NG6e-5), and the
+  tenant-deletion `POST`s (NG6h). The consumer of the reconcile set is NG6i.
 - The `transaction_timeout` / `AUDIT_EXPORT_LAG_SECONDS` startup check: NG6h.
 - ADR 0033 stays Proposed until the mutating routes (NG6e) and the deletion reads (NG6h) exist.
 

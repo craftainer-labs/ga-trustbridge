@@ -399,6 +399,9 @@ def test_no_audit_route_writes_or_deletes() -> None:
         "/admin/v1/tenants/{tenant_id}/enable",
         "/admin/v1/tenants/{tenant_id}/reconcile",
         "/admin/v1/deliveries/{host}/{delivery_id}/requeue",
+        "/admin/v1/hosts/{host}/registration",
+        "/admin/v1/hosts/{host}/registration/complete",
+        "/admin/v1/hosts/{host}/registration/manual",
     }
     others = {
         m

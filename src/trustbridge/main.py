@@ -35,6 +35,12 @@ from trustbridge.admin import metrics as admin_metrics
 from trustbridge.admin.access import NoTenants, SqlTenantAccess
 from trustbridge.admin.adapters import AdapterCatalog
 from trustbridge.admin.problems import install_problem_types
+from trustbridge.admin.registration import (
+    MemoryNonceStore,
+    RegistrationRuntime,
+    ValkeyNonceStore,
+    build_deps,
+)
 from trustbridge.admin.routes import router as admin_router
 from trustbridge.admin.runtime import AdminRuntime, build_limits
 from trustbridge.audit import AuditDenials, AuditWriter
@@ -195,7 +201,13 @@ async def _trustbridge_resources(
             ),
         )
         denials = _install_admin(
-            app=app, settings=settings, core=core, counter=counter, sessions=sessions, tasks=tasks
+            app=app,
+            settings=settings,
+            core=core,
+            redis=redis,
+            counter=counter,
+            sessions=sessions,
+            tasks=tasks,
         )
         yield
     finally:
@@ -216,11 +228,32 @@ async def _trustbridge_resources(
             await owned_redis.aclose()
 
 
+def _registration_runtime(
+    settings: TrustbridgeSettings, core: Core, redis: Redis | None
+) -> RegistrationRuntime | None:
+    """The host-registration flow, or None when `PUBLIC_BASE_URL` or the state key is unset."""
+    if settings.public_base_url is None or settings.registration_state_key is None:
+        return None
+    monitor = core.runtime.monitor
+    return RegistrationRuntime(
+        hosts={host.name: host for host in settings.github_hosts},
+        deps=build_deps(
+            signers=core.runtime.signers,
+            secrets=core.secrets,
+            nonces=MemoryNonceStore() if redis is None else ValkeyNonceStore(redis),
+            state_key=settings.registration_state_key.get_secret_value().encode(),
+            public_base_url=settings.public_base_url,
+        ),
+        states=lambda: {name: s.state for name, s in monitor.statuses().items()},
+    )
+
+
 def _install_admin(  # noqa: PLR0913 - the collaborators main owns
     *,
     app: FastAPI,
     settings: TrustbridgeSettings,
     core: Core,
+    redis: Redis | None,
     counter: WindowCounter,
     sessions: async_sessionmaker[AsyncSession] | None,
     tasks: list[asyncio.Task[None]],
@@ -260,6 +293,7 @@ def _install_admin(  # noqa: PLR0913 - the collaborators main owns
         export_lag_seconds=settings.audit_export_lag_seconds,
         max_body_bytes=settings.admin_max_body_bytes,
         scheduler=core.scheduler,
+        registration=_registration_runtime(settings, core, redis),
         # ADR 0029: only the enabled adapters are imported; a bad name stops the process.
         adapters=AdapterCatalog(load_adapter_classes(settings.adapters_enabled), core.secrets),
     )

@@ -33,6 +33,7 @@ CLASSES: Mapping[int, str] = {
     422: "validation",
     429: "rate-limited",
     500: "internal",
+    502: "bad-gateway",
     503: "unavailable",
 }
 """The problem class per status; `AdminProblem` may name a more specific one."""

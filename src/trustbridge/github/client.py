@@ -5,6 +5,8 @@ comes from the host config), TLS (the host's CA bundle), transport (injectable f
 errors. Calls are raw REST (`arequest`), so a path in a log or test is the path GitHub documents.
 """
 
+import logging
+import re
 import ssl
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -18,6 +20,37 @@ from githubkit.exception import RequestError, RequestFailed
 from trustbridge.github.hosts import GitHubHostConfig
 
 _DEFAULT_TIMEOUT = 15.0
+_MANIFEST_CODE = re.compile(r"(/app-manifests/)[^/\s\"?#]+")
+
+
+class MaskManifestCode(logging.Filter):
+    """Masks the one-time manifest code in the HTTP client's request log.
+
+    The code is the path segment after `/app-manifests/` of the conversion call, and whoever
+    holds an unspent one can exchange it for the App's private key and webhook secret. The HTTP
+    client logs the URL at INFO before the request runs, so a request that then fails would leave
+    a usable code in the log. The filter rewrites the message of the records of the loggers it is
+    attached to (below) and changes nothing else.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Replace the code in the record's message; always keep the record."""
+        message = record.getMessage()
+        if "/app-manifests/" in message:
+            record.msg = _MANIFEST_CODE.sub(r"\1[MASKED]", message)
+            record.args = None
+        return True
+
+
+def mask_manifest_codes() -> None:
+    """Attach `MaskManifestCode` to the HTTP client loggers, once (no global config change)."""
+    for name in ("httpx2", "httpx"):
+        target = logging.getLogger(name)
+        if not any(isinstance(f, MaskManifestCode) for f in target.filters):
+            target.addFilter(MaskManifestCode())
+
+
+mask_manifest_codes()
 HTTP_NOT_FOUND = 404
 HTTP_UNPROCESSABLE = 422
 _RATE_LIMITED = frozenset({403, 429})

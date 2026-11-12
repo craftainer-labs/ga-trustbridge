@@ -6,11 +6,14 @@ definer functions work for the app role, and `/tenants` filters and pages in the
 CI's stack; reuses the tenancy suite's scratch database (tenants `a` and `b` on host `tb.test`).
 """
 
+import asyncio
 import importlib.util
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -22,7 +25,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 
+from tests.trustbridge.admin import test_registration_unit as reg
 from tests.trustbridge.admin.helpers import build, token
+from tests.trustbridge.signer.test_signers import make_key, pem_of
 from tests.trustbridge.tenancy import test_rls_integration as rls
 from trustbridge.adapters.store import OperationKind
 from trustbridge.admin.access import SqlTenantAccess, tenants_page
@@ -56,12 +61,14 @@ def _client(
     *roles: str,
     sub: str = "alice",
     scheduler: Any = None,  # noqa: ANN401
+    registration: Any = None,  # noqa: ANN401
 ) -> httpx.AsyncClient:
     env = build(
         access=SqlTenantAccess(db.app),
         factory=db.app,
         writer=AuditWriter(db.app),
         scheduler=scheduler,
+        registration=registration,
     )
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=env.app, raise_app_exceptions=False),
@@ -723,3 +730,78 @@ async def test_reconcile_records_the_request_and_audits_it_for_a_tenant_operator
         assert scheduler.tenants == [db.a, db.a]
     finally:
         await _set(db, db.a, disable=False)
+
+
+# ---- host registration (NG6e-4) -------------------------------------------------------------
+
+
+async def test_registration_end_to_end_stores_the_app_audits_it_and_leaks_nothing(
+    db: rls.Db, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Start, complete, then every re-registration is a 409; the rows hold ids and a reference."""
+    caplog.set_level(logging.DEBUG)
+    world = reg.World(tmp_path)
+    runtime = world.runtime()
+    body = {"app_id": 9, "pem": reg.PEM, "webhook_secret": reg.WEBHOOK_SECRET}
+    try:
+        async with _client(db, "trustbridge:admin", sub="admin-1", registration=runtime) as client:
+            started = await client.post(reg.START)
+            assert started.status_code == 200, started.text
+            done = await client.post(
+                reg.COMPLETE, json={"code": reg.CODE, "state": started.json()["state"]}
+            )
+            assert done.status_code == 200, done.text
+            assert done.json()["app_id"] == 123
+            assert (await client.post(reg.START)).status_code == 409
+            assert (await client.post(reg.MANUAL, json=body)).status_code == 409
+        stored = await _admin(
+            db, "SELECT app_id, webhook_secret_ref, app_slug FROM github_host_registrations"
+        )
+        assert [tuple(r) for r in stored] == [
+            (123, "store:github-hosts/github.com/webhook-secret", "trustbridge-github-com")
+        ]
+        events = await _admin(
+            db,
+            "SELECT action, outcome, actor_sub, tenant_id, before, after FROM audit_events "
+            "WHERE resource_type = 'host' AND resource_id = 'github.com' ORDER BY seq",
+        )
+        assert [(e.action, e.outcome, e.actor_sub, e.tenant_id) for e in events] == [
+            ("host.registration.start", "success", "admin-1", None),
+            ("host.registration.complete", "success", "admin-1", None),
+            ("host.registration.start", "failure", "admin-1", None),
+            ("host.registration.manual", "failure", "admin-1", None),
+        ]
+        assert events[1].after["app_id"] == 123
+        haystack = repr([tuple(e) for e in events] + [tuple(r) for r in stored]) + caplog.text
+        for canary in (reg.PEM, "BEGIN", reg.WEBHOOK_SECRET, reg.CODE):
+            assert canary not in haystack
+    finally:
+        await _admin(db, "DELETE FROM github_host_registrations")
+
+
+async def test_two_registrations_of_one_host_cannot_overwrite_each_others_key_or_secret(
+    db: rls.Db, tmp_path: Path
+) -> None:
+    """The claim is a Postgres lock: the loser is a 409 before it writes anything."""
+    world = reg.World(tmp_path)
+    world.secrets.delay = 0.4  # the winner is still writing when the other arrives
+    runtime = world.runtime()
+    keys = {1: (pem_of(make_key()), "secret-one"), 2: (pem_of(make_key()), "secret-two")}
+
+    async def register(app_id: int) -> int:
+        pem, secret = keys[app_id]
+        body = {"app_id": app_id, "pem": pem, "webhook_secret": secret}
+        async with _client(db, "trustbridge:admin", registration=runtime) as client:
+            return (await client.post(reg.MANUAL, json=body)).status_code
+
+    try:
+        statuses = await asyncio.gather(register(1), register(2))
+        assert sorted(statuses) == [200, 409]
+        winner = 1 if statuses[0] == 200 else 2
+        pem, secret = keys[winner]
+        assert world.signer_path.read_text() == pem
+        assert list(world.secrets.items.values()) == [secret]
+        stored = await _admin(db, "SELECT app_id FROM github_host_registrations")
+        assert [r.app_id for r in stored] == [winner]
+    finally:
+        await _admin(db, "DELETE FROM github_host_registrations")
