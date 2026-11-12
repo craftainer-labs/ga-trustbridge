@@ -1276,6 +1276,70 @@
         "title": "ResourcePage",
         "type": "object"
       },
+      "RotationOut": {
+        "description": "What a rotation did. Never a credential value.",
+        "properties": {
+          "change": {
+            "title": "Change",
+            "type": "string"
+          },
+          "manual_action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manual Action"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "wait_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wait Until"
+          }
+        },
+        "required": [
+          "operation_id",
+          "status",
+          "change",
+          "wait_until",
+          "manual_action"
+        ],
+        "title": "RotationOut",
+        "type": "object"
+      },
       "TenantOut": {
         "description": "A tenant: one GitHub installation on one host.\n\n`state` is the installation state written by webhook sync; `admin_disabled_at` is the\nseparate admin-disable column (ADR 0033 \"Tenant disable\"); `effective_state` combines them:\n`disabled` when disabled, otherwise `state`. `admin_disabled_by` (the actor's `sub`) and\n`admin_disable_reason` (scrubbed free text) are set with `admin_disabled_at`, else null.",
         "properties": {
@@ -4134,6 +4198,125 @@
           }
         ],
         "summary": "List Credentials"
+      }
+    },
+    "/admin/v1/tenants/{tenant_id}/credentials/{adapter}/{scope_key}/rotate": {
+      "post": {
+        "description": "Rotate a credential scope now (`operator`, instance or on the tenant).\n\nRuns the credential core in this request: a new secret is issued, delivered to GitHub and the\nold one retired (two-phase adapters keep it for an overlap and finish later). Calling it again\nwhile a rotation is open resumes that one. No secret value is returned. A disabled tenant, a\nscope with nothing rotatable or a busy lease is a 409; a platform or GitHub failure a 502.",
+        "operationId": "rotate_credential_admin_v1_tenants__tenant_id__credentials__adapter___scope_key__rotate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "adapter",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9_-]*$",
+              "title": "Adapter",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "scope_key",
+            "required": true,
+            "schema": {
+              "maxLength": 32,
+              "minLength": 32,
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Scope Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Rotate Credential"
       }
     },
     "/admin/v1/tenants/{tenant_id}/disable": {

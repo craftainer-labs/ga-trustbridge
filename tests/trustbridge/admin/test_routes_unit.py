@@ -402,6 +402,7 @@ def test_no_audit_route_writes_or_deletes() -> None:
         "/admin/v1/hosts/{host}/registration",
         "/admin/v1/hosts/{host}/registration/complete",
         "/admin/v1/hosts/{host}/registration/manual",
+        "/admin/v1/tenants/{tenant_id}/credentials/{adapter}/{scope_key}/rotate",
     }
     others = {
         m

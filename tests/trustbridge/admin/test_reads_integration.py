@@ -35,7 +35,7 @@ from trustbridge.audit import Action, ActorType, AuditEvent, AuditWriter, Outcom
 from trustbridge.audit.store import get_event
 from trustbridge.rbac import Grant, Principal, Role
 from trustbridge.tenancy import get_tenant, install_tenant_hook, list_tenants, tenant_context
-from trustbridge.worker.worker import SqlTenantGate
+from trustbridge.tenancy.gate import SqlTenantGate
 
 pytestmark = pytest.mark.integration
 

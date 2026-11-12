@@ -111,6 +111,32 @@ were added or removed in between.
 the stream (or when it dies) the route writes the `audit.export` event (`audit/README.md`). An
 error after the first byte cannot change the status; the event then says `complete: false`.
 
+## Credential rotation (NG6e-5)
+
+`POST /tenants/{t}/credentials/{adapter}/{scope_key}/rotate` (`operator`, on the tenant or at
+instance scope) rotates one credential scope **synchronously in the api process**. `adapter` is at
+most 64 characters (`[a-z0-9_-]`) and `scope_key` the 32-character hex key the credentials list
+shows (at most 64, 422 otherwise). The api builds a `CredentialCore` (`admin/credentials.py`,
+`build_runtime`) from the same parts the worker would use (ADR 0029): the enabled adapter classes
+over the tenants' connection data, the SQL credential store whose saves append the credential
+events (`credential.rotate.begin` and `.finish`, actor `api`), the lease manager, the parked
+values, the GitHub output writer and environment inspector, and `SqlTenantGate`
+(`tenancy/gate.py`, shared with the worker) as the core's gate. It needs a database; in
+`MODE=mock` the route is a 503.
+
+The answer is `{operation_id, status, change, wait_until, manual_action}`: ids, statuses and an
+audit-safe message, never a credential value. Calling it again while a rotation is open resumes
+that operation (a two-phase adapter keeps the old secret for an overlap and finishes on a later
+call or by the reconciler). Errors, each with a fixed text and one `failure` event: 404 for an
+adapter that is not enabled or a scope with no credential; 409 for a disabled tenant, a scope with
+nothing rotatable (an OIDC scope), a lease held by another unit of work, or an adapter that is not
+configured for the tenant; **502 `bad-gateway`** when the platform, GitHub or the secret store
+fails (the exception, which may carry anything, is neither chained nor logged beyond its type
+name). The success is one `credential.rotate` event (resource `credential`, id the scope key,
+`after` `{adapter, operation_kind, operation_id}`), written after the core returns; the core's own
+state changes are audited in their transactions. If that event cannot be written the call fails
+(500) and the rotation stays resumable.
+
 ## Host registration (NG6e-4)
 
 | Route | Min role / scope | Body | Answer |
@@ -211,15 +237,15 @@ What a disabled tenant means (ADR 0033 invariant 19), enforced in the worker and
 core, not here:
 
 - **Webhooks** are stored and acknowledged but not handled. The worker looks the tenant up by the
-  payload's installation id (`SqlTenantGate`) and, for a disabled one, defers the delivery by
+  payload's installation id (`SqlTenantGate`, in `tenancy/gate.py`) and, for a disabled one, defers the delivery by
   `DISABLED_TENANT_RETRY_SECONDS` (default 15) without counting a failure. The next pass after
   `enable` handles it, so `enable` takes effect within that delay.
 - **Adapter operations**: `CredentialCore` asks `CoreDeps.gate` (`OperationGate.allows`) before
   it starts an operation, refreshes a scope or sweeps orphans, and raises `TenantDisabledError`
   for a disabled tenant. An operation already in flight is resumed and finishes. The gate is
   given the operation kind so NG6h can let a deletion's own delete and revoke operations
-  through. Nothing builds a `CredentialCore` yet (NG6e-5 does, in the api); it is wired there
-  with `SqlTenantGate`.
+  through. The api builds a `CredentialCore` for the rotate route with `SqlTenantGate`
+  (`tenancy/gate.py`) as its gate (NG6e-5); the worker has none yet.
 - The installation sync (`_sync`, `SqlTenants.upsert_installation`) never writes the columns.
 
 **N-1 gap.** A pod of the release before this one does not know the columns: while a rolling
@@ -263,8 +289,7 @@ not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_
 
 - `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
   (ADR 0034); NG6h.
-- Rotate (`POST /tenants/{t}/credentials/{adapter}/{scope_key}/rotate`, NG6e-5), and the
-  tenant-deletion `POST`s (NG6h). The consumer of the reconcile set is NG6i.
+- The tenant-deletion `POST`s (NG6h). The consumer of the reconcile set is NG6i.
 - The `transaction_timeout` / `AUDIT_EXPORT_LAG_SECONDS` startup check: NG6h.
 - ADR 0033 stays Proposed until the mutating routes (NG6e) and the deletion reads (NG6h) exist.
 

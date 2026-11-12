@@ -89,7 +89,7 @@ effective defaults are logged at startup.
 - `worker.py`: handlers (registered in the `HandlerRegistry`) must be idempotent; raise `LeaseBusy` for a taken lease (no failure is
   counted), any other exception is a counted failure. A delivery whose payload names an installation
   of an admin-disabled tenant is deferred by `DISABLED_TENANT_RETRY_SECONDS` (default 15) and
-  acknowledged, without a counted failure (`TenantDisabled`, `SqlTenantGate`; ADR 0033).
+  acknowledged, without a counted failure (`TenantDisabled`, and `SqlTenantGate` in `tenancy/gate.py`; ADR 0033).
 - Migrations: bump the schema-compatibility integer in every revision with
   `INSERT INTO schema_compat (id, version) VALUES (1, N) ON CONFLICT (id) DO UPDATE SET version =
   GREATEST(schema_compat.version, N)` and raise `REQUIRED_SCHEMA_VERSION` in `schema.py` when the

@@ -42,4 +42,5 @@ class SystemActor(StrEnum):
     WORKER = "worker"
     RECONCILER = "reconciler"
     GITHUB_WEBHOOK = "github-webhook"
+    API = "api"  # the api process running the credential core for an admin call (rotate)
     MIGRATE = "migrate"

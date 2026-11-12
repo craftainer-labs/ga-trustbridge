@@ -34,6 +34,7 @@ from trustbridge.github.models import SqlRegistrationStore
 from trustbridge.github.runtime import HostRuntime, RuntimeDeps, build_host_runtime
 from trustbridge.settings import TrustbridgeSettings, load_trustbridge_settings
 from trustbridge.tenancy import RoleGate, budget_left, install_tenant_hook
+from trustbridge.tenancy.gate import SqlTenantGate
 from trustbridge.worker.deliveries import DeliveryStore, InMemoryDeliveryStore, PgDeliveryStore
 from trustbridge.worker.lease import InMemoryLeaseStore, LeaseManager, LeaseStore, PgLeaseStore
 from trustbridge.worker.ports import (
@@ -48,7 +49,7 @@ from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
 from trustbridge.worker.relay import Relay
 from trustbridge.worker.schema import SchemaGate, SchemaWaitTimeout
 from trustbridge.worker.secrets import LocalSecrets, MemorySecrets
-from trustbridge.worker.worker import SqlTenantGate, Worker, WorkerDeps
+from trustbridge.worker.worker import Worker, WorkerDeps
 
 logger = logging.getLogger(__name__)
 ProcessKind = Literal["worker", "reconciler"]
