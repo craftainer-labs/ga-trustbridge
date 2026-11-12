@@ -201,7 +201,7 @@ async def test_a_disabled_tenant_is_a_409_and_nothing_rotates() -> None:
 class StubCore:
     """A core whose `rotate_scope` raises what a test asks for."""
 
-    def __init__(self, error: Exception) -> None:
+    def __init__(self, error: BaseException) -> None:
         """Raise `error` on every rotation."""
         self.error = error
 
@@ -211,7 +211,7 @@ class StubCore:
         raise self.error
 
 
-async def _stubbed(error: Exception, writer: Writer) -> tuple[Env, str, UUID]:
+async def _stubbed(error: BaseException, writer: Writer) -> tuple[Env, str, UUID]:
     w, _runtime, _w, _e, key = await _rotating()
     stub = cast(CredentialCore, StubCore(error))
     runtime = CredentialRuntime(

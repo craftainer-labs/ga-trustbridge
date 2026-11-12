@@ -151,7 +151,7 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
     except RotationNotApplicableError:
         await _failure(call)
         raise AdminProblem(409, "conflict", "The credential has no rotatable secret") from None
-    except (LeaseBusy, LeaseLost, LeaseLostError):
+    except LeaseBusy, LeaseLost, LeaseLostError:
         await _failure(call)
         raise AdminProblem(
             409, "conflict", "The credential is being changed; retry shortly"
@@ -196,8 +196,11 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
 
 
 async def _record_success(call: Call, operation_id: UUID | None) -> None:
-    """The success event; if it cannot be written the call fails (an open two-phase rotation stays resumable; a finished one is unaudited, so
-    the operator must check the credential's audit trail before retrying)."""
+    """The success event; if it cannot be written the call fails.
+
+    An open two-phase rotation stays resumable; a finished one is left unaudited, so the operator
+    must check the credential's audit trail before retrying.
+    """
     after = project(
         "credential",
         {
