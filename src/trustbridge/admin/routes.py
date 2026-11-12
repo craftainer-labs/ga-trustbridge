@@ -525,7 +525,7 @@ async def register_host_manually(
 async def rotate_credential(  # noqa: PLR0913 - the path, the request and the collaborators
     tenant_id: UUID,
     adapter: Annotated[str, Path(max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$")],
-    scope_key: Annotated[str, Path(max_length=64, pattern=r"^[0-9a-f]+$")],
+    scope_key: Annotated[str, Path(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")],
     *,
     request: Request,
     principal: Annotated[Principal, Depends(get_principal)],

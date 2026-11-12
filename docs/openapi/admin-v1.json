@@ -4231,8 +4231,9 @@
             "name": "scope_key",
             "required": true,
             "schema": {
-              "maxLength": 64,
-              "pattern": "^[0-9a-f]+$",
+              "maxLength": 32,
+              "minLength": 32,
+              "pattern": "^[0-9a-f]{32}$",
               "title": "Scope Key",
               "type": "string"
             }

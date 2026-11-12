@@ -1,5 +1,6 @@
 """Credential rotation through the admin API over the in-memory credential core (NG6e-5)."""
 
+import asyncio
 import logging
 from dataclasses import replace
 from typing import Any, cast
@@ -20,14 +21,14 @@ from trustbridge.adapters.core import (
 )
 from trustbridge.adapters.fake import fake_capabilities
 from trustbridge.adapters.interface import AdapterConfigurationError, AdapterError, scope_key
-from trustbridge.adapters.store import CredentialStore, OutputError
+from trustbridge.adapters.store import CredentialStore, LeaseLostError, OutputError
 from trustbridge.admin import guards, routes
 from trustbridge.admin.credentials import CredentialRuntime, build_runtime
 from trustbridge.audit import Action, AuditEvent, AuditWriter, Outcome
 from trustbridge.github.availability import HostNotReadyError, HostState, HostStatus
 from trustbridge.github.client import GitHubApiError
 from trustbridge.rbac import Role, TenantRef
-from trustbridge.worker.lease import LeaseBusy
+from trustbridge.worker.lease import LeaseBusy, LeaseLost
 from trustbridge.worker.ports import UnknownTenantError
 from trustbridge.worker.secrets import SecretUnavailable
 
@@ -145,6 +146,7 @@ async def test_unknown_adapter_scope_and_malformed_path_parts() -> None:
         problem(await client.post(_path(w.tenant.id, "Fake!", key)), 422, "validation")
         problem(await client.post(_path(w.tenant.id, "fake", "zz" + key)), 422, "validation")
         problem(await client.post(_path(w.tenant.id, "fake", "a" * 65)), 422, "validation")
+        problem(await client.post(_path(w.tenant.id, "fake", key[:31])), 422, "validation")
     assert [e.outcome for e in writer.written] == [Outcome.FAILURE, Outcome.FAILURE]
 
 
@@ -226,6 +228,8 @@ async def _stubbed(error: Exception, writer: Writer) -> tuple[Env, str, UUID]:
     [
         (RotationNotApplicableError(), 409, "conflict"),
         (LeaseBusy("scope"), 409, "conflict"),
+        (LeaseLost(f"scope {CANARY}"), 409, "conflict"),
+        (LeaseLostError(f"lost {CANARY}"), 409, "conflict"),
         (AdapterConfigurationError(f"no base_url {CANARY}"), 409, "conflict"),
         (TenantDisabledError(f"tenant {CANARY}"), 409, "conflict"),
         (UnknownTenantError(CANARY), 404, "not-found"),
@@ -263,12 +267,25 @@ async def test_an_unexpected_error_is_a_500_with_a_failure_event_and_a_broken_wr
     """Whatever else happens is not hidden; a writer that fails too is logged."""
     writer = Writer()
     env, key, tenant = await _stubbed(RuntimeError(CANARY), writer)
+    caplog.set_level(logging.DEBUG)
     async with _client(env, OPERATOR) as client:
-        problem(await client.post(_path(tenant, "fake", key)), 500)
+        response = await client.post(_path(tenant, "fake", key))
+        problem(response, 500)
+        assert CANARY not in response.text + caplog.text
         assert [e.outcome for e in writer.written] == [Outcome.FAILURE]
         writer.error = OSError("audit down")
         problem(await client.post(_path(tenant, "fake", key)), 500)
     assert "could not record the failed credential.rotate event" in caplog.text
+
+
+async def test_a_cancelled_rotation_still_leaves_its_failure_event() -> None:
+    """A client that goes away mid-rotation does not make the call unaudited."""
+    writer = Writer()
+    env, key, tenant = await _stubbed(asyncio.CancelledError(), writer)
+    async with _client(env, OPERATOR) as client:
+        with pytest.raises(asyncio.CancelledError):
+            await client.post(_path(tenant, "fake", key))
+    assert [e.outcome for e in writer.written] == [Outcome.FAILURE]
 
 
 async def test_without_a_credential_core_or_an_audit_writer_the_route_is_a_503() -> None:

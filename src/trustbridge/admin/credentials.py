@@ -12,6 +12,7 @@ audit-safe message the adapter wrote, and every failure is reported with a fixed
 so no exception that may carry secret material is chained).
 """
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,7 +38,12 @@ from trustbridge.adapters.interface import (
     PlatformAdapter,
 )
 from trustbridge.adapters.sql_store import SqlCredentialStore
-from trustbridge.adapters.store import CredentialStore, OutputError, TenantResolver
+from trustbridge.adapters.store import (
+    CredentialStore,
+    LeaseLostError,
+    OutputError,
+    TenantResolver,
+)
 from trustbridge.admin import views
 from trustbridge.admin.problems import AdminProblem
 from trustbridge.audit import Action, ActorType, AuditEvent, AuditWriter, Outcome, project
@@ -49,7 +55,7 @@ from trustbridge.github.writer import GitHubEnvironmentInspector, GitHubOutputWr
 from trustbridge.rbac import Principal
 from trustbridge.rbac.deps import client_ip, safe_request_id
 from trustbridge.tenancy.gate import SqlTenantGate
-from trustbridge.worker.lease import LeaseBusy
+from trustbridge.worker.lease import LeaseBusy, LeaseLost
 from trustbridge.worker.ports import UnknownTenantError
 from trustbridge.worker.runtime import Core
 from trustbridge.worker.secrets import SecretUnavailable
@@ -145,7 +151,7 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
     except RotationNotApplicableError:
         await _failure(call)
         raise AdminProblem(409, "conflict", "The credential has no rotatable secret") from None
-    except LeaseBusy:
+    except (LeaseBusy, LeaseLost, LeaseLostError):
         await _failure(call)
         raise AdminProblem(
             409, "conflict", "The credential is being changed; retry shortly"
@@ -169,9 +175,16 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
         raise AdminProblem(
             502, "bad-gateway", "The platform or GitHub failed to complete the rotation"
         ) from None
-    except Exception:
-        await _failure(call)
+    except asyncio.CancelledError:
+        # The client went away mid-rotation: the operation stays open for the reconciler, but the
+        # call still leaves its event (shielded, so the cancellation cannot cut the write short).
+        await asyncio.shield(_failure(call))
         raise
+    except Exception as exc:
+        # Unmapped: never let the chain (which may hold a secret) reach the error logger.
+        logger.error("rotation crashed for tenant %s: %s", call.tenant_id, type(exc).__name__)
+        await _failure(call)
+        raise AdminProblem(500, "internal", "The rotation failed unexpectedly") from None
     await _record_success(call, result.operation_id)
     return RotationOut(
         operation_id=result.operation_id,
@@ -183,7 +196,8 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
 
 
 async def _record_success(call: Call, operation_id: UUID | None) -> None:
-    """The success event; if it cannot be written the call fails (the rotation stays resumable)."""
+    """The success event; if it cannot be written the call fails (an open two-phase rotation stays resumable; a finished one is unaudited, so
+    the operator must check the credential's audit trail before retrying)."""
     after = project(
         "credential",
         {
