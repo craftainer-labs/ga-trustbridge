@@ -58,11 +58,15 @@ never import `github`; `audit` never imports `rbac` or `admin`; `rbac` never imp
    call `ArgoCdDeploymentHandler.handle`; until a `DeploymentStateSource` exists (NG5d) the route
    answers 503.
 
-Not wired yet: the admin manifest-flow endpoints (`github/manifest.py`) belong to the mutating
-admin endpoints (NG6e) and stay unmounted; the `CredentialCore` is not instantiated by any process because no adapter exists
-(NG5): the lease, value store and connection-data ports it needs are built in `Core` for it; the
-reconcile requests (`ReconcileScheduler`) are recorded in the Valkey set `tb:reconcile`, whose
-consumer is the reconcile loop of NG5/NG6.
+Wired by the admin API (`admin/`, NG6e): the manifest flow (`github/manifest.py`) is mounted
+under `/admin/v1/hosts/{host}/registration` (the BFF owns the browser callback), and the api builds
+a `CredentialCore` for `POST .../credentials/{adapter}/{scope_key}/rotate` from the parts `Core`
+holds (`admin/credentials.py`).
+
+Not wired yet: the worker and the reconciler instantiate no `CredentialCore`, so nothing reconciles
+or resumes credential operations in the background (NG5 follow-up). The reconcile requests
+(`ReconcileScheduler`, `POST /admin/v1/tenants/{t}/reconcile`) are recorded in the Valkey set
+`tb:reconcile`, whose consumer is NG6i; until it exists a recorded request is only recorded.
 
 ## Accepted behaviours
 

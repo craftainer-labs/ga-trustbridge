@@ -153,6 +153,7 @@ async def test_unknown_adapter_scope_and_malformed_path_parts() -> None:
         problem(await client.post(_path(w.tenant.id, "fake", "a" * 65)), 422, "validation")
         problem(await client.post(_path(w.tenant.id, "fake", key[:31])), 422, "validation")
     assert [e.outcome for e in writer.written] == [Outcome.FAILURE, Outcome.FAILURE]
+    assert [e.after for e in writer.written] == [{"reason": "not_found"}] * 2
 
 
 async def test_roles_and_scopes() -> None:
@@ -229,28 +230,34 @@ async def _stubbed(error: BaseException, writer: Writer) -> tuple[Env, str, UUID
 
 
 @pytest.mark.parametrize(
-    ("error", "status", "kind"),
+    ("error", "status", "kind", "reason"),
     [
-        (RotationNotApplicableError(), 409, "conflict"),
-        (LeaseBusy("scope"), 409, "conflict"),
-        (LeaseLost(f"scope {CANARY}"), 409, "conflict"),
-        (LeaseLostError(f"lost {CANARY}"), 409, "conflict"),
-        (AdapterConfigurationError(f"no base_url {CANARY}"), 409, "conflict"),
-        (TenantDisabledError(f"tenant {CANARY}"), 409, "conflict"),
-        (UnknownTenantError(CANARY), 404, "not-found"),
-        (RetryableOperationError(UUID(int=1), f"retry {CANARY}"), 502, "bad-gateway"),
-        (OperationFailedError(UUID(int=1), f"failed {CANARY}"), 502, "bad-gateway"),
-        (AdapterError(True, f"timeout {CANARY}"), 502, "bad-gateway"),
-        (OutputError(f"GitHub 502 {CANARY}"), 502, "bad-gateway"),
-        (GitHubApiError(502, f"bad gateway {CANARY}"), 502, "bad-gateway"),
-        (HostNotReadyError(CANARY, HostStatus(HostState.UNAVAILABLE, CANARY)), 502, "bad-gateway"),
-        (SecretUnavailable(f"store {CANARY}"), 502, "bad-gateway"),
+        (RotationNotApplicableError(), 409, "conflict", "not_rotatable"),
+        (LeaseBusy("scope"), 409, "conflict", "lease_busy"),
+        (LeaseLost(f"scope {CANARY}"), 409, "conflict", "lease_lost"),
+        (LeaseLostError(f"lost {CANARY}"), 409, "conflict", "lease_lost"),
+        (AdapterConfigurationError(f"no base_url {CANARY}"), 409, "conflict", "not_configured"),
+        (TenantDisabledError(f"tenant {CANARY}"), 409, "conflict", "tenant_disabled"),
+        (UnknownTenantError(CANARY), 404, "not-found", "not_found"),
+        (RetryableOperationError(UUID(int=1), f"retry {CANARY}"), 502, "bad-gateway", "upstream"),
+        (OperationFailedError(UUID(int=1), f"failed {CANARY}"), 502, "bad-gateway", "upstream"),
+        (AdapterError(True, f"timeout {CANARY}"), 502, "bad-gateway", "upstream"),
+        (OutputError(f"GitHub 502 {CANARY}"), 502, "bad-gateway", "upstream"),
+        (GitHubApiError(502, f"bad gateway {CANARY}"), 502, "bad-gateway", "upstream"),
+        (
+            HostNotReadyError(CANARY, HostStatus(HostState.UNAVAILABLE, CANARY)),
+            502,
+            "bad-gateway",
+            "host_not_ready",
+        ),
+        (SecretUnavailable(f"store {CANARY}"), 502, "bad-gateway", "secret_unavailable"),
     ],
 )
 async def test_each_failure_has_a_fixed_text_and_one_failure_event(
     error: Exception,
     status: int,
     kind: str,
+    reason: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The exception text, which may carry anything, reaches neither the answer nor the log."""
@@ -264,6 +271,7 @@ async def test_each_failure_has_a_fixed_text_and_one_failure_event(
     assert body["detail"] != str(error)
     (event,) = writer.written
     assert (event.action, event.outcome) == (Action.CREDENTIAL_ROTATE, Outcome.FAILURE)
+    assert event.after == {"reason": reason}
 
 
 async def test_an_unexpected_error_is_a_500_with_a_failure_event_and_a_broken_writer_is_logged(
@@ -278,6 +286,7 @@ async def test_an_unexpected_error_is_a_500_with_a_failure_event_and_a_broken_wr
         problem(response, 500)
         assert CANARY not in response.text + caplog.text
         assert [e.outcome for e in writer.written] == [Outcome.FAILURE]
+        assert writer.written[0].after == {"reason": "internal"}
         writer.error = OSError("audit down")
         problem(await client.post(_path(tenant, "fake", key)), 500)
     assert "could not record the failed credential.rotate event" in caplog.text
@@ -303,6 +312,7 @@ async def test_a_cancelled_rotation_still_leaves_its_failure_event() -> None:
         with pytest.raises(asyncio.CancelledError):
             await client.post(_path(tenant, "fake", key))
     assert [e.outcome for e in writer.written] == [Outcome.FAILURE]
+    assert writer.written[0].after == {"reason": "cancelled"}
 
 
 async def test_without_a_credential_core_or_an_audit_writer_the_route_is_a_503() -> None:

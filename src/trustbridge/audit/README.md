@@ -16,7 +16,8 @@ and tenant deletion (NG6h). SIEM push is a follow-up.
   added for the admin mutations are `tenant_admin` (the admin-disable columns), `delivery` (retry state,
   never headers or the body) and `connection` (`{"configured": true}` only; no route writes connection
   data, so it has no emitter). `host_registration` (`kind`, `app_id`, `app_slug`, `webhook_secret_ref`),
-  for the registration events.
+  for the registration events. `failure` (`reason`, one `FailureReason` code; `failure_after`)
+  is the `after` of a failed registration or rotation: a fixed code, never a message.
 - `denial.py`: `Denial` and `DenialSink`, a dependency-free leaf. `trustbridge.rbac` imports them
   from here (re-exporting them); `audit` never imports `rbac` (an import-linter contract), so the
   worker, which imports `audit`, does not load the FastAPI app.

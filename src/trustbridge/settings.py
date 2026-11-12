@@ -21,6 +21,7 @@ from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Self
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic.functional_validators import BeforeValidator
@@ -56,6 +57,8 @@ __all__ = [
 
 
 DEFAULT_ADMIN_MAX_BODY_BYTES = 16384
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+"""The hosts `public_base_url` may reach over plain http (local development only)."""
 MIN_STATE_KEY_LENGTH = 32
 """The default of `ADMIN_MAX_BODY_BYTES`; `admin.runtime.DEFAULT_MAX_BODY_BYTES` is this value."""
 
@@ -210,7 +213,8 @@ class TrustbridgeSettings(Settings):
     # URLs come from `public_base_url` (the BFF serves `<base>/admin/github/registration/callback`
     # and forwards code and state to the admin API) and the one-time `state` is signed with
     # `registration_state_key`, shared by every replica. Both unset: the start route is a 503.
-    public_base_url: str | None = None
+    # `public_base_url` is the template's setting (an origin; https and required in production);
+    # `_check_public_base_url` below tightens it for the URLs GitHub is given.
     registration_state_key: SecretStr | None = None
 
     # Largest request body an admin route reads (413 above it, chunked bodies included; NG6e).
@@ -227,6 +231,45 @@ class TrustbridgeSettings(Settings):
     # Keycloak's acceptance of `:` in client role names is not confirmed by its docs.
     rbac_alias_template_personas: bool = True
     rbac_role_separator: str = ":"
+
+    @field_validator("public_base_url")
+    @classmethod
+    def _check_public_base_url(cls, value: str | None) -> str | None:
+        """An absolute https origin, no credentials, query or fragment; the slash is dropped.
+
+        The URL becomes the webhook and redirect URLs of the GitHub App manifest, so it must be
+        one GitHub can use and a browser can trust: https, except on a loopback host
+        (`localhost`, `127.0.0.1`, `::1`) for local development. The template's own validator
+        (`app.config`) adds production's https and required rules on top. A trailing slash is
+        removed here so every consumer joins paths the same way.
+        """
+        if value is None:
+            return None
+        if any(c.isspace() for c in value):
+            raise ValueError("public_base_url must not contain whitespace")
+        parts = urlsplit(value)
+        try:
+            host = parts.hostname
+            parts.port  # noqa: B018 -- raises ValueError for an invalid port
+        except ValueError:
+            raise ValueError("public_base_url has an invalid port") from None
+        problems = [
+            message
+            for bad, message in (
+                (parts.scheme not in ("http", "https") or not host, "must be an absolute URL"),
+                (
+                    parts.scheme == "http" and host not in _LOOPBACK_HOSTS,
+                    "must use https:// (http only for localhost, 127.0.0.1 or ::1)",
+                ),
+                (bool(parts.username or parts.password), "must not contain credentials"),
+                (parts.path not in ("", "/"), "must be an origin with no path"),
+                (bool(parts.query or parts.fragment), "must have no query or fragment"),
+            )
+            if bad
+        ]
+        if problems:
+            raise ValueError("public_base_url " + "; ".join(problems))
+        return value.removesuffix("/")
 
     @field_validator("registration_state_key")
     @classmethod

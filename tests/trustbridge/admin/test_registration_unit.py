@@ -33,6 +33,7 @@ from trustbridge.admin.registration import (
 )
 from trustbridge.admin.schemas import ManualIn
 from trustbridge.audit import Action, ActorType, AuditEvent, AuditWriter, Outcome
+from trustbridge.audit.redact import FailureReason
 from trustbridge.github.availability import HostState
 from trustbridge.github.client import (
     GitHubApi,
@@ -209,6 +210,17 @@ def _client(
     return client
 
 
+def _reasons(events: list[AuditEvent]) -> list[str]:
+    """The reason code of each failure event: a fixed code in `after`, nothing else."""
+    codes = []
+    for event in events:
+        assert event.after is not None
+        assert set(event.after) == {"reason"}
+        assert event.after["reason"] in {r.value for r in FailureReason}
+        codes.append(str(event.after["reason"]))
+    return codes
+
+
 def _all_events(world: World) -> list[AuditEvent]:
     return [*world.written, *world.events]
 
@@ -319,6 +331,7 @@ def test_a_state_cannot_be_reused_or_used_by_another_caller_or_after_it_expires(
     failures = [e for e in _all_events(world) if e.outcome is Outcome.FAILURE]
     assert len(failures) == 4
     assert {e.action for e in failures} == {Action.HOST_REGISTRATION_COMPLETE}
+    assert _reasons(failures) == ["invalid_state"] * 4
 
 
 def test_a_code_github_refuses_is_a_400(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -359,6 +372,7 @@ def test_a_github_failure_during_the_exchange_is_a_502_that_never_carries_the_co
     assert world.secrets.items == {}
     done = [e for e in _all_events(world) if e.action is Action.HOST_REGISTRATION_COMPLETE]
     assert [e.outcome for e in done] == [Outcome.FAILURE]
+    assert _reasons(done) == ["upstream"]
     logs = caplog.text + "".join(
         f"{r.exc_text or ''}{r.getMessage()}{r.exc_info!r}" for r in caplog.records
     )
@@ -454,6 +468,7 @@ def test_a_host_that_already_has_an_app_is_a_409_with_a_failure_event(
         problem(_client(monkeypatch, world, OPERATOR).post(START), 409, "conflict")
         assert not (tmp_path / name / "app.pem").exists()
         assert [e.outcome for e in world.written] == [Outcome.FAILURE, Outcome.FAILURE]
+        assert _reasons(world.written) == ["conflict", "conflict"]
 
 
 def test_a_registration_that_appears_meanwhile_is_not_replaced(
@@ -467,6 +482,7 @@ def test_a_registration_that_appears_meanwhile_is_not_replaced(
     assert world.events == []
     (failure,) = world.written
     assert failure.outcome is Outcome.FAILURE
+    assert _reasons([failure]) == ["conflict"]
 
 
 def test_a_signer_that_cannot_import_is_a_409_and_a_bad_key_a_422(
@@ -478,11 +494,13 @@ def test_a_signer_that_cannot_import_is_a_409_and_a_bad_key_a_422(
     body = {"app_id": 1, "pem": PEM, "webhook_secret": WEBHOOK_SECRET}
     problem(_client(monkeypatch, world, ADMIN).post(MANUAL, json=body), 409, "conflict")
     problem(_client(monkeypatch, world, OPERATOR).post(START), 409, "conflict")
+    assert _reasons(world.written) == ["conflict", "conflict"]
     world.signers = {"main": FileSigner(tmp_path / "app.pem")}
     garbage = {"app_id": 1, "pem": "not a key", "webhook_secret": WEBHOOK_SECRET}
     response = _client(monkeypatch, world, ADMIN).post(MANUAL, json=garbage)
     problem(response, 422, "validation")
     assert "not a key" not in response.text
+    assert _reasons(world.written)[-1] == "invalid_key"
 
 
 def test_an_unknown_host_is_a_404_and_a_missing_runtime_a_503(
@@ -493,6 +511,7 @@ def test_an_unknown_host_is_a_404_and_a_missing_runtime_a_503(
     client = _client(monkeypatch, world, OPERATOR)
     problem(client.post("/admin/v1/hosts/nope/registration"), 404, "not-found")
     assert [e.outcome for e in world.written] == [Outcome.FAILURE]
+    assert _reasons(world.written) == ["not_found"]
     for path, body in ((START, None), (COMPLETE, {"code": "c", "state": "s"})):
         offline = _client(monkeypatch, world, OPERATOR, runtime=False)
         problem(offline.post(path, json=body), 503, "unavailable")
@@ -522,6 +541,7 @@ def test_an_unexpected_error_leaves_a_failure_event_and_a_failing_writer_hides_n
     client = _client(monkeypatch, world, ADMIN, server_errors=False)
     problem(client.post(MANUAL, json=body), 500)
     assert [e.outcome for e in world.written] == [Outcome.FAILURE]
+    assert _reasons(world.written) == ["internal"]
     world.writer_error = OSError("audit down")
     problem(client.post(MANUAL, json=body), 500)
     assert "could not record the failed host.registration.manual event" in caplog.text
@@ -532,12 +552,12 @@ def test_an_unexpected_error_leaves_a_failure_event_and_a_failing_writer_hides_n
 async def test_no_failure_event_follows_a_committed_success_event(tmp_path: Path) -> None:
     """Once the sink has committed the success event, a later error adds no second event."""
     world = World(tmp_path)
-    ctx: Any = SimpleNamespace(writer=Writer(world), event=lambda _a, _o: _event())
+    ctx: Any = SimpleNamespace(writer=Writer(world), event=lambda _a, _o, _after: _event())
     sink: Any = _AuditedSink(None, lambda _reg: _event())  # type: ignore[arg-type]
-    await _failure(ctx, Action.HOST_REGISTRATION_MANUAL, sink)
+    await _failure(ctx, Action.HOST_REGISTRATION_MANUAL, FailureReason.INTERNAL, sink)
     assert len(world.written) == 1
     sink.recorded = True
-    await _failure(ctx, Action.HOST_REGISTRATION_MANUAL, sink)
+    await _failure(ctx, Action.HOST_REGISTRATION_MANUAL, FailureReason.INTERNAL, sink)
     assert len(world.written) == 1
 
 

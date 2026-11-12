@@ -3,16 +3,21 @@
 ## Status
 
 Proposed. G-api answers from the user are recorded below (2026-11-03); none are open.
-NG6d-1 (#23) implemented `me`, openapi, hosts, tenants and audit read/export. NG6d-2 implemented
-the rest of the read side except `/tenant-deletions`: repositories, adapters, resources,
-credentials, operations, deliveries, `GET /audit-events/{id}` and the committed OpenAPI snapshot.
-NG6e-1 added the foundation for the mutating routes (the tenant admin-disable columns and
-`tb_set_tenant_disabled`, the instance-only tenant guard, the request body bound and the mutation
-router walk). NG6e-2 added tenant disable and enable with their enforcement in the worker and the
-adapter core. NG6e-3 added delivery requeue and tenant reconcile (the reconcile request is
-recorded; its consumer is NG6i); NG6e-4 added the host registration routes (start, complete, manual); NG6e-5 added credential rotate, run in the api. Still open, so this stays Proposed:
-the tenant-deletion routes, reads and
-writes (`GET /tenant-deletions`, `GET /tenant-deletions/{id}`, `POST /tenants/{t}/deletion`,
+
+Implemented on main (NG6, see `src/trustbridge/admin/README.md` for the as-shipped behaviour):
+
+- Read side (NG6d-1, NG6d-2): `me`, openapi (served and snapshotted), hosts, tenants,
+  repositories, adapters, resources, credentials, operations, deliveries, audit list, export and
+  `GET /audit-events/{id}`.
+- Mutating side (NG6e-1 to NG6e-5): the foundation (tenant admin-disable columns and
+  `tb_set_tenant_disabled`, the instance-only tenant guard, the request body bound, the mutation
+  router walk); tenant disable and enable with their enforcement in the worker and the adapter
+  core; delivery requeue; tenant reconcile (the request is recorded, its consumer is NG6i); host
+  registration (start, complete, manual); credential rotate, run in the api.
+- Failure events of registration and rotation carry a fixed reason code (NG6e-6, 0032).
+
+Not implemented, so this stays Proposed: the tenant-deletion routes, reads and writes
+(`GET /tenant-deletions`, `GET /tenant-deletions/{id}`, `POST /tenants/{t}/deletion`,
 `POST /tenant-deletions/{id}/cancel`, `POST /tenant-deletions/{id}/skip-step`; NG6h, with
 [0034](0034-tenant-data-deletion.md)).
 It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
@@ -228,7 +233,7 @@ The numbers are starting points to measure with the UI.
 
 **Endpoint list.** Base `/admin/v1`; `{t}` is a tenant id. Roles are the four of decision 2.
 
-Read-only (NG6d):
+Read-only (NG6d; all implemented except the `/tenant-deletions` row, NG6h):
 
 | Endpoint | Scope | Min role |
 | --- | --- | --- |
@@ -247,17 +252,17 @@ Read-only (NG6d):
 Mutating (NG6e, except the rows marked NG6h, which belong to the deletion item because they need
 the `tenant_deletions` table of 0034):
 
-| Endpoint | Scope | Min role |
-| --- | --- | --- |
-| `POST /deliveries/{host}/{id}/requeue` | instance | operator |
-| `POST /tenants/{t}/reconcile` | tenant | operator |
-| `POST /tenants/{t}/credentials/{adapter}/{scope_key}/rotate` (`scope_key` path-encoded and bounded) | tenant | operator |
-| `POST /hosts/{host}/registration` (start the manifest flow) | instance | operator |
-| `POST /hosts/{host}/registration/complete` (the BFF forwards the manifest flow's `code` and `state`; 0030) | instance | operator |
-| `POST /hosts/{host}/registration/manual` (App id, PEM, webhook secret; 0030) | instance | admin |
-| `POST /tenants/{t}/disable`, `POST /tenants/{t}/enable` | instance | admin |
-| `POST /tenants/{t}/deletion` (0034; the tenant must be disabled), `POST /tenant-deletions/{id}/cancel` (before the first destructive step) **(NG6h)** | instance | admin |
-| `POST /tenant-deletions/{id}/skip-step` (0034, user decision 2) **(NG6h)** | instance | admin |
+| Endpoint | Scope | Min role | Implemented |
+| --- | --- | --- | --- |
+| `POST /deliveries/{host}/{id}/requeue` | instance | operator | NG6e-3 |
+| `POST /tenants/{t}/reconcile` | tenant | operator | NG6e-3 (records the request; consumer NG6i) |
+| `POST /tenants/{t}/credentials/{adapter}/{scope_key}/rotate` (`scope_key` path-encoded and bounded) | tenant | operator | NG6e-5 |
+| `POST /hosts/{host}/registration` (start the manifest flow) | instance | operator | NG6e-4 |
+| `POST /hosts/{host}/registration/complete` (the BFF forwards the manifest flow's `code` and `state`; 0030) | instance | operator | NG6e-4 |
+| `POST /hosts/{host}/registration/manual` (App id, PEM, webhook secret; 0030) | instance | admin | NG6e-4 |
+| `POST /tenants/{t}/disable`, `POST /tenants/{t}/enable` | instance | admin | NG6e-2 |
+| `POST /tenants/{t}/deletion` (0034; the tenant must be disabled), `POST /tenant-deletions/{id}/cancel` (before the first destructive step) **(NG6h)** | instance | admin | not yet (NG6h) |
+| `POST /tenant-deletions/{id}/skip-step` (0034, user decision 2) **(NG6h)** | instance | admin | not yet (NG6h) |
 
 Not in v1 by design: any write of adapter connection data (decided), a policies endpoint (no
 policy table exists yet; the UI's "policies" screen needs a separate item and ADR), and any

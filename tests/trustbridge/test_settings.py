@@ -296,3 +296,51 @@ def test_adapters_enabled_is_a_comma_separated_or_json_list(raw: str, expected: 
     assert make_settings(adapters_enabled=raw).adapters_enabled == expected
     assert make_settings().adapters_enabled == []
     assert make_settings(adapters_enabled=expected).adapters_enabled == expected
+
+
+@pytest.mark.parametrize(
+    ("given", "stored"),
+    [
+        ("https://tb.example.com", "https://tb.example.com"),
+        ("https://tb.example.com/", "https://tb.example.com"),
+        ("https://tb.example.com:8443/", "https://tb.example.com:8443"),
+        ("http://localhost:8000/", "http://localhost:8000"),
+        ("http://127.0.0.1:8000", "http://127.0.0.1:8000"),
+        ("http://[::1]:8000", "http://[::1]:8000"),
+        (None, None),
+    ],
+)
+def test_public_base_url_is_an_https_origin_with_the_slash_dropped(
+    given: str | None, stored: str | None
+) -> None:
+    """NG6e-6: it becomes the GitHub App manifest's URLs; http only on a loopback host."""
+    assert make_settings(public_base_url=given).public_base_url == stored
+
+
+@pytest.mark.parametrize(
+    ("given", "message"),
+    [
+        ("http://tb.example.com", "must use https"),
+        ("http://localhost.example.com", "must use https"),
+        ("tb.example.com", "absolute URL"),
+        ("//tb.example.com", "absolute URL"),
+        ("ftp://tb.example.com", "absolute URL"),
+        ("https://", "absolute URL"),
+        ("https://user:secret@tb.example.com", "credentials"),
+        ("https://tb.example.com/api", "no path"),
+        ("https://tb.example.com?x=1", "no query or fragment"),
+        ("https://tb.example.com/#top", "no query or fragment"),
+        ("https://tb.example.com:port", "invalid port"),
+        ("https://tb.example.com /", "whitespace"),
+    ],
+)
+def test_a_bad_public_base_url_stops_the_load(given: str, message: str) -> None:
+    """The settings do not load, and the error names the rule."""
+    with pytest.raises(ValidationError, match=message):
+        make_settings(public_base_url=given)
+
+
+def test_production_still_requires_https_for_the_public_base_url() -> None:
+    """The template's production rule holds on top of this one."""
+    with pytest.raises(ValidationError, match="must use https"):
+        _prod(public_base_url="http://localhost:8000")
