@@ -159,7 +159,7 @@ def credential_events(
 class CredentialAuditObserver:
     """The audit log's `SaveObserver` and `OrphanObserver` for the credential core.
 
-    `actor` is the process running the core (`worker` or `reconciler`).
+    `actor` is the process running the core (`worker`, `reconciler` or `api`).
     """
 
     def __init__(self, writer: AuditWriter, actor: SystemActor) -> None:

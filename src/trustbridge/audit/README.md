@@ -139,7 +139,7 @@ ADR names them, with no emitter:
 
 | Event | Owner |
 | --- | --- |
-| `credential.rotate`, the event of the rotate route (the router walk `admin.guards.mutations_without_emitter` fails any mutating route without an `emits` marker). Emitted since NG6e-2 to NG6e-4: `tenant.disable`, `tenant.enable`, `tenant.reconcile`, `delivery.requeue` and `host.registration.start`, `.manual`, `.complete` (the `host_registration` shape) | NG6e-5 |
+| (none left for the admin API.) The router walk `admin.guards.mutations_without_emitter` fails any mutating route without an `emits` marker. Emitted since NG6e-2 to NG6e-5: `credential.rotate`, `tenant.disable`, `tenant.enable`, `tenant.reconcile`, `delivery.requeue` and `host.registration.start`, `.manual`, `.complete` (the `host_registration` shape); the credential events of a rotation made through the API have the system actor `api` | done |
 | The deletion's own events (0034) | NG6h |
 | The reconciler duty calling `purge_expired` (ADR 0032 "Retention") | NG6h |
 | A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export"). No such timeout exists on main and the engine is the template's (`app.db`) | NG6h (api and deletion batches). Left out of NG6d: the read routes do not need it, and no connection on main sets a timeout to check against |

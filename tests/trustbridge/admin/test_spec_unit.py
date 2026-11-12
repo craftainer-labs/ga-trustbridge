@@ -67,6 +67,7 @@ def test_the_snapshot_documents_every_read_route_of_adr_0033() -> None:
             "/hosts/{host}/registration",
             "/hosts/{host}/registration/complete",
             "/hosts/{host}/registration/manual",
+            "/tenants/{tenant_id}/credentials/{adapter}/{scope_key}/rotate",
         )
     } == paths
 

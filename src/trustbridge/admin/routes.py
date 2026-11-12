@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from trustbridge.admin import queries, registration
+from trustbridge.admin import credentials, queries, registration
 from trustbridge.admin.access import tenants_page
 from trustbridge.admin.cursor import MAX_SEQ, decode_cursor, encode_cursor, invalid_cursor, paginate
 from trustbridge.admin.guards import BoundedRoute, emits, guard, guard_any_grant
@@ -511,6 +511,37 @@ async def register_host_manually(
     body = registration.parse_body(await request.body(), ManualIn)
     ctx = registration.Context(request, principal, host, _factory(runtime), runtime.writer)
     return await registration.manual(ctx, _registration(runtime), body)
+
+
+# ---- credential rotation (ADR 0033, NG6e-5) -----------------------------------------------
+
+
+@router.post(
+    "/tenants/{tenant_id}/credentials/{adapter}/{scope_key}/rotate",
+    response_model=credentials.RotationOut,
+    dependencies=guard(Role.OPERATOR, "mutation", tenant_param="tenant_id"),
+)
+@emits(Action.CREDENTIAL_ROTATE)
+async def rotate_credential(  # noqa: PLR0913 - the path, the request and the collaborators
+    tenant_id: UUID,
+    adapter: Annotated[str, Path(max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$")],
+    scope_key: Annotated[str, Path(max_length=64, pattern=r"^[0-9a-f]+$")],
+    *,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> credentials.RotationOut:
+    """Rotate a credential scope now (`operator`, instance or on the tenant).
+
+    Runs the credential core in this request: a new secret is issued, delivered to GitHub and the
+    old one retired (two-phase adapters keep it for an overlap and finish later). Calling it again
+    while a rotation is open resumes that one. No secret value is returned. A disabled tenant, a
+    scope with nothing rotatable or a busy lease is a 409; a platform or GitHub failure a 502.
+    """
+    if runtime.credentials is None or runtime.writer is None:
+        raise AdminProblem(503, "unavailable", "Credential rotation is not configured")
+    call = credentials.Call(request, principal, tenant_id, adapter, scope_key, runtime.writer)
+    return await credentials.rotate(call, runtime.credentials)
 
 
 # ---- delivery requeue and tenant reconcile (ADR 0033, NG6e-3) ------------------------------

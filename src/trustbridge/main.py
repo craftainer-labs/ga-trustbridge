@@ -34,6 +34,7 @@ from trustbridge.adapters.loader import load_adapter_classes
 from trustbridge.admin import metrics as admin_metrics
 from trustbridge.admin.access import NoTenants, SqlTenantAccess
 from trustbridge.admin.adapters import AdapterCatalog
+from trustbridge.admin.credentials import build_runtime as build_credential_runtime
 from trustbridge.admin.problems import install_problem_types
 from trustbridge.admin.registration import (
     MemoryNonceStore,
@@ -285,6 +286,7 @@ def _install_admin(  # noqa: PLR0913 - the collaborators main owns
         NoTenants() if sessions is None else SqlTenantAccess(sessions),
         denials=denials,
     )
+    classes = load_adapter_classes(settings.adapters_enabled)
     app.state.admin = AdminRuntime(
         limits=build_limits(settings, counter),
         hosts=core.runtime.monitor,
@@ -294,8 +296,11 @@ def _install_admin(  # noqa: PLR0913 - the collaborators main owns
         max_body_bytes=settings.admin_max_body_bytes,
         scheduler=core.scheduler,
         registration=_registration_runtime(settings, core, redis),
+        credentials=build_credential_runtime(
+            classes=classes, core=core, sessions=sessions, writer=writer
+        ),
         # ADR 0029: only the enabled adapters are imported; a bad name stops the process.
-        adapters=AdapterCatalog(load_adapter_classes(settings.adapters_enabled), core.secrets),
+        adapters=AdapterCatalog(classes, core.secrets),
     )
     return denials
 

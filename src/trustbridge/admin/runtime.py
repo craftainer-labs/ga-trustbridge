@@ -15,6 +15,7 @@ from trustbridge.ratelimit import FixedWindowLimiter, WindowCounter
 from trustbridge.settings import DEFAULT_ADMIN_MAX_BODY_BYTES, TrustbridgeSettings
 
 if TYPE_CHECKING:
+    from trustbridge.admin.credentials import CredentialRuntime
     from trustbridge.admin.registration import RegistrationRuntime
 
 DEFAULT_EXPORT_PAGE = 500
@@ -46,7 +47,8 @@ class AdminRuntime:
     `adapters` is the enabled-adapter catalog for `GET /tenants/{t}/adapters` (None: none).
     `max_body_bytes` bounds a request body (`ADMIN_MAX_BODY_BYTES`). `scheduler` records a
     reconcile request (`POST /tenants/{t}/reconcile`; None: the route answers 503).
-    `registration` is the host-registration flow (None: its routes answer 503).
+    `registration` is the host-registration flow (None: its routes answer 503). `credentials` is
+    the credential core of the rotate route (None without a database: 503).
     """
 
     limits: AdminLimits
@@ -59,6 +61,7 @@ class AdminRuntime:
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     scheduler: ReconcileScheduler | None = None
     registration: RegistrationRuntime | None = None
+    credentials: CredentialRuntime | None = None
 
 
 def build_limits(settings: TrustbridgeSettings, counter: WindowCounter) -> AdminLimits:
