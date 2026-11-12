@@ -20,7 +20,12 @@ from trustbridge.adapters.core import (
     TenantDisabledError,
 )
 from trustbridge.adapters.fake import fake_capabilities
-from trustbridge.adapters.interface import AdapterConfigurationError, AdapterError, scope_key
+from trustbridge.adapters.interface import (
+    SCOPE_KEY_LENGTH,
+    AdapterConfigurationError,
+    AdapterError,
+    scope_key,
+)
 from trustbridge.adapters.store import CredentialStore, LeaseLostError, OutputError
 from trustbridge.admin import guards, routes
 from trustbridge.admin.credentials import CredentialRuntime, build_runtime
@@ -276,6 +281,18 @@ async def test_an_unexpected_error_is_a_500_with_a_failure_event_and_a_broken_wr
         writer.error = OSError("audit down")
         problem(await client.post(_path(tenant, "fake", key)), 500)
     assert "could not record the failed credential.rotate event" in caplog.text
+
+
+async def test_every_generated_scope_key_passes_the_route_pattern() -> None:
+    """The path pattern and `scope_key` share `SCOPE_KEY_LENGTH`, so they cannot drift apart."""
+    w, _runtime, _writer, env, _key = await _rotating()
+    async with _client(env, OPERATOR) as client:
+        for repo in (None, 1, 2**40):
+            for environment in (None, "prod", "x" * 300):
+                key = scope_key(repo, environment, PULL.permission)
+                assert len(key) == SCOPE_KEY_LENGTH
+                response = await client.post(_path(w.tenant.id, "fake", key))
+                assert response.status_code != 422, (repo, environment)
 
 
 async def test_a_cancelled_rotation_still_leaves_its_failure_event() -> None:

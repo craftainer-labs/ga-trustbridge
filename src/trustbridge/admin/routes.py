@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from trustbridge.adapters.interface import SCOPE_KEY_LENGTH
 from trustbridge.admin import credentials, queries, registration
 from trustbridge.admin.access import tenants_page
 from trustbridge.admin.cursor import MAX_SEQ, decode_cursor, encode_cursor, invalid_cursor, paginate
@@ -525,7 +526,14 @@ async def register_host_manually(
 async def rotate_credential(  # noqa: PLR0913 - the path, the request and the collaborators
     tenant_id: UUID,
     adapter: Annotated[str, Path(max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$")],
-    scope_key: Annotated[str, Path(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")],
+    scope_key: Annotated[
+        str,
+        Path(
+            min_length=SCOPE_KEY_LENGTH,
+            max_length=SCOPE_KEY_LENGTH,
+            pattern=rf"^[0-9a-f]{{{SCOPE_KEY_LENGTH}}}$",
+        ),
+    ],
     *,
     request: Request,
     principal: Annotated[Principal, Depends(get_principal)],
