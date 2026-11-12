@@ -109,6 +109,7 @@ def test_a_failure_event_records_a_reason_code_and_nothing_else() -> None:
 
 
 def test_failure_reason_for_status_maps_refusals_and_defaults_to_unavailable() -> None:
+    """NG6e-6: the one status-to-reason map; only 404 and 409 are refusals, the rest is an outage."""
     assert FailureReason.for_status(404) is FailureReason.NOT_FOUND
     assert FailureReason.for_status(409) is FailureReason.CONFLICT
     assert FailureReason.for_status(503) is FailureReason.UNAVAILABLE
