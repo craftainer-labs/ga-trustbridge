@@ -282,9 +282,6 @@ async def _require_unregistered(
         raise AdminProblem(409, "conflict", "The host already has a registered App")
 
 
-"""The reason of an `AdminProblem` by status; anything else (a 503) is `unavailable`."""
-
-
 async def _run[T](
     ctx: Context,
     rt: RegistrationRuntime,
