@@ -27,6 +27,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from uuid import UUID
 
+from sqlalchemy import event as sa_event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from trustbridge.adapters.store import (
@@ -60,6 +61,10 @@ class JoinedCallEvent:
     scope_key: str
     build: Callable[[UUID], AuditEvent]
     written: bool = False
+
+    def reset(self, *_: object) -> None:
+        """Forget that the event was appended (its transaction rolled back)."""
+        self.written = False
 
 
 _JOINED: ContextVar[JoinedCallEvent | None] = ContextVar("tb_joined_call_event", default=None)
@@ -251,6 +256,8 @@ class CredentialAuditObserver:
             return
         await append(session, with_trace(pending.build(operation.id)))
         pending.written = True
+        # A rolled back save appended nothing: the retry must append the event again.
+        sa_event.listen(session.sync_session, "after_rollback", pending.reset, once=True)
 
     async def orphan_deleted(self, tenant_id: UUID, adapter: str, name: str) -> None:
         """Write `credential.orphan.delete`; `name` is the platform credential name."""

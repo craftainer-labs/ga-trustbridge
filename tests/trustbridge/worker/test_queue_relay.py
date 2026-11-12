@@ -36,7 +36,7 @@ async def test_a_delayed_retry_waits_for_its_time_and_is_then_re_added_once_by_t
     h = await Harness({}).start()
     await h.add("d1")
     soon = h.clock() + timedelta(seconds=30)
-    await h.store.record_failure(key("d1"), "e", h.clock(), soon)
+    await h.store.record_failure(key("d1"), "e", h.clock(), soon, attempts=0)
     assert await h.relay.tick() == 0
     h.advance(30)
     assert await h.relay.tick() == 1

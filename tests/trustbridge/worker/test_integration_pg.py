@@ -221,9 +221,9 @@ async def test_the_sql_store_runs_the_whole_delivery_lifecycle(ids: list[str]) -
     await store.mark_relayed([], now)  # nothing to stamp
     await store.mark_relayed([ok.key, failing.key], now)
     assert await store.mark_processed(ok.key, now, attempts=0) is True
-    assert await store.record_failure(failing.key, "boom", now, later) == 1
-    assert await store.record_failure(failing.key, "boom", now, later) == 2
-    assert await store.record_failure(ok.key, "late", now, later) == 0  # not pending
+    assert await store.record_failure(failing.key, "boom", now, later, attempts=0) == 1
+    assert await store.record_failure(failing.key, "boom", now, later, attempts=1) == 2
+    assert await store.record_failure(ok.key, "late", now, later, attempts=0) == 0  # not pending
     await store.defer(failing.key, later)
     assert await store.mark_dead(dead.key, "poison", now, attempts=0) is True
     # a lost claim: `failing` moved on (two counted failures), so the stale claim updates nothing

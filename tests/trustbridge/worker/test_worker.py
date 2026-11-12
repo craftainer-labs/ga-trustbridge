@@ -312,7 +312,7 @@ async def test_a_lost_claim_leaves_the_row_alone_on_success(
 
     async def handler(ctx: EventContext) -> None:
         # another consumer counted a failure while this one was handling the same delivery
-        await h.store.record_failure(key("d1"), "elsewhere", h.clock(), h.clock())
+        await h.store.record_failure(key("d1"), "elsewhere", h.clock(), h.clock(), attempts=0)
 
     h.registry.register("push", handler)
     await h.add("d1")
@@ -320,6 +320,26 @@ async def test_a_lost_claim_leaves_the_row_alone_on_success(
     row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts) == ("pending", 1)
+    assert "status update skipped" in caplog.text
+    assert (await h.valkey.xpending("tb:events", "tb-workers"))["pending"] == 0
+
+
+async def test_a_failure_after_a_lost_claim_is_not_counted_and_is_acked(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A requeue resets the row mid-handle; the stale failure must not bump the fresh counter."""
+    h = await Harness({}).start()
+
+    async def handler(ctx: EventContext) -> None:
+        await h.store.record_failure(key("d1"), "elsewhere", h.clock(), h.clock(), attempts=0)
+        raise RuntimeError("late failure")
+
+    h.registry.register("push", handler)
+    await h.add("d1")
+    await h.worker.run_once()
+    row = await h.store.get(key("d1"))
+    assert row is not None
+    assert (row.status, row.attempts, row.last_error) == ("pending", 1, "elsewhere")
     assert "status update skipped" in caplog.text
     assert (await h.valkey.xpending("tb:events", "tb-workers"))["pending"] == 0
 

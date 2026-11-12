@@ -11,10 +11,10 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import CursorResult, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from trustbridge.admin import views
@@ -324,9 +324,8 @@ async def requeue_delivery(session: AsyncSession, host: str, delivery_id: str) -
     if row["status"] != "dead" or not row["has_body"]:
         raise AdminProblem(409, "conflict", "Only a dead delivery with its body can be requeued")
     result = await session.execute(requeue_statement(DeliveryKey(host, delivery_id)))
-    if (
-        result.rowcount != 1
-    ):  # the statement is conditional: never report a reset that did not happen
+    # the statement is conditional: never report a reset that did not happen
+    if cast("CursorResult[Any]", result).rowcount != 1:
         raise AdminProblem(409, "conflict", "Only a dead delivery with its body can be requeued")
     after = {
         "status": "pending",

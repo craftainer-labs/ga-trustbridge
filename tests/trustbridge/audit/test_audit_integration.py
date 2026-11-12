@@ -1019,7 +1019,7 @@ async def test_the_callers_rotation_event_commits_with_the_finishing_save_or_not
     with join_call_event(committed):
         await save()
     assert committed.written is True
-    actions = sorted(r.action.value for r in await _tenant_events(db, tenant))
+    actions = sorted(str(r.action) for r in await _tenant_events(db, tenant))
     assert actions == ["credential.rotate", "credential.rotate.finish"]
 
 

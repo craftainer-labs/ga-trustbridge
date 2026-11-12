@@ -170,7 +170,14 @@ class Worker:
             self._s.retry_backoff_base_seconds,
             self._s.retry_backoff_max_seconds,
         )
-        await self._d.store.record_failure(row.key, error, self._d.clock(), when)
+        counted = await self._d.store.record_failure(
+            row.key, error, self._d.clock(), when, attempts=row.attempts
+        )
+        if not counted:
+            # the row moved on (requeued, settled elsewhere): the failure is not ours to count
+            _lost_claim(row, "failure")
+            await self._d.queue.ack(entry.entry_id)
+            return
         if attempts >= self._s.max_delivery_attempts:
             await self._dead(row, entry, error, attempts)
         else:

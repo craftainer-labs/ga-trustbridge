@@ -401,15 +401,30 @@ def test_the_runtime_is_built_from_the_cores_parts_with_the_disable_gate() -> No
     assert build_runtime(classes={}, core=core, sessions=sessions, writer=None) is None
 
 
+class _SaveSession:
+    """The save's session as far as the observer looks at it (rollback hook registration)."""
+
+    sync_session = object()
+
+
 class FinishingCore:
     """A core whose rotation finishes in a save that runs the audit observer, as the SQL store does.
 
     `append` is replaced by the test, so the observer's write goes where the test says.
     """
 
-    def __init__(self, observer: CredentialAuditObserver, stored: StoredCredential) -> None:
-        """Bind the observer and the stored credential this core 'saves'."""
+    def __init__(
+        self,
+        observer: CredentialAuditObserver,
+        stored: StoredCredential,
+        after_save: BaseException | None = None,
+    ) -> None:
+        """Bind the observer and the stored credential this core 'saves'.
+
+        `after_save` is raised once the save is done, like a failing lease release.
+        """
         self.observer = observer
+        self.after_save = after_save
         self.stored = stored
         self.operation_id = UUID(int=7)
 
@@ -428,17 +443,23 @@ class FinishingCore:
             base_kind="secret",
         )
         await self.observer.saved(
-            cast("AsyncSession", object()),
+            cast("AsyncSession", _SaveSession()),
             previous_kind="secret",
             previous_status=OperationStatus.DELIVERED,
             credential=self.stored,
             operation=op,
         )
+        if self.after_save is not None:
+            raise self.after_save
         return ScopeResult(op.id, op.status, ChangeState.UPDATED, None, None)
 
 
 async def _finishing(
-    monkeypatch: pytest.MonkeyPatch, writer: Writer, *, append_fails: bool = False
+    monkeypatch: pytest.MonkeyPatch,
+    writer: Writer,
+    *,
+    append_fails: bool = False,
+    after_save: BaseException | None = None,
 ) -> tuple[Env, str, UUID, list[AuditEvent]]:
     w, _runtime, _w, _e, key = await _rotating()
     in_save: list[AuditEvent] = []
@@ -451,10 +472,11 @@ async def _finishing(
         return event.id
 
     monkeypatch.setattr(audit_credentials, "append", fake_append)
+    monkeypatch.setattr(audit_credentials.sa_event, "listen", lambda *args, **kwargs: None)
     observer = CredentialAuditObserver(writer, SystemActor.API)
     stored = await w.store.get_credential(w.tenant.id, "fake", key)
     assert stored is not None
-    core = cast(CredentialCore, FinishingCore(observer, stored))
+    core = cast(CredentialCore, FinishingCore(observer, stored, after_save))
     runtime = CredentialRuntime(
         core, cast(CredentialStore, w.store), w.deps.tenants, frozenset({"fake"})
     )
@@ -494,3 +516,18 @@ async def test_a_finished_rotation_whose_event_cannot_be_appended_is_never_a_suc
     assert [(e.outcome, e.after) for e in writer.written] == [
         (Outcome.FAILURE, {"reason": "internal"})
     ]
+
+
+async def test_an_error_after_the_finishing_save_adds_no_failure_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The success event committed with the save stands; the call leaves one event, not two."""
+    writer = Writer()
+    env, key, tenant, in_save = await _finishing(
+        monkeypatch, writer, after_save=OSError("lease release failed")
+    )
+    async with _client(env, OPERATOR) as client:
+        response = await client.post(_path(tenant, "fake", key))
+    problem(response, 500)
+    assert len([e for e in in_save if e.action is Action.CREDENTIAL_ROTATE]) == 1
+    assert writer.written == []

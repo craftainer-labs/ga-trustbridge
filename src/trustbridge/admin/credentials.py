@@ -121,11 +121,16 @@ async def _record(call: Call, outcome: Outcome, after: Mapping[str, object] | No
     await call.writer.record(call.event(outcome, after))
 
 
-async def _failure(call: Call, reason: FailureReason) -> None:
+async def _failure(call: Call, joined: JoinedCallEvent, reason: FailureReason) -> None:
     """Best effort: a `failure` event in its own transaction; never hides the original error.
 
-    The event carries a `FailureReason` code, never a message.
+    The event carries a `FailureReason` code, never a message. When the finishing save already
+    committed the call's success event (an error after it, e.g. releasing the lease), no failure
+    event is added: the call leaves exactly one event, and the committed one is the truth.
     """
+    if joined.written:
+        logger.warning("rotate error after the finishing save; its success event stands")
+        return
     try:
         await _record(call, Outcome.FAILURE, failure_after(reason))
     except Exception:
@@ -165,29 +170,29 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
         with join_call_event(joined):
             result = await rt.core.rotate_scope(tenant, call.adapter, stored.scope)
     except AdminProblem:
-        await _failure(call, FailureReason.NOT_FOUND)
+        await _failure(call, joined, FailureReason.NOT_FOUND)
         raise
     except UnknownTenantError:
-        await _failure(call, FailureReason.NOT_FOUND)
+        await _failure(call, joined, FailureReason.NOT_FOUND)
         raise AdminProblem(404, "not-found", "Tenant not found") from None
     except TenantDisabledError:
-        await _failure(call, FailureReason.TENANT_DISABLED)
+        await _failure(call, joined, FailureReason.TENANT_DISABLED)
         raise AdminProblem(409, "conflict", "The tenant is disabled") from None
     except RotationNotApplicableError:
-        await _failure(call, FailureReason.NOT_ROTATABLE)
+        await _failure(call, joined, FailureReason.NOT_ROTATABLE)
         raise AdminProblem(409, "conflict", "The credential has no rotatable secret") from None
     except LeaseBusy:
-        await _failure(call, FailureReason.LEASE_BUSY)
+        await _failure(call, joined, FailureReason.LEASE_BUSY)
         raise AdminProblem(
             409, "conflict", "The credential is being changed; retry shortly"
         ) from None
     except LeaseLost, LeaseLostError:
-        await _failure(call, FailureReason.LEASE_LOST)
+        await _failure(call, joined, FailureReason.LEASE_LOST)
         raise AdminProblem(
             409, "conflict", "The credential is being changed; retry shortly"
         ) from None
     except AdapterConfigurationError:
-        await _failure(call, FailureReason.NOT_CONFIGURED)
+        await _failure(call, joined, FailureReason.NOT_CONFIGURED)
         raise AdminProblem(
             409, "conflict", "The adapter is not configured for this tenant"
         ) from None
@@ -201,19 +206,19 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
         SecretUnavailable,
     ) as exc:
         logger.warning("rotation failed for tenant %s: %s", call.tenant_id, type(exc).__name__)
-        await _failure(call, _upstream_reason(exc))
+        await _failure(call, joined, _upstream_reason(exc))
         raise AdminProblem(
             502, "bad-gateway", "The platform or GitHub failed to complete the rotation"
         ) from None
     except asyncio.CancelledError:
         # The client went away mid-rotation: the operation stays open for the reconciler, but the
         # call still leaves its event (shielded, so the cancellation cannot cut the write short).
-        await asyncio.shield(_failure(call, FailureReason.CANCELLED))
+        await asyncio.shield(_failure(call, joined, FailureReason.CANCELLED))
         raise
     except Exception as exc:
         # Unmapped: never let the chain (which may hold a secret) reach the error logger.
         logger.error("rotation crashed for tenant %s: %s", call.tenant_id, type(exc).__name__)
-        await _failure(call, FailureReason.INTERNAL)
+        await _failure(call, joined, FailureReason.INTERNAL)
         raise AdminProblem(500, "internal", "The rotation failed unexpectedly") from None
     await _record_success(call, result.operation_id, joined)
     return RotationOut(

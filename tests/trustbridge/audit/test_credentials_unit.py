@@ -240,6 +240,8 @@ def test_no_event_carries_a_name_a_reference_or_a_value() -> None:
 class RecordingSession:
     """Stands in for the save's session; the faked `append` collects what it was given."""
 
+    sync_session = object()
+
 
 async def test_the_observer_appends_each_event_through_the_saves_session(
     monkeypatch: pytest.MonkeyPatch,
@@ -344,6 +346,7 @@ async def test_the_save_that_finishes_the_callers_rotation_appends_the_joined_ev
         return event.id
 
     monkeypatch.setattr(creds, "append", fake_append)
+    monkeypatch.setattr(creds.sa_event, "listen", lambda *args, **kwargs: None)
     built: list[UUID] = []
     pending = _joined(built)
     op = replace(_op(kind, status, base_kind="secret", base=OLD), scope_key=scope_key)
@@ -370,3 +373,36 @@ async def test_the_save_that_finishes_the_callers_rotation_appends_the_joined_ev
     assert pending.written is joins
     assert built == ([op.id] if joins else [])
     assert all(s is session for s, _ in appended)
+
+
+async def test_a_rolled_back_finishing_save_lets_the_retry_append_the_event_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `written` flag follows the transaction: a rollback clears it, so the retry appends."""
+    hooks: list[tuple[object, str, Any]] = []
+
+    async def fake_append(session: object, event: AuditEvent) -> UUID:
+        return event.id
+
+    monkeypatch.setattr(creds, "append", fake_append)
+    monkeypatch.setattr(
+        creds.sa_event, "listen", lambda target, name, fn, **kw: hooks.append((target, name, fn))
+    )
+    pending = _joined([])
+    op = _op(OperationKind.ROTATE, OperationStatus.FINISHED, base_kind="secret", base=OLD)
+    stored = _stored("secret", CredentialState(current=_slot(2)))
+    observer = CredentialAuditObserver(cast("AuditWriter", object()), SystemActor.API)
+    session = RecordingSession()
+    with creds.join_call_event(pending):
+        await observer.saved(
+            cast("AsyncSession", session),
+            previous_kind="secret",
+            previous_status=OperationStatus.DELIVERED,
+            credential=stored,
+            operation=op,
+        )
+        assert pending.written is True
+        ((target, name, fn),) = hooks
+        assert (target, name) == (session.sync_session, "after_rollback")
+        fn(session.sync_session)  # SQLAlchemy calls the hook with the sync session on rollback
+        assert pending.written is False

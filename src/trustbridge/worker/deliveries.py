@@ -114,9 +114,19 @@ class DeliveryStore(Protocol):
         ...
 
     async def record_failure(
-        self, key: DeliveryKey, error: str, now: datetime, next_attempt_at: datetime
+        self,
+        key: DeliveryKey,
+        error: str,
+        now: datetime,
+        next_attempt_at: datetime,
+        *,
+        attempts: int,
     ) -> int:
-        """Count one handler failure and schedule the retry; returns the new counter."""
+        """Count one failure of the claim `attempts` and schedule the retry.
+
+        Returns the new counter, or 0 when the claim was lost (the row is no longer `pending`
+        with this `attempts`), in which case nothing changes.
+        """
         ...
 
     async def defer(self, key: DeliveryKey, until: datetime) -> None:
@@ -259,10 +269,18 @@ class InMemoryDeliveryStore:
         return True
 
     async def record_failure(
-        self, key: DeliveryKey, error: str, now: datetime, next_attempt_at: datetime
+        self,
+        key: DeliveryKey,
+        error: str,
+        now: datetime,
+        next_attempt_at: datetime,
+        *,
+        attempts: int,
     ) -> int:
-        """Count a failure."""
+        """Count a failure if the claim still holds."""
         row = self.rows[key]
+        if row.status != PENDING or row.attempts != attempts:
+            return 0
         self._set(
             key,
             attempts=row.attempts + 1,
@@ -507,12 +525,20 @@ class PgDeliveryStore:
         return count == 1
 
     async def record_failure(
-        self, key: DeliveryKey, error: str, now: datetime, next_attempt_at: datetime
+        self,
+        key: DeliveryKey,
+        error: str,
+        now: datetime,
+        next_attempt_at: datetime,
+        *,
+        attempts: int,
     ) -> int:
-        """Count a failure; returns the new counter."""
+        """Count a failure of the claimed `attempts`; returns the new counter, 0 if lost."""
         stmt = (
             update(WebhookDelivery)
-            .where(_is(key), WebhookDelivery.status == PENDING)
+            .where(
+                _is(key), WebhookDelivery.status == PENDING, WebhookDelivery.attempts == attempts
+            )
             .values(
                 attempts=WebhookDelivery.attempts + 1,
                 last_error=error,
