@@ -165,10 +165,17 @@ never committed without its call event). A call that leaves the rotation open (a
 overlap, a manual step) writes the event after the core returns; if that fails the call is a 500
 and the open rotation stays resumable. Not covered: a call that finishes a `delete` or `switch`
 operation it found open (it never starts one), whose event is written after the core returns.
-No migration and no API change. Sources: OWASP Logging Cheat Sheet (log events about the change
-with the change; a failure to log is itself an event to handle), NIST SP 800-53 AU-5 (respond to
-audit logging process failures; for a security-relevant change, fail the action rather than
-continue unaudited).
+No migration and no API change. Sources, read on 2026-11-12:
+[OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)
+says to "ensure failures in the logging processes/systems do not prevent the application from
+otherwise running"; this design keeps to that for everything except the one audited change, where
+the change is rolled back with its event instead of running unaudited.
+[NIST SP 800-53 Rev. 5, AU-5](https://csrc.nist.gov/projects/cprt/catalog#/cprt/framework/version/SP_800_53_5_1_1/home?element=AU-5)
+requires an alert on an audit logging process failure plus organization-defined additional
+actions (its discussion lists overwriting the oldest records, shutting down, and stopping record
+generation, and allows "no additional actions" after alerting). Failing the one call is our
+defined action; the failure is logged at error level and counted as a failed call. No separate
+alerting to named roles is implemented here (an operations concern).
 
 ## Host registration (NG6e-4)
 
