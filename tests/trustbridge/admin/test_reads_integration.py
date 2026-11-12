@@ -662,7 +662,7 @@ async def test_requeue_resets_a_dead_delivery_and_audits_it_in_the_same_transact
 
 
 async def test_requeue_refuses_a_processed_delivery_and_one_without_a_body(db: rls.Db) -> None:
-    """409 with nothing changed and no event; 404 for an unknown delivery; 403 for a viewer."""
+    """409 and 404 change nothing and leave a failure event each; a viewer is a 403."""
     await _delivery(db, "rq2", 2, b"{}")
     await _set_status(db, "rq2", "processed")
     await _delivery(db, "rq3", 3, b"{}")
@@ -682,11 +682,18 @@ async def test_requeue_refuses_a_processed_delivery_and_one_without_a_body(db: r
     assert [tuple(r) for r in states] == [("rq2", "processed"), ("rq3", "dead")]
     events = await _admin(
         db,
-        "SELECT 1 FROM audit_events WHERE resource_id IN (:a, :b)",
+        "SELECT resource_id, outcome, tenant_id, after FROM audit_events "
+        "WHERE action = 'delivery.requeue' AND resource_id IN (:a, :b, :c) ORDER BY seq",
         a=f"{HOST}/rq2",
         b=f"{HOST}/rq3",
+        c=f"{HOST}/none",
     )
-    assert events == []
+    # one failure event per refusal (the viewer's 403 is the guard's `authz.denied`, not this)
+    assert [(e.resource_id, e.outcome, e.tenant_id, e.after) for e in events] == [
+        (f"{HOST}/rq2", "failure", None, {"reason": "conflict"}),
+        (f"{HOST}/rq3", "failure", None, {"reason": "conflict"}),
+        (f"{HOST}/none", "failure", None, {"reason": "not_found"}),
+    ]
 
 
 class Scheduler:
@@ -728,6 +735,13 @@ async def test_reconcile_records_the_request_and_audits_it_for_a_tenant_operator
         async with _client(db, "trustbridge:operator", scheduler=scheduler) as client:
             assert (await client.post(path)).status_code == 409
         assert scheduler.tenants == [db.a, db.a]
+        failed = await _admin(
+            db,
+            "SELECT tenant_id, after FROM audit_events WHERE action = 'tenant.reconcile' "
+            "AND outcome = 'failure' AND resource_id = :t",
+            t=str(db.a),
+        )
+        assert [(e.tenant_id, e.after) for e in failed] == [(db.a, {"reason": "tenant_disabled"})]
     finally:
         await _set(db, db.a, disable=False)
 

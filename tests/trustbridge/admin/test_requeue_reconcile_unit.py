@@ -221,21 +221,25 @@ def test_requeueing_a_pending_delivery_is_a_success_with_before_equal_to_after(
 def test_requeue_of_an_unknown_delivery_is_a_404_and_a_conflict_is_a_409(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Neither writes an event."""
+    """Neither changes anything; each leaves one failure event with its reason."""
     world = World()
     world.requeue = None
     problem(_client(monkeypatch, world, OPERATOR).post(REQUEUE), 404, "not-found")
     world.requeue_error = AdminProblem(409, "conflict", "Only a dead delivery can be requeued")
     problem(_client(monkeypatch, world, OPERATOR).post(REQUEUE), 409, "conflict")
     assert world.events == []
-    assert world.written == []
+    assert [(e.action, e.outcome, e.resource_id, e.after) for e in world.written] == [
+        (Action.DELIVERY_REQUEUE, Outcome.FAILURE, "github.com/abc-123", {"reason": reason})
+        for reason in ("not_found", "conflict")
+    ]
 
 
 def test_a_delivery_that_vanishes_after_the_reset_is_a_404(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The final read finds nothing."""
+    """The final read finds nothing, after the success event: no second event."""
     world = World()
     world.detail = None
     problem(_client(monkeypatch, world, OPERATOR).post(REQUEUE), 404, "not-found")
+    assert world.written == []  # the success event is already committed: one event per call
 
 
 def test_requeue_paths_are_bounded_and_the_role_is_operator_at_instance_scope(
@@ -293,13 +297,17 @@ def test_a_repeat_reconcile_is_accepted_and_audited_again(monkeypatch: pytest.Mo
 def test_reconcile_of_a_disabled_or_missing_tenant_changes_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """409 for a disabled tenant, 404 when the row is gone; no request, no event."""
+    """409 for a disabled tenant, 404 when the row is gone; no request, a failure event each."""
     world = World()
     world.tenant_row = _tenant_row(True)
     problem(_client(monkeypatch, world, OPERATOR).post(RECONCILE), 409, "conflict")
     world.tenant_row = None
     problem(_client(monkeypatch, world, OPERATOR).post(RECONCILE), 404, "not-found")
     assert (world.scheduled, world.events) == ([], [])
+    assert [(e.action, e.outcome, e.tenant_id, e.after) for e in world.written] == [
+        (Action.TENANT_RECONCILE, Outcome.FAILURE, ACME.id, {"reason": reason})
+        for reason in ("tenant_disabled", "not_found")
+    ]
 
 
 def test_reconcile_roles_and_missing_queue(monkeypatch: pytest.MonkeyPatch) -> None:

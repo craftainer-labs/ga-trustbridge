@@ -293,8 +293,14 @@ A `failure` event of a registration or a rotation carries `after = {"reason": <c
 refuses), `host_not_ready`, `secret_unavailable` (the secret store), `upstream` (the platform or
 GitHub), `unavailable`, `cancelled` (the client went away; the rotation stays open) and `internal`.
 The HTTP answer has its own fixed text; the code is for the audit trail. Every admin failure event has
-this shape: the disable, enable, requeue and reconcile events record `internal` (they are written only
-for an unexpected error; a refusal such as a 404 or 409 writes no event on those four routes).
+this shape, including the four routes that are not rotation or registration: disable, enable,
+requeue and reconcile write one for a 404 (`not_found`), a 409 (`conflict`, or the more specific
+`tenant_disabled` for a reconcile of a disabled tenant), a 503 (`unavailable`) and an unexpected
+error (`internal`). So every call that reaches a handler leaves exactly one event, in its own
+transaction when it is a failure (ADR 0032 invariant 8). The exceptions are a body that fails
+validation (a 422 before the handler, like every other validation error), a refusal by a guard
+(`authz.denied`, 401 and 403), a route precondition such as a missing reconcile queue (503), and
+the unreachable 404 after a requeue's success event has committed.
 
 ## Runbook: a registration that left an App behind
 

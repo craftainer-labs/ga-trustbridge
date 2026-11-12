@@ -286,14 +286,20 @@ def test_a_tenant_scoped_admin_and_a_weaker_role_are_rejected(
     assert world.params == []
 
 
-def test_an_unknown_tenant_row_is_a_404_and_writes_no_event(
+def test_an_unknown_tenant_row_is_a_404_with_a_failure_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The tenant vanished between the guard and the write."""
     world = World(_row(tenant_found=False))
     problem(_client(monkeypatch, world, ADMIN).post(ENABLE), 404, "not-found")
     assert world.events == []
-    assert world.written == []
+    (event,) = world.written
+    assert (event.action, event.outcome, event.tenant_id) == (
+        Action.TENANT_ENABLE,
+        Outcome.FAILURE,
+        ACME.id,
+    )
+    assert event.after == {"reason": "not_found"}
 
 
 def test_a_tenant_deleted_after_the_write_is_a_404(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -301,6 +307,7 @@ def test_a_tenant_deleted_after_the_write_is_a_404(monkeypatch: pytest.MonkeyPat
     world = World()
     world.info = None
     problem(_client(monkeypatch, world, ADMIN).post(ENABLE), 404, "not-found")
+    assert [e.after for e in world.written] == [{"reason": "not_found"}]
 
 
 def test_a_failure_rolls_back_and_leaves_a_failure_event(monkeypatch: pytest.MonkeyPatch) -> None:
