@@ -292,8 +292,9 @@ A `failure` event of a registration or a rotation carries `after = {"reason": <c
 (a bad, expired, reused or foreign registration state or code), `invalid_key` (a PEM the signer
 refuses), `host_not_ready`, `secret_unavailable` (the secret store), `upstream` (the platform or
 GitHub), `unavailable`, `cancelled` (the client went away; the rotation stays open) and `internal`.
-The HTTP answer has its own fixed text; the code is for the audit trail. The disable, enable,
-requeue and reconcile failure events still carry no reason.
+The HTTP answer has its own fixed text; the code is for the audit trail. Every admin failure event has
+this shape: the disable, enable, requeue and reconcile events record `internal` (they are written only
+for an unexpected error; a refusal such as a 404 or 409 writes no event on those four routes).
 
 ## Runbook: a registration that left an App behind
 

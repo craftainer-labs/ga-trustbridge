@@ -67,6 +67,7 @@ from trustbridge.audit import (
     scrub_text,
 )
 from trustbridge.audit.emit import with_trace
+from trustbridge.audit.redact import FailureReason, failure_after
 from trustbridge.audit.store import append, get_event
 from trustbridge.rbac import Principal, Role, get_principal, instance_roles
 from trustbridge.rbac.deps import client_ip, safe_request_id
@@ -371,7 +372,14 @@ async def _set_disabled(  # noqa: PLR0913 - the request, the caller and what to 
         await _record_failure(
             runtime,
             action,
-            lambda: _tenant_event(request, principal, tenant_id, action, Outcome.FAILURE),
+            lambda: _tenant_event(
+                request,
+                principal,
+                tenant_id,
+                action,
+                Outcome.FAILURE,
+                after=failure_after(FailureReason.INTERNAL),
+            ),
         )
         raise
     return _tenant_out(info)
@@ -617,6 +625,7 @@ async def requeue_delivery(
                 tenant_id=None,
                 resource_type="delivery",
                 resource_id=resource_id,
+                after=failure_after(FailureReason.INTERNAL),
             ),
         )
         raise
@@ -666,7 +675,12 @@ async def reconcile_tenant(
             runtime,
             Action.TENANT_RECONCILE,
             lambda: _tenant_event(
-                request, principal, tenant_id, Action.TENANT_RECONCILE, Outcome.FAILURE
+                request,
+                principal,
+                tenant_id,
+                Action.TENANT_RECONCILE,
+                Outcome.FAILURE,
+                after=failure_after(FailureReason.INTERNAL),
             ),
         )
         raise

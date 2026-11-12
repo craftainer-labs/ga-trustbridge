@@ -262,6 +262,7 @@ def test_a_requeue_failure_leaves_a_failure_event(monkeypatch: pytest.MonkeyPatc
         Outcome.FAILURE,
         "github.com/abc-123",
     )
+    assert failed.after == {"reason": "internal"}
     assert world.events == []
 
 
@@ -318,4 +319,5 @@ def test_a_reconcile_that_cannot_be_recorded_is_a_failure(monkeypatch: pytest.Mo
     problem(_client(monkeypatch, world, OPERATOR, server_errors=False).post(RECONCILE), 500)
     (failed,) = world.written
     assert (failed.action, failed.outcome) == (Action.TENANT_RECONCILE, Outcome.FAILURE)
+    assert failed.after == {"reason": "internal"}
     assert world.scheduled == []
