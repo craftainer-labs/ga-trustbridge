@@ -15,11 +15,13 @@ stops a still-installed App from re-creating the tenant (B2) moved to ``tenant_t
 the app role, the one runtime role) deletes at most ``p_batch`` records and returns
 ``(purged, unprotected)``:
 
-* only ``state = 'done'`` records with ``updated_at < p_before`` are eligible; open, ``failed``
-  and ``cancelled`` records are never touched;
-* a ``done`` record is deleted only when its ``tenant_tombstones`` row exists. An eligible record
-  without one is skipped and counted in ``unprotected`` (it can only exist if the tombstone
-  invariant broke); the duty logs it at WARNING. The purge therefore can never remove the last
+* only ``done`` and ``cancelled`` records with ``updated_at < p_before`` are eligible; open and
+  ``failed`` records are never touched (an operator may still resume or cancel a ``failed`` one);
+* a ``done`` record is deleted only when its ``tenant_tombstones`` row exists. An eligible ``done``
+  record without one is skipped and counted in ``unprotected`` (it can only exist if the tombstone
+  invariant broke); the duty logs it at WARNING. A ``cancelled`` record needs no tombstone: a
+  cancelled deletion left the tenant standing, and a new request makes a new record. It holds the
+  requester's identity, so it follows the same retention (storage limitation). The purge therefore can never remove the last
   tombstone record, and it does not repair anything (it does not re-run the backfill);
 * the arguments are validated like ``tb_audit_purge`` (``22023``): ``p_min_days >= 1``,
   ``p_batch`` 1..10000, and a cut-off no younger than ``p_min_days`` (the floor a typo cannot pass);
@@ -76,15 +78,16 @@ BEGIN
        OR p_before > pg_catalog.now() - pg_catalog.make_interval(days => p_min_days) THEN
         RAISE EXCEPTION 'cut-off is inside the retention floor' USING ERRCODE = '22023';
     END IF;
-    -- Only a finished deletion whose tombstone exists. SKIP LOCKED: a record another caller
-    -- holds is theirs.
+    -- A cancelled record, or a done one whose tombstone exists. SKIP LOCKED: a record another
+    -- caller (or a deletion finishing) holds is theirs. The EXISTS is in the same statement.
     DELETE FROM public.tenant_deletions t
     USING (
         SELECT d.id FROM public.tenant_deletions d
-         WHERE d.state = 'done' AND d.updated_at < p_before
-           AND EXISTS (
-               SELECT 1 FROM public.tenant_tombstones s
-                WHERE s.host = d.host AND s.installation_id = d.installation_id)
+         WHERE d.updated_at < p_before
+           AND (d.state = 'cancelled'
+                OR (d.state = 'done' AND EXISTS (
+                    SELECT 1 FROM public.tenant_tombstones s
+                     WHERE s.host = d.host AND s.installation_id = d.installation_id)))
          ORDER BY d.updated_at, d.id
          LIMIT p_batch
          FOR UPDATE OF d SKIP LOCKED

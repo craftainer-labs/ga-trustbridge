@@ -1,8 +1,8 @@
 """The retention purge of finished deletion records against a real Postgres (NG6h-3c-2, ADR 0034).
 
-`tb_purge_tenant_deletions` (migration `7b2d4f8a1c36`) and `SqlRecordPurger`: only `done` records
-past the cut-off whose tombstone exists are deleted, the tombstone survives, nothing else is
-touched, the arguments are validated, and the one-way door (the `4e9a1c7b5d23` downgrade refuses
+`tb_purge_tenant_deletions` (migration `7b2d4f8a1c36`) and `SqlRecordPurger`: `done` records past
+the cut-off whose tombstone exists, and old `cancelled` records, are deleted; the tombstone survives,
+nothing else is touched, the arguments are validated, and the one-way door (the `4e9a1c7b5d23` downgrade refuses
 once records are purged) holds. Runs in CI's stack (integration), never in the unit lane.
 """
 
@@ -92,16 +92,15 @@ async def _purge(db: Db, *, days: int = 100, floor: int = 90, batch: int = 1000)
 async def test_only_old_done_records_with_a_tombstone_are_purged_and_the_tombstone_stays(
     db: Db,
 ) -> None:
-    """Old `done` goes; young `done`, open, failed and cancelled stay; the tombstone is kept."""
+    """Old `done` goes; young `done`, open and failed stay; the tombstone is kept."""
     old, old_id = await _finished(db, days=200)
     _, young_id = await _finished(db, days=10)
     _, failed_id = await _finished(db, days=200, state="failed")
-    _, cancelled_id = await _finished(db, days=200, state="cancelled")
     _, running_id = await _finished(db, days=200, state="database")
     purged, _ = await _purge(db)
     assert purged >= 1
     assert not await _exists(db, old_id)
-    for kept in (young_id, failed_id, cancelled_id, running_id):
+    for kept in (young_id, failed_id, running_id):
         assert await _exists(db, kept)
     key = {"h": old.host, "i": old.installation}
     assert (
@@ -117,6 +116,22 @@ async def test_only_old_done_records_with_a_tombstone_are_purged_and_the_tombsto
     assert await _upsert_refusal(db, upsert, key) == "tombstone"
     with pytest.raises(TenantDeletedError):
         await SqlTenants(db.app, _no_hosts).upsert_installation(old.host, old.installation, "o", 1)
+
+
+async def test_cancelled_records_follow_the_retention_without_a_tombstone(db: Db) -> None:
+    """An old `cancelled` record goes with no tombstone check; a young one stays."""
+    old, old_id = await _finished(db, days=200, tombstone=False, state="cancelled")
+    _, young_id = await _finished(db, days=10, tombstone=False, state="cancelled")
+    purged, _ = await _purge(db)
+    assert purged >= 1
+    assert not await _exists(db, old_id)
+    assert await _exists(db, young_id)
+    # the tenant was never tombstoned, and the purge created and removed nothing of the kind
+    assert not await _admin_scalar(
+        db,
+        "SELECT count(*) FROM tenant_tombstones WHERE host = :h AND installation_id = :i",
+        {"h": old.host, "i": old.installation},
+    )
 
 
 async def test_a_done_record_without_a_tombstone_is_never_deleted_and_is_counted(db: Db) -> None:

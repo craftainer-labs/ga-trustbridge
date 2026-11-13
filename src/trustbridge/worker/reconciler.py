@@ -298,8 +298,8 @@ class Reconciler:
 
         Retention 0 (the default) never purges, and with no `RecordPurger` composed the duty does
         nothing. Bounded by the purger (batches, and half the lease TTL), with a beat per batch.
-        The database function deletes only `done` records whose tombstone exists; an eligible
-        record without one is never deleted and is logged here at WARNING (ADR 0034, B4).
+        The database function deletes `cancelled` records and `done` records whose tombstone exists; an eligible
+        `done` record without one is never deleted and is logged here at WARNING (ADR 0034, B4).
         """
         purger = self._d.record_purger
         if purger is None or self._s.deletion_retention_days == 0:

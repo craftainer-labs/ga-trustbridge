@@ -164,9 +164,10 @@ most `DELETION_PURGE_MAX_BATCHES` batches of `DELETION_PURGE_BATCH_SIZE` per run
 the lease TTL. `SqlRecordPurger` (`purge.py`) is the `RecordPurger`; the composition root (NG6h-7)
 hands it to `ReconcilerDeps.record_purger`, and with none the duty does nothing.
 
-- Only `done` records past the cut-off **whose tombstone exists** go. A `done` record without one is
-  never deleted: it is counted as `unprotected` and logged at WARNING. Open, `failed` and
-  `cancelled` records are never purged.
+- `done` records past the cut-off **whose tombstone exists** go, and so do `cancelled` records (no
+  tombstone needed: a cancelled deletion left the tenant standing). A `done` record without a
+  tombstone is never deleted: it is counted as `unprotected` and logged at WARNING. Open and `failed`
+  records are never purged (an operator may still resume or cancel a `failed` one).
 - The tombstones (`tenant_tombstones`) are never purged, so a still-installed App stays refused (B2).
 - **Upgrade order.** The previous release reads `done` records and no schema mechanism can say "no
   previous-release pod exists" (`schema_compat` only guards new code on an old schema), so leave the

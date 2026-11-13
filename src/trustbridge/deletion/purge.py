@@ -2,7 +2,7 @@
 
 `SqlRecordPurger` calls `tb_purge_tenant_deletions` (migration `7b2d4f8a1c36`) in short
 transactions, one per batch, and implements `RecordPurger` (`deletion.ports`). The function removes
-only `done` records older than the cut-off whose tombstone exists; the tombstone itself
+only `cancelled` records and `done` records (whose tombstone exists) older than the cut-off; the tombstone itself
 (`tenant_tombstones`) is never touched, so a still-installed App stays refused (B2). Retention 0
 never purges. Mirrors the audit purge (`audit.store.purge_expired`): negative retention, a non-zero
 retention below the floor, a batch outside 1..10000 and a batch count below 1 fail closed with

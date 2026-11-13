@@ -143,7 +143,7 @@ refuses while a tombstone has no `done` record behind it (it would be lost).
 Migration `7b2d4f8a1c36` (NG6h-3c-2) adds `tb_purge_tenant_deletions(before, min_days, batch)`, the
 retention purge of finished records (see `deletion/README.md`, "Record retention"). It also grants the
 owner role `DELETE` on `tenant_deletions`; the app role keeps `SELECT` only and gets `EXECUTE` on the
-function. It deletes only `done` records with a tombstone, so the `4e9a1c7b5d23` downgrade refuses once
+function. It deletes `done` records with a tombstone and `cancelled` records, so the `4e9a1c7b5d23` downgrade refuses once
 it has run.
 
 `gate.py`'s `SqlTenantGate.allows(tenant_id, kind, deletion_id=None)` (the adapter core's `OperationGate`) refuses every new adapter call for an

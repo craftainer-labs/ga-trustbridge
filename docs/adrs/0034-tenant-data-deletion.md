@@ -331,9 +331,12 @@ adapter fakes.
   `search_path` pinned with `pg_temp`, `EXECUTE` revoked from `PUBLIC` and granted to the app role,
   the validation of `tb_audit_purge`), in at most `DELETION_PURGE_MAX_BATCHES` batches of
   `DELETION_PURGE_BATCH_SIZE`, and stops starting batches after half the lease TTL.
-  - **What is eligible.** Only `done` records older than the cut-off whose `tenant_tombstones` row
-    exists. Open, `failed` and `cancelled` records are never purged (a failed or cancelled record
-    still holds the requester's identity and stays until an operator removes it). A `done` record
+  - **What is eligible.** `cancelled` records and `done` records older than the cut-off. A
+    `done` record goes only when its `tenant_tombstones` row exists. A `cancelled` record needs no
+    tombstone (a cancelled deletion left the tenant standing and a new request makes a new record);
+    it holds the requester's identity, so it follows the same retention (storage limitation). Open
+    and `failed` records are never purged: an operator may still resume or cancel a `failed` one, so
+    it stays until it reaches a terminal state. A `done` record
     without a tombstone is skipped and counted (`unprotected`); the duty logs it at WARNING. The purge
     does not re-run the backfill and never removes the last tombstone record. The tombstones are
     never purged, so B2 holds at any retention.
