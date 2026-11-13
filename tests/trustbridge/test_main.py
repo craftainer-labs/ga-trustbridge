@@ -147,7 +147,7 @@ async def test_the_lifespan_can_be_entered_repeatedly_registering_each_check_onc
         async with app.router.lifespan_context(app):
             await asyncio.sleep(0)
     results = await registry.run_all()
-    assert [r.name for r in results] == ["schema", "role_safety"]
+    assert [r.name for r in results] == ["schema", "role_safety", "transaction_timeout"]
     assert results[0].healthy  # the role check turns healthy only after its background read
 
 

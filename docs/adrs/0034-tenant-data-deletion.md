@@ -97,7 +97,9 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
 5. **Database.** In the tenant's context (0031), in batches and in the order
    `credential_operations`, `adapter_credentials`, `adapter_resources`, `scope_leases`,
    `tenant_repositories`, then the `tenants` row last through `tb_delete_tenant` (0031; the app
-   role has no `DELETE` on `tenants`), each batch its own transaction and
+   role has no `DELETE` on `tenants`), each batch its own transaction (bounded by the
+   `transaction_timeout` the `after_begin` hook sets, B8, so a batch must be sized to finish inside
+   `TRANSACTION_TIMEOUT_SECONDS`, below the audit export lag) and
    counted (NG6h-4b: the `DatabaseStep` runs as the app role in the tenant's context, where the
    `tenant_isolation` policies admit `DELETE`, so it needs no definer function; it removes everything above except the `tenants`
    row, which the engine deletes in its finish transaction; counts are named `adapter_operations`, `access_grants`,

@@ -380,7 +380,6 @@ not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_
 - `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
   (ADR 0034); NG6h.
 - The tenant-deletion `POST`s (NG6h). The consumer of the reconcile set is NG5r.
-- The `transaction_timeout` / `AUDIT_EXPORT_LAG_SECONDS` startup check: NG6h.
 - ADR 0033 stays Proposed until the mutating routes (NG6e) and the deletion reads (NG6h) exist.
 
 ## Don't

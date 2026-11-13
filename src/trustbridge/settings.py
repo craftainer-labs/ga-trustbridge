@@ -15,6 +15,7 @@ import difflib
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -180,6 +181,11 @@ class TrustbridgeSettings(Settings):
     audit_retention_days: int = Field(default=365, ge=0)
     audit_retention_min_days: int = Field(default=90, ge=1)
     audit_export_lag_seconds: float = Field(default=30.0, gt=0)
+    # The longest any transaction of the api, worker or reconciler may stay open (ADR 0032
+    # "Export", ADR 0034 B8): the `after_begin` hook runs `SET LOCAL transaction_timeout` with it.
+    # Its own setting, validated to be below `audit_export_lag_seconds` (so the export lag
+    # guarantee holds); the default is half the default lag. 0 would mean "off" and is refused.
+    transaction_timeout_seconds: float = Field(default=15.0, gt=0)
     # The purge duty (ADR 0032 "Retention"): batch size is `tb_audit_purge`'s 1..10000; a run
     # does at most `audit_purge_max_batches` batches (1..10000) and stops starting batches after
     # half `lease_ttl_seconds`, so it ends before its lease could lapse.
@@ -365,6 +371,14 @@ class TrustbridgeSettings(Settings):
             problems.append("RETRY_BACKOFF_MAX_SECONDS must be >= RETRY_BACKOFF_BASE_SECONDS")
         if 0 < self.audit_retention_days < self.audit_retention_min_days:
             problems.append("AUDIT_RETENTION_DAYS must be 0 or >= AUDIT_RETENTION_MIN_DAYS")
+        # in whole ms, as the hook applies it (rounded up), so a passing value passes the check
+        if (
+            math.ceil(self.transaction_timeout_seconds * 1000)
+            >= self.audit_export_lag_seconds * 1000
+        ):
+            problems.append(
+                "TRANSACTION_TIMEOUT_SECONDS must be shorter than AUDIT_EXPORT_LAG_SECONDS"
+            )
         timing = self._deletion_timing_problems()
         if self.deletion_backoff_base_seconds > self.deletion_backoff_cap_seconds:
             problems.append("DELETION_BACKOFF_BASE_SECONDS must be <= DELETION_BACKOFF_CAP_SECONDS")

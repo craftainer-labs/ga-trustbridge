@@ -29,6 +29,22 @@ rollout replaces pods.
    kubectl -n trustbridge rollout status deploy/trustbridge-api
    ```
 
+## PostgreSQL version and the transaction timeout
+
+The audit export's lag guarantee needs every transaction of the api, worker and reconciler to end
+within `AUDIT_EXPORT_LAG_SECONDS` ([ADR 0032](adrs/0032-audit-log.md)). The app sets
+`SET LOCAL transaction_timeout` from `trustbridge.audit.transactionTimeoutSeconds` (default 15,
+which must be below `exportLagSeconds`, default 30) and checks at start-up that the database
+applies it: in production a failing check keeps the pod not ready and then exits after
+`SCHEMA_WAIT_SECONDS`.
+
+`transaction_timeout` exists from **PostgreSQL 17**, which production requires: on an older server
+the check fails closed (not ready, then exit after `SCHEMA_WAIT_SECONDS`). Outside production the
+app sets `statement_timeout` and `idle_in_transaction_session_timeout` to the bound instead (each keeping a stricter existing value)
+and logs a warning: each statement and each idle gap is bounded, but a transaction of many short
+statements is not, so the lag guarantee is weaker. A stricter value the role or database already sets (`ALTER ROLE ... SET transaction_timeout`) is never loosened: the app applies the smaller of that and the configured one. The
+migrate Job is not bounded (it runs as the owner role on its own connection).
+
 ## If the migration fails
 
 The Job runs once with `database.migrate.backoffLimit` retries and a deadline
