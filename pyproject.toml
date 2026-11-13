@@ -182,6 +182,19 @@ forbidden_modules = [
     "trustbridge.main",
 ]
 
+# tenancy (ADR 0031) is below the worker, webhooks and the admin API: the worker imports it, so
+# it must never import them back (`TenantStanding` lives in `tenancy.standing` for that reason).
+[[tool.importlinter.contracts]]
+name = "tenancy never imports the worker, webhooks, the admin API or main"
+type = "forbidden"
+source_modules = ["trustbridge.tenancy"]
+forbidden_modules = [
+    "trustbridge.worker",
+    "trustbridge.webhooks",
+    "trustbridge.admin",
+    "trustbridge.main",
+]
+
 [[tool.importlinter.contracts]]
 name = "signers never import the GitHub core"
 type = "forbidden"

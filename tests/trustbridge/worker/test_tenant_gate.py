@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from tests.trustbridge.worker.harness import Harness, key
 from trustbridge.github.handlers import EventContext
-from trustbridge.worker.deliveries import TenantStanding
+from trustbridge.tenancy.standing import TenantStanding
 
 
 class SetGate:

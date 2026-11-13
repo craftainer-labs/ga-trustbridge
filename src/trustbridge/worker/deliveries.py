@@ -19,6 +19,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from trustbridge.tenancy.standing import TenantStanding
 from trustbridge.worker.models import WebhookDelivery
 
 _log = logging.getLogger(__name__)
@@ -676,21 +677,6 @@ def backoff_seconds(attempts: int, base: float, cap: float) -> float:
 def retry_at(now: datetime, attempts: int, base: float, cap: float) -> datetime:
     """When a delivery that has failed `attempts` times is retried."""
     return now + timedelta(seconds=backoff_seconds(attempts, base, cap))
-
-
-@dataclass(frozen=True, slots=True)
-class TenantStanding:
-    """What the worker needs to know about the tenant of an installation.
-
-    `tenant_id` is None when no tenant row exists. `disabled` is the admin disable (ADR 0033).
-    `refusal` is `tombstone` (a finished deletion of the key: nothing is handled and no tenant
-    is created), `deleting` (a deletion is in progress), or None. A `deleted` installation
-    state is not a refusal here: the lifecycle handlers deal with it.
-    """
-
-    tenant_id: UUID | None = None
-    disabled: bool = False
-    refusal: str | None = None
 
 
 class TenantGate(Protocol):

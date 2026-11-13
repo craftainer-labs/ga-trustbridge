@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters.store import OperationKind
 from trustbridge.tenancy.context import tenant_context
-from trustbridge.worker.deliveries import TenantStanding
+from trustbridge.tenancy.standing import TenantStanding
 
 _DISABLED_BY_INSTALLATION = text(
     "SELECT admin_disabled_at IS NOT NULL "

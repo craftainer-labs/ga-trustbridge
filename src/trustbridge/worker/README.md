@@ -95,7 +95,7 @@ effective defaults are logged at startup.
   acknowledged, without a counted failure (`TenantDisabled`, and `SqlTenantGate` in `tenancy/gate.py`; ADR 0033).
   Before that decision the worker stores the tenant's id on the delivery row
   (`DeliveryStore.set_tenant`, `webhook_deliveries.tenant_id`; ADR 0034: a deletion must find every
-  delivery of its tenant), using `TenantGate.standing` (`TenantStanding`: id, disabled flag, and a
+  delivery of its tenant), using `TenantGate.standing` (`TenantStanding`, defined in `tenancy.standing`: id, disabled flag, and a
   `deleting` or `tombstone` refusal). A tenant with a deletion in progress is deferred the same way;
   a tombstoned installation (a finished deletion, the App still installed) has its delivery
   acknowledged and marked processed with no handler run and no tenant created, and a log line.

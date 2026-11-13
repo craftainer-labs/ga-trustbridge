@@ -90,7 +90,7 @@ of the `deleting` reason (`tb_set_tenant_disabled` needs no change: a deletion n
 tenant, enable is refused while one is open, and a repeated disable keeps the first values). The
 downgrade restores the `9c2e5a7f1d84` body.
 
-`gate.py`'s `SqlTenantGate.standing(host, installation_id)` returns the worker's `TenantStanding`
+`gate.py`'s `SqlTenantGate.standing(host, installation_id)` returns `TenantStanding` (`standing.py`, kept here so `tenancy` never imports the worker)
 (tenant id, disable flag, and a `deleting` or `tombstone` refusal) from `tb_get_tenant` and
 `tenant_deletions`.
 

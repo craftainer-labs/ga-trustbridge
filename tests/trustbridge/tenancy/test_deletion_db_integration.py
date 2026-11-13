@@ -31,7 +31,7 @@ from tests.trustbridge.tenancy.test_rls_integration import (
 from trustbridge.adapters.interface import GitHubHost
 from trustbridge.github.ports import TenantDeletedError
 from trustbridge.tenancy.gate import SqlTenantGate
-from trustbridge.worker.deliveries import TenantStanding
+from trustbridge.tenancy.standing import TenantStanding
 from trustbridge.worker.ports import SqlTenants
 
 pytestmark = pytest.mark.integration
