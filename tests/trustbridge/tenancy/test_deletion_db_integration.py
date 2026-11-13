@@ -205,7 +205,7 @@ async def test_deleting_is_true_exactly_while_a_non_terminal_deletion_exists(db:
             r.id: r.deleting for r in await _app_rows(db, "SELECT * FROM tb_list_tenants()", {})
         }
         got = (await _app_rows(db, "SELECT deleting FROM tb_get_tenant(:t)", {"t": tenant.id}))[0]
-        others = {v for k, v in listed.items() if k != tenant.id}
+        others = {listed[db.a], listed[db.b]}  # the seeded tenants never have a deletion
         return listed[tenant.id], got.deleting, others
 
     assert await flags() == (False, False, {False})
