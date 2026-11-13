@@ -50,7 +50,7 @@ from trustbridge.worker.models import (
     TenantRepository,
     WebhookDelivery,
 )
-from trustbridge.worker.ports import SqlTenants, UnknownTenantError
+from trustbridge.worker.ports import SqlTenants, TenantDeletedError, UnknownTenantError
 from trustbridge.worker.schema import REQUIRED_SCHEMA_VERSION, SchemaGate
 
 pytestmark = pytest.mark.integration
@@ -478,6 +478,45 @@ async def test_the_installation_sync_never_changes_the_admin_disable_columns() -
     finally:
         async with session_factory() as session, session.begin():
             await session.execute(delete(Tenant).where(Tenant.host == host))
+
+
+async def test_a_done_deletion_tombstones_only_its_own_installation_key() -> None:
+    """ADR 0034: open, failed and cancelled deletions do not block an upsert; `done` does."""
+    tenants = SqlTenants(session_factory, _github_host)
+    host = f"it-{uuid.uuid4().hex[:8]}"
+    tenant_id = await tenants.upsert_installation(host, 77, "acme", 9)
+
+    async def record(state: str) -> None:
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "INSERT INTO tenant_deletions (tenant_id, host, installation_id, "
+                    "requested_by_sub, requested_by_iss, state) "
+                    "VALUES (:t, :h, 77, 'u1', 'iss', :s)"
+                ),
+                {"t": tenant_id, "h": host, "s": state},
+            )
+
+    # the record is a compliance record (no DELETE grant), so the unique host stays behind
+    await record("failed")
+    await record("cancelled")
+    await record("database")
+    assert await tenants.upsert_installation(host, 77, "acme-2", 9) == tenant_id
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text(
+                "UPDATE tenant_deletions SET state = 'done' WHERE state = 'database' AND host = :h"
+            ),
+            {"h": host},
+        )
+        await session.execute(delete(Tenant).where(Tenant.host == host))
+    with pytest.raises(TenantDeletedError):
+        await tenants.upsert_installation(host, 77, "acme-3", 9)
+    assert await tenants.tenant_id_for(host, 77) is None
+    other = await tenants.upsert_installation(host, 78, "acme", 9)
+    assert other != tenant_id
+    async with session_factory() as session, session.begin():
+        await session.execute(delete(Tenant).where(Tenant.host == host))
 
 
 async def test_repository_changes_are_applied_renamed_and_removed() -> None:

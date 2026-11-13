@@ -28,10 +28,16 @@ function body replaced under the same signature and return type.
   ``tb_request_tenant_deletion``.
 * ``tb_upsert_tenant``: a tenant whose ``state`` is ``deleted`` is returned unchanged (the existing
   id; ``org``, ``org_id`` and ``state`` are kept) instead of being revived by a late event.
+  A ``done`` ``tenant_deletions`` row for ``(host, installation_id)`` is a tombstone: the function
+  then returns ``NULL`` and creates nothing (an open, ``failed`` or ``cancelled`` deletion is not a
+  tombstone, and another installation id of the host is unaffected). The lookup uses a partial
+  index on ``state = 'done'``.
 * ``tb_request_tenant_deletion(...)``: a ``SECURITY DEFINER`` function that, under the tenant row
   lock, returns the open deletion, or checks that the tenant is admin-disabled and that the typed
   confirmation (host, installation id, organisation login) matches, and writes the record. The
-  confirmation is compared (case-insensitively, as GitHub logins are) and never stored.
+  confirmation is compared (case-insensitively, as GitHub logins are) and never stored. The
+  optional ``p_not_before`` (default ``NULL``, no delay) is stored in the nullable
+  ``not_before`` column for the engine to honour as a grace window.
 * ``tb_delete_tenant(uuid)``: removes the ``tenants`` row as the last step of a deletion. Under the
   row lock it refuses unless the tenant is admin-disabled, has a deletion in its ``database`` step
   and has no rows left in the five other tenant-owned tables; it checks again after the delete, so
@@ -60,7 +66,7 @@ depends_on: str | Sequence[str] | None = None
 APP_ROLE = "trustbridge_app"
 OWNER_ROLE = "trustbridge_owner"
 NEW_FUNCTIONS = (
-    "tb_request_tenant_deletion(uuid, text, bigint, text, text, text, boolean)",
+    "tb_request_tenant_deletion(uuid, text, bigint, text, text, text, boolean, timestamptz)",
     "tb_delete_tenant(uuid)",
 )
 CHANGED_FUNCTIONS = (
@@ -88,6 +94,7 @@ CREATE TABLE tenant_deletions (
     holder text,
     fence bigint NOT NULL DEFAULT 0,
     expires_at timestamptz,
+    not_before timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now(),
     last_error text,
     CONSTRAINT ck_tenant_deletions_state CHECK (state IN (
@@ -212,6 +219,14 @@ BEGIN
     IF p_state NOT IN ('active', 'suspended', 'deleted') THEN
         RAISE EXCEPTION 'invalid tenant state' USING ERRCODE = '22023';
     END IF;
+    -- Tombstone: once a deletion of this installation is `done`, no tenant is created or revived
+    -- for it. NULL is returned (a distinct outcome: the other paths always return an id).
+    IF EXISTS (
+        SELECT 1 FROM public.tenant_deletions d
+         WHERE d.host = p_host AND d.installation_id = p_installation_id AND d.state = 'done'
+    ) THEN
+        RETURN NULL;
+    END IF;
     -- A tenant whose installation is deleted stays as it is: a late or replayed event cannot
     -- revive it. It is returned unchanged.
     INSERT INTO public.tenants (host, installation_id, org, org_id, state)
@@ -230,7 +245,8 @@ $$
 _REQUEST_FN = f"""
 CREATE FUNCTION tb_request_tenant_deletion(
     p_tenant uuid, p_host text, p_installation_id bigint, p_org text,
-    p_by_sub text, p_by_iss text, p_delete_platform boolean
+    p_by_sub text, p_by_iss text, p_delete_platform boolean,
+    p_not_before timestamptz DEFAULT NULL
 ) RETURNS TABLE (
     outcome text, deletion_id uuid, state text, requested_at timestamptz,
     delete_platform_resources boolean
@@ -275,9 +291,10 @@ BEGIN
     END IF;
     INSERT INTO public.tenant_deletions (
         tenant_id, host, installation_id, requested_by_sub, requested_by_iss,
-        delete_platform_resources
+        delete_platform_resources, not_before
     ) VALUES (
-        p_tenant, v_row.host, v_row.installation_id, p_by_sub, p_by_iss, p_delete_platform
+        p_tenant, v_row.host, v_row.installation_id, p_by_sub, p_by_iss, p_delete_platform,
+        p_not_before
     ) RETURNING * INTO v_new;
     RETURN QUERY SELECT 'created'::text, v_new.id, v_new.state, v_new.requested_at,
                         v_new.delete_platform_resources;
@@ -463,6 +480,11 @@ def upgrade() -> None:
     )
     op.execute(
         "CREATE INDEX ix_tenant_deletions_state_updated ON tenant_deletions (state, updated_at)"
+    )
+    # The tombstone lookup of tb_upsert_tenant.
+    op.execute(
+        "CREATE INDEX ix_tenant_deletions_done_key ON tenant_deletions (host, installation_id) "
+        "WHERE state = 'done'"
     )
     for role in (APP_ROLE, OWNER_ROLE):
         op.execute(_if_role(role, f"GRANT SELECT, INSERT, UPDATE ON tenant_deletions TO {role};"))

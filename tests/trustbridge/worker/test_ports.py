@@ -16,6 +16,7 @@ from trustbridge.worker.ports import (
     MemoryTenants,
     ParkedValues,
     ReconcileRequests,
+    TenantDeletedError,
     UnknownTenantError,
 )
 from trustbridge.worker.secrets import MemorySecrets, SecretUnavailable
@@ -49,6 +50,18 @@ async def test_a_deleted_installation_is_not_revived_by_an_upsert_in_memory() ->
     tenant = await tenants.get_tenant(tenant_id)
     assert tenant.org == "acme"
     assert tenants._rows[tenant_id]["state"] == "deleted"
+
+
+async def test_a_tombstoned_installation_is_refused_and_others_are_not_in_memory() -> None:
+    """A `done` deletion of the key refuses the upsert; another installation id is unaffected."""
+    tenants = _tenants()
+    tenants.tombstones.add(("github.com", 7))
+    with pytest.raises(TenantDeletedError) as refused:
+        await tenants.upsert_installation("github.com", 7, "acme", 1)
+    assert (refused.value.host, refused.value.installation_id) == ("github.com", 7)
+    assert await tenants.tenant_id_for("github.com", 7) is None
+    assert await tenants.upsert_installation("github.com", 8, "acme", 1) is not None
+    assert await tenants.upsert_installation("other.host", 7, "acme", 1) is not None
 
 
 async def test_repository_changes_are_applied_renamed_and_removed_in_memory() -> None:

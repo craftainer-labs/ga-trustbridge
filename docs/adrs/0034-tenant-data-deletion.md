@@ -49,7 +49,7 @@ reconciler resumes a non-terminal deletion.
 - **Table `tenant_deletions`**, host-scoped and outside RLS like `webhook_deliveries`
   (0031 "Already decided"), with no foreign key to `tenants`: `id` (UUID), `tenant_id`,
   `host`, `installation_id`, `requested_by_sub` and `requested_by_iss`, `requested_at`,
-  `delete_platform_resources` (the request flag, user decision 1), `state` (`requested`, `draining`, `platform`, `github`, `database`, `done`, `failed`, `cancelled`; the last three are terminal; NG6h-1 added `cancelled` and the flag column),
+  `delete_platform_resources` (the request flag, user decision 1), `state` (`requested`, `draining`, `platform`, `github`, `database`, `done`, `failed`, `cancelled`; the last three are terminal; NG6h-1 added `cancelled`, the flag column and the nullable `not_before`),
   `step_cursor` (jsonb: the position inside the current step), `counts` (rows and resources
   removed per category), `skipped` (jsonb: what was not removed and why), its own lease
   (`holder`, `fence`, `expires_at`, same fencing rule as 0028 invariant 10), `updated_at`,
@@ -226,10 +226,13 @@ adapter fakes.
 
 ## Open issues
 
-- **Re-creation.** Nothing stops a still-installed App from re-creating the tenant. A
-  tombstone in `tenant_deletions` keyed on `(host, installation_id)` that makes
-  `tb_upsert_tenant` refuse would prevent it, at the cost of blocking a legitimate reinstall;
-  not part of this ADR.
+- **Re-creation (decided, NG6h-1).** A `done` row in `tenant_deletions` for `(host, installation_id)`
+  is a tombstone: `tb_upsert_tenant` returns NULL and creates nothing, and `SqlTenants` and
+  `MemoryTenants` raise `TenantDeletedError`. A reinstall gets a new installation id and is not
+  blocked; an open, failed or cancelled deletion is not a tombstone. The worker's ack-and-drop
+  handling of the refusal is NG6h-2.
+- **Grace window (decided, NG6h-1).** `tenant_deletions.not_before` (nullable, default NULL: no
+  delay) is stored from the optional `tb_request_tenant_deletion` argument; the engine honours it.
 - **Export before delete.** EB-15 lists "data export and deletion". A per-tenant data export is
   not designed here; the audit export (0032) and the read endpoints (0033) cover most of what a
   customer could ask for, and a dedicated export is a follow-up.

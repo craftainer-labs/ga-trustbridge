@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -35,10 +36,14 @@ PREVIOUS = "b7d3f5a19c68"
 NEW_FUNCTIONS = (
     "tb_get_tenant(uuid)",
     "tb_set_tenant_disabled(uuid, text, text, boolean)",
-    "tb_request_tenant_deletion(uuid, text, bigint, text, text, text, boolean)",
+    "tb_request_tenant_deletion(uuid, text, bigint, text, text, text, boolean, timestamptz)",
     "tb_delete_tenant(uuid)",
 )
 REQUEST = "SELECT * FROM tb_request_tenant_deletion(:t, :host, :inst, :org, :sub, :iss, :platform)"
+REQUEST_NOT_BEFORE = (
+    "SELECT * FROM tb_request_tenant_deletion("
+    ":t, :host, :inst, :org, :sub, :iss, :platform, :not_before)"
+)
 SET_DISABLED = "SELECT * FROM tb_set_tenant_disabled(:t, 'admin-1', 'hold', :disable)"
 OPEN_STATES = ("requested", "draining", "platform", "github", "database")
 TERMINAL_STATES = ("done", "failed", "cancelled")
@@ -177,6 +182,18 @@ async def test_a_request_writes_the_record_without_the_login_and_repeats_return_
     await _set_state(db, created.deletion_id, "failed")
     second = await _request(db, tenant)
     assert (second.outcome, second.deletion_id == created.deletion_id) == ("created", False)
+
+
+async def test_the_grace_window_is_stored_and_defaults_to_no_delay(db: Db) -> None:
+    """`not_before` round-trips through the request function; omitted, it is NULL."""
+    stored = "SELECT not_before FROM tenant_deletions WHERE id = :d"
+    plain = await _request(db, await _tenant(db))
+    assert await _admin_scalar(db, stored, {"d": plain.deletion_id}) is None
+    tenant = await _tenant(db)
+    moment = datetime(2031, 5, 6, 7, 8, 9, tzinfo=UTC)
+    rows = await _app_rows(db, REQUEST_NOT_BEFORE, {**tenant.request(), "not_before": moment})
+    assert rows[0].outcome == "created"
+    assert await _admin_scalar(db, stored, {"d": rows[0].deletion_id}) == moment
 
 
 async def test_a_request_rejects_malformed_requester_values(db: Db) -> None:
@@ -437,6 +454,27 @@ async def test_tb_upsert_tenant_returns_a_deleted_tenant_unchanged(db: Db) -> No
             )
         ).one()
     assert (row.org, row.org_id, row.state) == ("two", 2, "deleted")
+
+
+async def test_tb_upsert_tenant_treats_a_done_deletion_as_a_tombstone(db: Db) -> None:
+    """After `done` no tenant is created for the key; other keys and states are unaffected."""
+    upsert = "SELECT tb_upsert_tenant(:h, :i, :o, :oi, 'active')"
+
+    def args(tenant: Tenant, inst: int | None = None) -> dict[str, Any]:
+        return {"h": tenant.host, "i": inst or tenant.installation, "o": "x", "oi": 1}
+
+    tenant = await _tenant(db)
+    deletion = (await _request(db, tenant)).deletion_id
+    for state in (*OPEN_STATES, "failed", "cancelled"):  # none of these is a tombstone
+        await _set_state(db, deletion, state)
+        assert (await _app_rows(db, upsert, args(tenant)))[0][0] == tenant.id
+    await _set_state(db, deletion, "done")
+    await _admin(db, "DELETE FROM tenants WHERE id = :t", {"t": tenant.id})
+    assert (await _app_rows(db, upsert, args(tenant)))[0][0] is None
+    count = "SELECT count(*) FROM tenants WHERE host = :h AND installation_id = :i"
+    assert await _admin_scalar(db, count, {"h": tenant.host, "i": tenant.installation}) == 0
+    fresh = (await _app_rows(db, upsert, args(tenant, tenant.installation + 1)))[0][0]
+    assert fresh is not None  # a new installation id of the same host is a new tenant
 
 
 # --- webhook_deliveries --------------------------------------------------------------------

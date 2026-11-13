@@ -64,8 +64,11 @@ of which the last three are terminal; one non-terminal row per tenant; the app r
 It replaces, under the same signatures, `tb_list_tenants` and `tb_get_tenant` (`deleting` is now real),
 `tb_set_tenant_disabled` (`enable` is refused with SQLSTATE 55000 while a non-terminal deletion exists; the
 state is read after the tenant row lock) and `tb_upsert_tenant` (a `deleted` tenant is returned unchanged,
-and `SqlTenants.upsert_installation` does the same until release N+1 moves it onto the function). It adds
-`tb_request_tenant_deletion(...)`, which takes the same row lock as enable and disable, and
+and `SqlTenants.upsert_installation` does the same until release N+1 moves it onto the function; a `done` deletion of
+`(host, installation_id)` is a tombstone, so the function returns NULL and creates nothing, and `SqlTenants` and
+`MemoryTenants` raise `TenantDeletedError`, while a new installation id is unaffected). It adds
+`tb_request_tenant_deletion(...)`, which takes the same row lock as enable and disable and stores an optional
+`not_before` (default NULL: no delay; the engine honours it as a grace window), and
 `tb_delete_tenant(uuid)`, which refuses (55000) unless the tenant is admin-disabled, has a deletion in its
 `database` step and has no rows left in the five other tables. Because those tables have no foreign key, a
 writer is not blocked by the row lock; `tb_delete_tenant` checks again after the delete and rolls it back if
