@@ -247,6 +247,8 @@ async def test_renew_extends_the_live_lease(db: Db) -> None:
     assert row is not None
     renewed = (await _app_rows(db, RENEW, {**_lease(deletion, row), "ttl": 600}))[0][0]
     assert renewed - row.expires_at > timedelta(seconds=500)
+    shorter = (await _app_rows(db, RENEW, {**_lease(deletion, row), "ttl": 1}))[0][0]
+    assert shorter == renewed  # a renew never shortens the lease
     with pytest.raises(DBAPIError, match="invalid ttl"):
         await _app_rows(db, RENEW, {**_lease(deletion, row), "ttl": 0})
 
@@ -337,6 +339,12 @@ async def test_advance_refuses_skips_reversals_unknown_states_and_bad_data(db: D
     for target in ("platform", "database", "done", "failed", "cancelled", "bogus"):
         with pytest.raises(DBAPIError, match="invalid deletion transition"):
             await _advance(db, deletion, row, target)
+    with pytest.raises(DBAPIError, match="invalid deletion transition"):
+        await _app_rows(
+            db,
+            ADVANCE,
+            {**_lease(deletion, row), "to": None, "cursor": None, "counts": None, "skipped": None},
+        )
     await _advance(db, deletion, row, "draining")
     with pytest.raises(DBAPIError, match="invalid deletion transition"):
         await _advance(db, deletion, row, "requested")

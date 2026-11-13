@@ -146,8 +146,8 @@ BEGIN
         SELECT c.id FROM public.tenant_deletions c
          WHERE c.state NOT IN {TERMINAL}
            AND (c.expires_at IS NULL OR c.expires_at <= pg_catalog.clock_timestamp())
-           AND (c.not_before IS NULL OR c.not_before <= now())
-           AND (c.retry_at IS NULL OR c.retry_at <= now())
+           AND (c.not_before IS NULL OR c.not_before <= pg_catalog.clock_timestamp())
+           AND (c.retry_at IS NULL OR c.retry_at <= pg_catalog.clock_timestamp())
          ORDER BY c.updated_at, c.id LIMIT 1 FOR UPDATE SKIP LOCKED)
     RETURNING d.* INTO v_row;
     IF FOUND THEN
@@ -171,8 +171,8 @@ BEGIN
         RAISE EXCEPTION 'invalid ttl' USING ERRCODE = '22023';
     END IF;{_validate_lease()}
     UPDATE public.tenant_deletions d
-       SET expires_at = pg_catalog.clock_timestamp()
-                        + pg_catalog.make_interval(secs => p_ttl_seconds),
+       SET expires_at = GREATEST(d.expires_at, pg_catalog.clock_timestamp()
+                                 + pg_catalog.make_interval(secs => p_ttl_seconds)),
            updated_at = now()
      WHERE d.id = p_id RETURNING d.expires_at INTO v_expires;
     RETURN v_expires;
@@ -200,11 +200,11 @@ BEGIN
     v_next := CASE v_d.state
         WHEN 'requested' THEN 'draining' WHEN 'draining' THEN 'platform'
         WHEN 'platform' THEN 'github' WHEN 'github' THEN 'database' END;
-    IF p_to IS DISTINCT FROM v_d.state AND p_to IS DISTINCT FROM v_next THEN
+    IF p_to IS NULL OR (p_to <> v_d.state AND p_to IS DISTINCT FROM v_next) THEN
         RAISE EXCEPTION 'invalid deletion transition' USING ERRCODE = 'TB004';
     END IF;
     IF v_d.state = 'requested' AND p_to = 'draining' THEN
-        IF v_d.not_before IS NOT NULL AND v_d.not_before > now() THEN
+        IF v_d.not_before IS NOT NULL AND v_d.not_before > pg_catalog.clock_timestamp() THEN
             RAISE EXCEPTION 'the deletion grace window has not elapsed' USING ERRCODE = '55000';
         END IF;
         SELECT t.admin_disabled_at INTO v_disabled FROM public.tenants t
@@ -421,7 +421,7 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'tenant has no deletion in its database step' USING ERRCODE = '55000';
     END IF;
-    IF v_not_before IS NOT NULL AND v_not_before > now() THEN
+    IF v_not_before IS NOT NULL AND v_not_before > pg_catalog.clock_timestamp() THEN
         RAISE EXCEPTION 'the deletion grace window has not elapsed' USING ERRCODE = '55000';
     END IF;
 
@@ -596,6 +596,8 @@ def downgrade() -> None:
     """Downgrade schema: the 9c2e5a7f1d84 `tb_delete_tenant(uuid)` comes back."""
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute("SET LOCAL statement_timeout = '120s'")
+    # Closes the window in which a request could commit between the guard and the drops.
+    op.execute("LOCK TABLE tenant_deletions IN SHARE ROW EXCLUSIVE MODE")
     op.execute(_REFUSE_LIVE_DELETIONS)
     op.execute(_ASSERT_NEW)
     for signature in reversed(NEW_FUNCTIONS):
