@@ -121,7 +121,7 @@ Events (0032) are written by the deletion itself: `tenant.deletion.requested` (w
 host and installation id; **no organisation login and no tenant content**, `before` is ids,
 states and counts only, so no organisation name or other tenant content survives in the append-only trail (only the
 opaque identifiers, see Open issues)), one `tenant.deletion.step`
-per completed step with counts, `tenant.deletion.skipped` per skipped category, and
+per transition (including `requested` to `draining`, the first destructive step) with cumulative counts, `tenant.deletion.skipped` per skipped category, and
 `tenant.deletion.completed`. They carry the tenant id, are inserted in the same transaction as
 the step they record, and **survive the deletion**: `audit_events` has no foreign key to the
 tenant and the database step never touches it. The reconciler's audit purge (0032) removes the events

@@ -150,7 +150,9 @@ class DeletionEngine:
             await self._renew(run)
             record = run.record
             if record.state == "requested":
-                await self._advance(run, "draining", record.counts, record.skipped, [])
+                # Draining is the first destructive step, so this transition is audited too.
+                events = [audit.step_event(record, "draining", record.counts)]
+                await self._advance(run, "draining", record.counts, record.skipped, events)
                 continue
             outcome = await self._step_for(record.state).run(
                 StepContext(record, run.lease, lambda: self._renew(run))

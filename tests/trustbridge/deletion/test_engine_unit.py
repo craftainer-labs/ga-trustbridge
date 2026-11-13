@@ -49,7 +49,7 @@ async def test_no_runnable_deletion_returns_false() -> None:
 
 
 async def test_a_deletion_walks_every_step_in_order_and_finishes_with_events() -> None:
-    """requested > draining > platform > github > database > done, one step event per step."""
+    """requested > draining > platform > github > database > done, one step event per transition."""
     store = FakeStore(record())
     engine, slots = _engine(
         store,
@@ -64,7 +64,11 @@ async def test_a_deletion_walks_every_step_in_order_and_finishes_with_events() -
     assert advances == ["draining", "platform", "github", "database"]
     assert store.final == "done"
     actions = [e.action for e in store.events]
-    assert actions.count(Action.TENANT_DELETION_STEP) == 4
+    assert actions.count(Action.TENANT_DELETION_STEP) == 5
+    first = store.events[0]
+    assert first.after is not None and first.before is not None
+    assert first.before["from_state"] == "requested"
+    assert first.after["to_state"] == "draining"
     assert actions.count(Action.TENANT_DELETION_SKIPPED) == 1
     assert actions[-1] is Action.TENANT_DELETION_COMPLETED
     completed = store.events[-1]

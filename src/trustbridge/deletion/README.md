@@ -62,7 +62,8 @@ the transaction that removed the `tenants` row, and a rolled-back transition lea
 `deletion` shape allows ids, state and step names, a category, a count and a fixed code; `counts`
 go through `deletion_counts`. Free text (`NonRetryableError.message`, an exception message) reaches
 only `last_error`, scrubbed and cut, never the audit trail. `tenant.deletion.requested` and the
-cancel event are written by the request path (NG6h-7). Leaving `requested` writes no step event.
+cancel event are written by the request path (NG6h-7). Leaving `requested` writes a `step` event too (draining is the first destructive step, so every
+transition is audited); `counts` on a step event are cumulative.
 
 ## Don't
 
