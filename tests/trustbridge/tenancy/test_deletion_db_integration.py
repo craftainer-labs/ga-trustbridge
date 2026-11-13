@@ -524,7 +524,7 @@ async def test_tb_delete_tenant_removes_only_the_tenant_row(db: Db) -> None:
     await _admin(
         db,
         "INSERT INTO webhook_deliveries (host, delivery_id, event, headers, status, tenant_id) "
-        "VALUES (:h, 'd1', 'push', CAST('{}' AS jsonb), 'pending', :t)",
+        "VALUES (:h, 'd1', 'push', CAST('{}' AS jsonb), 'deleted', :t)",
         {"h": tenant.host, "t": tenant.id},
     )
     await _app_rows(db, DELETE, {"t": tenant.id})
