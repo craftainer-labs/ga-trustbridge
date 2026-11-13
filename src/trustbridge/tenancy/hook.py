@@ -41,12 +41,13 @@ TRANSACTION_TIMEOUT_MIN_VERSION = (17,)
 # the session's current value (the role's, the database's, the server's or a session `SET`) is kept
 # when it is above 0 and not above the configured bound; otherwise the bound applies (0 is "off"),
 # so a stricter existing setting is never loosened. `pg_settings.setting` is in milliseconds for
-# all three parameters. The third argument `true` makes it transaction-local (`SET LOCAL`).
+# all three parameters, and the aggregate always yields a row (0, so the bound applies, if the
+# server somehow lacks one). The third argument `true` makes it transaction-local (`SET LOCAL`).
 _SET_TRANSACTION_TIMEOUT = text(
     "SELECT set_config('transaction_timeout', CAST(CASE WHEN t.cur = 0 OR t.cur > b.bound "
     "THEN b.bound ELSE t.cur END AS text) || 'ms', true) "
     "FROM (SELECT CAST(:ms AS bigint) AS bound) b, "
-    "(SELECT CAST(setting AS bigint) AS cur FROM pg_settings "
+    "(SELECT COALESCE(MAX(CAST(setting AS bigint)), 0) AS cur FROM pg_settings "
     "WHERE name = 'transaction_timeout') t"
 )
 _SET_FALLBACK_TIMEOUTS = text(
@@ -55,9 +56,9 @@ _SET_FALLBACK_TIMEOUTS = text(
     "set_config('idle_in_transaction_session_timeout', CAST(CASE WHEN i.cur = 0 "
     "OR i.cur > b.bound THEN b.bound ELSE i.cur END AS text) || 'ms', true) "
     "FROM (SELECT CAST(:ms AS bigint) AS bound) b, "
-    "(SELECT CAST(setting AS bigint) AS cur FROM pg_settings "
+    "(SELECT COALESCE(MAX(CAST(setting AS bigint)), 0) AS cur FROM pg_settings "
     "WHERE name = 'statement_timeout') s, "
-    "(SELECT CAST(setting AS bigint) AS cur FROM pg_settings "
+    "(SELECT COALESCE(MAX(CAST(setting AS bigint)), 0) AS cur FROM pg_settings "
     "WHERE name = 'idle_in_transaction_session_timeout') i"
 )
 _timeout_ms: int | None = None

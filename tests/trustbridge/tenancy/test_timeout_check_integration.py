@@ -139,6 +139,35 @@ async def test_the_check_fails_when_no_bound_is_applied(
     assert gate.reason is not None
 
 
+@pytest.mark.parametrize(
+    ("role_value", "bound", "expected"), [("30s", 15, "15s"), ("0", 15, "15s")]
+)
+async def test_a_looser_or_off_role_level_timeout_takes_the_bound(
+    factory: async_sessionmaker,  # type: ignore[type-arg]
+    role_value: str,
+    bound: float,
+    expected: str,
+) -> None:
+    """A role-level value that is looser than the bound, or 0 (off), gives way to the bound."""
+    await _require(factory, at_least_17=True)
+    async with factory() as session:
+        role = (await session.execute(text("SELECT current_user"))).scalar_one()
+    admin = factory.kw["bind"]
+    quoted = '"' + role.replace('"', '""') + '"'
+    async with admin.connect() as conn:
+        await conn.execute(text(f"ALTER ROLE {quoted} SET transaction_timeout = '{role_value}'"))
+        await conn.commit()
+    try:
+        configure_transaction_timeout(bound)
+        async with factory() as session, session.begin():
+            inside = (await session.execute(text("SHOW transaction_timeout"))).scalar_one()
+        assert inside == expected
+    finally:
+        async with admin.connect() as conn:
+            await conn.execute(text(f"ALTER ROLE {quoted} RESET transaction_timeout"))
+            await conn.commit()
+
+
 async def test_a_stricter_role_level_timeout_is_not_loosened(
     factory: async_sessionmaker,  # type: ignore[type-arg]
 ) -> None:

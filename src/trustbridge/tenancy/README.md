@@ -196,7 +196,7 @@ application, for every `Session` of the api, the worker and the reconciler:
   unknown parameter). **Production requires
   PostgreSQL 17 or later: the check fails closed there.** Outside production the fallback is
   `statement_timeout` plus `idle_in_transaction_session_timeout` (ADR 0032 allows either): the hook
-  sets both to the same value with `SET LOCAL`, and the check accepts them when both are above 0
+  sets both to the bound with `SET LOCAL` (each keeping a stricter existing value), and the check accepts them when both are above 0
   and below the lag, **with a warning**, because a transaction of many short statements can still
   outlive the lag. If either is off or not below the lag, it fails as above. The server version
   is the one the dialect read on connect (`server_version_info`); an unknown version takes the
