@@ -1010,11 +1010,16 @@ async def test_the_tombstone_backfill_and_downgrade_round_trip() -> None:
             "VALUES (:t, :h, :i, 's', 'i', :s, CAST(:u AS timestamptz))"
         )
         for tenant_id, installation, state, updated in (
-            (older, 1, "done", "2026-01-01T00:00:00+00"),
-            (newer, 1, "done", "2026-02-01T00:00:00+00"),  # the same key, deleted again later
-            (only, 2, "done", "2026-03-01T00:00:00+00"),
-            (failed, 3, "failed", "2026-03-01T00:00:00+00"),
-            (running, 4, "database", "2026-03-01T00:00:00+00"),
+            (older, 1, "done", datetime(2026, 1, 1, tzinfo=UTC)),
+            (
+                newer,
+                1,
+                "done",
+                datetime(2026, 2, 1, tzinfo=UTC),
+            ),  # same key again
+            (only, 2, "done", datetime(2026, 3, 1, tzinfo=UTC)),
+            (failed, 3, "failed", datetime(2026, 3, 1, tzinfo=UTC)),
+            (running, 4, "database", datetime(2026, 3, 1, tzinfo=UTC)),
         ):
             await _admin(
                 scratch,

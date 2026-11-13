@@ -29,9 +29,10 @@ app role cannot lock `tenant_deletions`). It is a guard, not a lock: a holder th
 lease in the instant after the check deletes at most one more batch of rows that the new holder
 would delete anyway, and `tb_delete_tenant` checks again that nothing is left.
 
-`audit_events` and `tenant_deletions` are retained (ADR 0034 decision 3 and "Deletion records'
-retention"). Rows of `webhook_deliveries` with no `tenant_id` are left to retention and are
-reported once, at the end, as skipped with the reason `retention_only`.
+`audit_events`, `tenant_deletions` and `tenant_tombstones` are retained (ADR 0034 decision 3,
+"Deletion records' retention" and the tombstone table). Rows of `webhook_deliveries` with no
+`tenant_id` are left to retention and are reported once, at the end, as skipped with the reason
+`retention_only`.
 """
 
 from collections.abc import Mapping

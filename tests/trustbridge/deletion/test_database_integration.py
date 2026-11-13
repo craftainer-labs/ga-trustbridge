@@ -329,7 +329,8 @@ async def test_every_table_with_a_tenant_id_is_cleared_retained_or_listed(db: Db
         "WHERE table_schema = 'public' AND column_name = 'tenant_id'",
         {},
     )
-    retained = {"audit_events", "tenant_deletions"}  # ADR 0034 decision 3, record retention
+    # ADR 0034 decision 3, record retention, and the tombstone (B2): ids only, kept for good
+    retained = {"audit_events", "tenant_deletions", "tenant_tombstones"}
     assert {row.table_name for row in rows} == {table for table, _ in PLAN} | retained
 
 

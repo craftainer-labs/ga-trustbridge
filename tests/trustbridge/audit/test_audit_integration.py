@@ -1084,6 +1084,7 @@ async def test_a_canary_in_a_credential_name_reference_or_error_reaches_no_row(d
 
 # --- NG6h-2b: the webhook delivery idempotency key ------------------------------------------
 
+BEFORE_IDEMPOTENCY = "6f3b9d2e4a85"  # the revision before 8c4e1a7d3b52 (which is not the head)
 INDEX_NAME = "ux_audit_events_webhook_delivery"
 _DELIVERY = {"github_sender_id": 5, "delivery_id": "d-1"}
 
@@ -1196,7 +1197,7 @@ def _skip_if_not_permitted(proc: subprocess.CompletedProcess[str]) -> None:
 async def test_the_idempotency_migration_round_trips_without_duplicates(fresh_db: Db) -> None:
     """Down drops the index, up rebuilds it valid; a second up is a no-op (retry-safe)."""
     assert await _index_state(fresh_db) is True
-    down = await asyncio.to_thread(_alembic, fresh_db.name, "downgrade", "-1")
+    down = await asyncio.to_thread(_alembic, fresh_db.name, "downgrade", BEFORE_IDEMPOTENCY)
     _skip_if_not_permitted(down)
     assert down.returncode == 0, down.stderr[-2000:]
     assert await _index_state(fresh_db) is None
@@ -1226,7 +1227,7 @@ async def test_the_idempotency_migration_round_trips_without_duplicates(fresh_db
 
 async def test_the_idempotency_migration_rebuilds_an_invalid_index(fresh_db: Db) -> None:
     """A failed concurrent build leaves an INVALID index; the next upgrade drops and rebuilds it."""
-    down = await asyncio.to_thread(_alembic, fresh_db.name, "downgrade", "-1")
+    down = await asyncio.to_thread(_alembic, fresh_db.name, "downgrade", BEFORE_IDEMPOTENCY)
     _skip_if_not_permitted(down)
     assert down.returncode == 0, down.stderr[-2000:]
     tenant = uuid4()
