@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tests.trustbridge.fakes import FakeHookClient
 from tests.trustbridge.helpers import host
 from tests.trustbridge.worker.harness import Harness, key
+from trustbridge.worker import metrics
 from trustbridge.worker import reconciler as reconciler_module
 from trustbridge.worker.deliveries import DeliveryKey
 from trustbridge.worker.health import Heartbeat
@@ -255,7 +256,7 @@ async def test_audit_purge_accounts_each_batch_even_when_the_run_fails(
     """Rows deleted before a mid-run failure are already counted and logged."""
     h = await Harness({}, audit_retention_days=200).start()
     added: list[int] = []
-    monkeypatch.setattr(reconciler_module.metrics.audit_purged, "add", added.append)
+    monkeypatch.setattr(metrics.audit_purged, "add", added.append)
 
     async def failing(factory: object, **kw: Any) -> int:  # noqa: ANN401
         kw["on_batch"](7)
