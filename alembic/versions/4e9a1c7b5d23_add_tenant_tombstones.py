@@ -34,9 +34,8 @@ its readers still look at the ``done`` rows, which this revision does not touch,
 finished by an N-1 pod goes through the new ``tb_finish_tenant_deletion``, which writes the
 tombstone for it. **N-1 note for NG6h-3c-2:** while an N-1 pod may still run, its readers depend on
 the ``done`` rows, so the purge of ``done`` rows must not run until no N-1 pod exists (one release
-after this one is fully rolled out). A pod finishing a deletion between this revision's backfill
-and the lock above is impossible (the lock), but the purge function re-runs the same backfill
-for the rows it removes, as a second safeguard.
+after this one is fully rolled out). A deletion cannot finish between this revision's backfill and
+the function replacement (the lock), so no `done` row is left without its tombstone.
 
 Both replaced bodies are checked before they are replaced: ``md5(prosrc)`` of the live function must
 equal the md5 of the exact expected body (``5d7a2c8e1b94`` for the finish function, ``3b8d6f2a4c17``
@@ -308,6 +307,9 @@ def upgrade() -> None:
     # Same signatures and return types, so the owner and the grants stay.
     op.execute(_FINISH_FN)
     op.execute(_UPSERT_FN)
+    # SET LOCAL lasts to the end of the transaction, which may carry later revisions: end it here.
+    op.execute("RESET lock_timeout")
+    op.execute("RESET statement_timeout")
 
 
 def downgrade() -> None:
@@ -323,3 +325,5 @@ def downgrade() -> None:
     op.execute(_PREVIOUS_FINISH_FN)
     op.execute(_PINNED_PREVIOUS_UPSERT_FN)
     op.execute("-- squawk-ignore ban-drop-table\nDROP TABLE IF EXISTS tenant_tombstones")
+    op.execute("RESET lock_timeout")
+    op.execute("RESET statement_timeout")
