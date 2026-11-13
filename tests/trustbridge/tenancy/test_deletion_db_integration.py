@@ -28,10 +28,16 @@ from tests.trustbridge.tenancy.test_rls_integration import (
     Db,
     _provision,
 )
+from trustbridge.adapters.interface import GitHubHost
+from trustbridge.github.ports import TenantDeletedError
+from trustbridge.tenancy.gate import SqlTenantGate
+from trustbridge.worker.deliveries import TenantStanding
+from trustbridge.worker.ports import SqlTenants
 
 pytestmark = pytest.mark.integration
 
 MIGRATION = "9c2e5a7f1d84"
+DELETING_GUARD = "3b8d6f2a4c17"  # NG6h-2: tb_upsert_tenant refuses a deleting tenant
 PREVIOUS = "b7d3f5a19c68"
 NEW_FUNCTIONS = (
     "tb_get_tenant(uuid)",
@@ -550,7 +556,7 @@ async def test_tb_upsert_tenant_treats_a_done_deletion_as_a_tombstone(db: Db) ->
 
     tenant = await _tenant(db)
     deletion = (await _request(db, tenant)).deletion_id
-    for state in (*OPEN_STATES, "failed", "cancelled"):  # none of these is a tombstone
+    for state in ("failed", "cancelled"):  # neither is a tombstone, nor a deletion in progress
         await _set_state(db, deletion, state)
         assert (await _app_rows(db, upsert, args(tenant)))[0][0] == tenant.id
     await _set_state(db, deletion, "database")
@@ -563,6 +569,111 @@ async def test_tb_upsert_tenant_treats_a_done_deletion_as_a_tombstone(db: Db) ->
     assert await _admin_scalar(db, count, {"h": tenant.host, "i": tenant.installation}) == 0
     fresh = (await _app_rows(db, upsert, args(tenant, tenant.installation + 1)))[0][0]
     assert fresh is not None  # a new installation id of the same host is a new tenant
+
+
+async def test_tb_upsert_tenant_refuses_a_tenant_with_a_deletion_in_progress(db: Db) -> None:
+    """NG6h-2: every non-terminal state returns NULL and writes nothing; terminal ones do not."""
+    upsert = "SELECT tb_upsert_tenant(:h, :i, 'renamed', 7, 'suspended')"
+    tenant = await _tenant(db)
+    args = {"h": tenant.host, "i": tenant.installation}
+    deletion = (await _request(db, tenant)).deletion_id
+    read = "SELECT org, org_id, state FROM tenants WHERE id = :t"
+    for state in OPEN_STATES:
+        await _set_state(db, deletion, state)
+        assert (await _app_rows(db, upsert, args))[0][0] is None
+        row = (await _app_rows(db, read, {"t": tenant.id}))[0]
+        assert (row.org, row.org_id, row.state) == ("acme-org", 1, "active")
+    other = await _tenant(db)  # a deletion of another tenant does not matter
+    assert (await _app_rows(db, upsert, {"h": other.host, "i": other.installation}))[0][
+        0
+    ] == other.id
+    await _set_state(db, deletion, "cancelled")
+    assert (await _app_rows(db, upsert, args))[0][0] == tenant.id
+    row = (await _app_rows(db, read, {"t": tenant.id}))[0]
+    assert (row.org, row.org_id, row.state) == ("renamed", 7, "suspended")
+
+
+async def test_the_gate_reports_the_standing_of_an_installation(db: Db) -> None:
+    """Unknown, disabled, deleting, tombstoned (row gone, `database` or `done`) and cancelled."""
+    gate = SqlTenantGate(db.app)
+    tenant = await _tenant(db)
+    assert await gate.standing(tenant.host, tenant.installation + 1) == TenantStanding()
+    assert await gate.standing(tenant.host, tenant.installation) == TenantStanding(
+        tenant.id, disabled=True
+    )
+    deletion = (await _request(db, tenant)).deletion_id
+    deleting = TenantStanding(tenant.id, disabled=True, refusal="deleting")
+    assert await gate.standing(tenant.host, tenant.installation) == deleting
+    await _set_state(db, deletion, "database")
+    assert await gate.standing(tenant.host, tenant.installation) == deleting
+    await _admin(db, "DELETE FROM tenants WHERE id = :t", {"t": tenant.id})
+    tombstone = TenantStanding(refusal="tombstone")
+    assert await gate.standing(tenant.host, tenant.installation) == tombstone  # row gone
+    await _set_state(db, deletion, "done")
+    assert await gate.standing(tenant.host, tenant.installation) == tombstone
+    assert await gate.standing(tenant.host, tenant.installation + 1) == TenantStanding()
+    again = await _tenant(db)
+    second = (await _request(db, again)).deletion_id
+    await _set_state(db, second, "cancelled")
+    assert await gate.standing(again.host, again.installation) == TenantStanding(
+        again.id, disabled=True
+    )
+
+
+@pytest.fixture(scope="module")
+async def plain() -> AsyncIterator[Db]:
+    """The shipped schema without RLS: `SqlTenants` reads `tenants` directly, as at release N."""
+    async for provisioned in _provision(enforce=False):
+        yield provisioned
+
+
+async def test_a_state_change_and_a_delete_never_both_apply(plain: Db) -> None:
+    """SqlTenants.set_installation_state queues behind a delete's lock and sees the tombstone."""
+    tenants = SqlTenants(plain.app, _no_hosts)
+    tenant = await _tenant(plain)
+    deletion = (await _request(plain, tenant)).deletion_id
+    await _set_state(plain, deletion, "database")
+    async with plain.app() as deleter, deleter.begin():
+        await deleter.execute(text(DELETE), {"t": tenant.id})  # uncommitted: lock held
+        racing = asyncio.create_task(
+            tenants.set_installation_state(tenant.host, tenant.installation, "suspended")
+        )
+        await asyncio.sleep(0.5)
+        assert not racing.done()
+    # without the advisory lock the update would match nothing and answer None; with it the
+    # setter looks after the commit, finds the deletion at its database step with no tenant row
+    with pytest.raises(TenantDeletedError) as refused:
+        await racing
+    assert refused.value.reason == "tombstone"
+    assert not await _exists(plain, tenant)
+
+
+async def test_a_state_change_waits_for_the_lock_and_then_sees_a_new_deletion(plain: Db) -> None:
+    """The reverse order: the setter queues behind the lock and checks only after it."""
+    tenants = SqlTenants(plain.app, _no_hosts)
+    tenant = await _tenant(plain)
+    deletion = (await _request(plain, tenant)).deletion_id
+    key = f"tb_tenant:{tenant.host}:{tenant.installation}"
+    async with plain.app() as holder, holder.begin():
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": key}
+        )
+        waiting = asyncio.create_task(
+            tenants.set_installation_state(tenant.host, tenant.installation, "suspended")
+        )
+        await asyncio.sleep(0.5)
+        assert not waiting.done()
+        # a deletion has been requested meanwhile: the setter must see it after the lock
+        await _set_state(plain, deletion, "draining")
+    with pytest.raises(TenantDeletedError) as refused:
+        await waiting
+    assert refused.value.reason == "deleting"
+    state = "SELECT state FROM tenants WHERE id = :t"
+    assert await _admin_scalar(plain, state, {"t": tenant.id}) == "active"
+
+
+def _no_hosts(name: str) -> GitHubHost:
+    raise AssertionError(name)
 
 
 # --- webhook_deliveries --------------------------------------------------------------------
@@ -621,6 +732,19 @@ async def _alembic(database: str, *args: str) -> subprocess.CompletedProcess[str
 async def test_downgrade_is_refused_while_a_deletion_record_exists_and_round_trips() -> None:
     """The compliance record blocks it; without one the previous bodies come back."""
     async for scratch in _provision(enforce=False):
+        guard = (
+            "SELECT pg_get_functiondef("
+            "'tb_upsert_tenant(text,bigint,text,bigint,text)'::regprocedure"
+            ") LIKE '%leave the row alone%'"
+        )
+        assert await _admin_scalar(scratch, guard)
+        stepped = await _alembic(scratch.name, "downgrade", MIGRATION)
+        assert stepped.returncode == 0, stepped.stderr[-2000:]
+        assert not await _admin_scalar(scratch, guard)  # the NG6h-1 body is back
+        assert await _admin_scalar(scratch, "SELECT to_regclass('tenant_deletions') IS NOT NULL")
+        restored = await _alembic(scratch.name, "upgrade", "head")
+        assert restored.returncode == 0, restored.stderr[-2000:]
+        assert await _admin_scalar(scratch, guard)
         tenant = await _tenant(scratch)
         deletion = (await _request(scratch, tenant)).deletion_id
         refused = await _alembic(scratch.name, "downgrade", PREVIOUS)

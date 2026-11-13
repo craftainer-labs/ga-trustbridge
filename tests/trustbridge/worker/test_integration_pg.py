@@ -525,6 +525,101 @@ async def test_a_done_deletion_tombstones_only_its_own_installation_key() -> Non
         await session.execute(delete(Tenant).where(Tenant.host == host))
 
 
+async def test_the_state_setter_and_the_active_lookup_refuse_the_same_keys_as_the_upsert() -> None:
+    """NG6h-2: `deleting`, tombstoned and `deleted` keys raise; a `deleted` repeat is a no-op."""
+    tenants = SqlTenants(session_factory, _github_host)
+    host = f"it-{uuid.uuid4().hex[:8]}"
+    tenant_id = await tenants.upsert_installation(host, 61, "acme", 9)
+
+    async def record(state: str) -> None:
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "INSERT INTO tenant_deletions (tenant_id, host, installation_id, "
+                    "requested_by_sub, requested_by_iss, state) "
+                    "VALUES (:t, :h, 61, 'u1', 'iss', :s)"
+                ),
+                {"t": tenant_id, "h": host, "s": state},
+            )
+
+    async def refused(reason: str) -> None:
+        with pytest.raises(TenantDeletedError) as setter:
+            await tenants.set_installation_state(host, 61, "suspended")
+        with pytest.raises(TenantDeletedError) as lookup:
+            await tenants.active_tenant_id_for(host, 61)
+        assert (setter.value.reason, lookup.value.reason) == (reason, reason)
+
+    try:
+        assert await tenants.active_tenant_id_for(host, 61) == tenant_id
+        assert await tenants.active_tenant_id_for(host, 62) is None
+        await record("draining")
+        await refused("deleting")
+        async with session_factory() as session:
+            assert (await session.get(Tenant, tenant_id)).state == "active"  # type: ignore[union-attr]
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                text("UPDATE tenant_deletions SET state = 'done' WHERE host = :h"), {"h": host}
+            )
+            await session.execute(delete(Tenant).where(Tenant.host == host))
+        await refused("tombstone")
+        assert await tenants.set_installation_state(host, 62, "suspended") is None  # other key
+        other = await tenants.upsert_installation(host, 63, "acme", 9)
+        assert await tenants.set_installation_state(host, 63, "deleted") == other
+        assert await tenants.set_installation_state(host, 63, "deleted") == other  # a repeat
+        with pytest.raises(TenantDeletedError) as gone:
+            await tenants.set_installation_state(host, 63, "active")
+        assert gone.value.reason == "deleted"
+        with pytest.raises(TenantDeletedError):
+            await tenants.active_tenant_id_for(host, 63)
+        async with session_factory() as session:
+            assert (await session.get(Tenant, other)).state == "deleted"  # type: ignore[union-attr]
+    finally:
+        async with session_factory() as session, session.begin():
+            await session.execute(delete(Tenant).where(Tenant.host == host))
+
+
+async def test_the_state_setter_waits_for_the_installation_advisory_lock() -> None:
+    """A held `tb_tenant:<host>:<id>` lock blocks the state change until the holder commits."""
+    tenants = SqlTenants(session_factory, _github_host)
+    host = f"it-{uuid.uuid4().hex[:8]}"
+    tenant_id = await tenants.upsert_installation(host, 92, "acme", 9)
+    try:
+        async with session_factory() as holder, holder.begin():
+            await holder.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+                {"k": f"tb_tenant:{host}:92"},
+            )
+            waiting = asyncio.create_task(tenants.set_installation_state(host, 92, "suspended"))
+            await asyncio.sleep(0.5)
+            assert not waiting.done()
+        assert await waiting == tenant_id
+    finally:
+        async with session_factory() as session, session.begin():
+            await session.execute(delete(Tenant).where(Tenant.host == host))
+
+
+async def test_set_tenant_records_the_tenant_on_a_pending_delivery_only(ids: list[str]) -> None:
+    """The worker stores the tenant id first; a settled row keeps what it had."""
+    store = PgDeliveryStore(session_factory)
+    delivery = _new(ids)
+    assert await store.insert(delivery)
+    first, second = uuid.uuid4(), uuid.uuid4()
+    await store.set_tenant(delivery.key, first)
+    await store.set_tenant(delivery.key, first)  # a repeat is not even a write
+    row = await store.get(delivery.key)
+    assert row is not None
+    assert row.tenant_id == first
+    await store.set_tenant(delivery.key, second)
+    row = await store.get(delivery.key)
+    assert row is not None
+    assert row.tenant_id == second
+    assert await store.mark_processed(delivery.key, datetime.now(UTC), attempts=0)
+    await store.set_tenant(delivery.key, first)
+    row = await store.get(delivery.key)
+    assert row is not None
+    assert row.tenant_id == second
+
+
 async def test_the_upsert_waits_for_the_installation_advisory_lock() -> None:
     """SqlTenants takes the same key as the tb_* functions: a held lock blocks it until commit."""
     tenants = SqlTenants(session_factory, _github_host)

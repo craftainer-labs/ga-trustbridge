@@ -84,6 +84,16 @@ deleting tenant first. The downgrade is refused while any `tenant_deletions` row
 delivery exists. N-1 safe: only additions and same-signature function bodies; the previous release
 never reads or writes the new column, status or table.
 
+Migration `3b8d6f2a4c17` (NG6h-2) replaces `tb_upsert_tenant` once more (same signature, expand-only):
+it also returns NULL, writing nothing, while the tenant has a non-terminal deletion, the DB-level twin
+of the `deleting` reason (`tb_set_tenant_disabled` needs no change: a deletion needs a disabled
+tenant, enable is refused while one is open, and a repeated disable keeps the first values). The
+downgrade restores the `9c2e5a7f1d84` body.
+
+`gate.py`'s `SqlTenantGate.standing(host, installation_id)` returns the worker's `TenantStanding`
+(tenant id, disable flag, and a `deleting` or `tombstone` refusal) from `tb_get_tenant` and
+`tenant_deletions`.
+
 ## Grants
 
 Production table and function grants for `trustbridge_app` come only from the migrations

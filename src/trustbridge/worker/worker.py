@@ -221,7 +221,8 @@ class Worker:
         payload = json.loads(row.body)
         if not isinstance(payload, dict):
             raise TypeError("webhook payload is not a JSON object")
-        await self._ensure_enabled(row.host, payload)
+        if not await self._admit(row, payload):
+            return
         action = payload.get("action")
         await self._d.registry.dispatch(
             EventContext(
@@ -233,11 +234,38 @@ class Worker:
             )
         )
 
-    async def _ensure_enabled(self, host: str, payload: dict[str, object]) -> None:
-        """Raise `TenantDisabled` when the payload's installation belongs to a disabled tenant."""
+    async def _admit(self, row: DeliveryRecord, payload: dict[str, object]) -> bool:
+        """Record the delivery's tenant, then decide whether the handlers may run.
+
+        The tenant id is stored on the row first (ADR 0034: a deletion finds every delivery of
+        its tenant, including the ones deferred below). Returns False for a tombstoned
+        installation: the event is acknowledged and dropped (no handler runs, no tenant is
+        created) and the caller marks it processed. Raises `TenantDisabled` for an admin-disabled
+        tenant and for one being deleted (a deletion needs a disabled tenant, so this is a
+        no-op until the deletion removes the delivery or the tenant is enabled).
+        """
         installation = payload.get("installation")
         installation_id = installation.get("id") if isinstance(installation, dict) else None
         if self._d.gate is None or type(installation_id) is not int:
-            return
-        if await self._d.gate.disabled(host, installation_id):
+            return True
+        standing = await self._d.gate.standing(row.host, installation_id)
+        if standing.tenant_id is not None:
+            await self._d.store.set_tenant(row.key, standing.tenant_id)
+        if standing.refusal == "tombstone":
+            logger.info(
+                "dropping %s delivery of a deleted tenant's installation; the App must be "
+                "uninstalled (a reinstall gets a new installation id and works)",
+                row.event,
+                extra={"host": row.host, "delivery_id": row.delivery_id},
+            )
+            return False
+        if standing.refusal == "deleting":
+            logger.info(
+                "deferring %s delivery: tenant deletion in progress",
+                row.event,
+                extra={"host": row.host, "delivery_id": row.delivery_id},
+            )
             raise TenantDisabled
+        if standing.disabled:
+            raise TenantDisabled
+        return True

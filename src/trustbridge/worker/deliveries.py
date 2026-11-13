@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Literal, NamedTuple, Protocol
+from uuid import UUID
 
 from sqlalchemy import ColumnElement, Update, and_, delete, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -76,6 +77,7 @@ class DeliveryRecord:
     dead_at: datetime | None = None
     last_error: str | None = None
     body_sha256: str | None = None
+    tenant_id: UUID | None = None
 
     @property
     def key(self) -> DeliveryKey:
@@ -131,6 +133,13 @@ class DeliveryStore(Protocol):
 
     async def defer(self, key: DeliveryKey, until: datetime) -> None:
         """Delay a row without counting a failure (busy lease)."""
+        ...
+
+    async def set_tenant(self, key: DeliveryKey, tenant_id: UUID) -> None:
+        """Record the tenant the delivery's installation belongs to (ADR 0034: deletion finds it).
+
+        Set by the worker before it defers or handles the delivery; a repeat is a no-op.
+        """
         ...
 
     async def mark_dead(
@@ -293,6 +302,10 @@ class InMemoryDeliveryStore:
         """Delay without counting."""
         self._set(key, next_attempt_at=until)
 
+    async def set_tenant(self, key: DeliveryKey, tenant_id: UUID) -> None:
+        """Record the delivery's tenant."""
+        self._set(key, tenant_id=tenant_id)
+
     async def mark_dead(
         self, key: DeliveryKey, error: str, now: datetime, *, attempts: int
     ) -> bool:
@@ -397,6 +410,7 @@ def _record(row: WebhookDelivery) -> DeliveryRecord:
         dead_at=row.dead_at,
         last_error=row.last_error,
         body_sha256=row.body_sha256,
+        tenant_id=row.tenant_id,
     )
 
 
@@ -558,6 +572,18 @@ class PgDeliveryStore:
             .values(next_attempt_at=until)
         )
 
+    async def set_tenant(self, key: DeliveryKey, tenant_id: UUID) -> None:
+        """Record the delivery's tenant (a pending row; no write when it is already recorded)."""
+        await self._exec(
+            update(WebhookDelivery)
+            .where(
+                _is(key),
+                WebhookDelivery.status == PENDING,
+                WebhookDelivery.tenant_id.is_distinct_from(tenant_id),
+            )
+            .values(tenant_id=tenant_id)
+        )
+
     async def mark_dead(
         self, key: DeliveryKey, error: str, now: datetime, *, attempts: int
     ) -> bool:
@@ -652,9 +678,24 @@ def retry_at(now: datetime, attempts: int, base: float, cap: float) -> datetime:
     return now + timedelta(seconds=backoff_seconds(attempts, base, cap))
 
 
-class TenantGate(Protocol):
-    """Whether a tenant is admin-disabled (ADR 0033 "Tenant disable"); read by the worker."""
+@dataclass(frozen=True, slots=True)
+class TenantStanding:
+    """What the worker needs to know about the tenant of an installation.
 
-    async def disabled(self, host: str, installation_id: int) -> bool:
-        """True when the tenant of `(host, installation_id)` is admin-disabled."""
+    `tenant_id` is None when no tenant row exists. `disabled` is the admin disable (ADR 0033).
+    `refusal` is `tombstone` (a finished deletion of the key: nothing is handled and no tenant
+    is created), `deleting` (a deletion is in progress), or None. A `deleted` installation
+    state is not a refusal here: the lifecycle handlers deal with it.
+    """
+
+    tenant_id: UUID | None = None
+    disabled: bool = False
+    refusal: str | None = None
+
+
+class TenantGate(Protocol):
+    """The tenant's standing for a delivery (ADR 0033 "Tenant disable", ADR 0034); the worker."""
+
+    async def standing(self, host: str, installation_id: int) -> TenantStanding:
+        """The standing of the tenant of `(host, installation_id)` (unknown: all defaults)."""
         ...

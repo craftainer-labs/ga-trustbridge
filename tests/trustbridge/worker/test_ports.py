@@ -80,6 +80,38 @@ async def test_an_installation_being_deleted_is_refused_and_others_are_not_in_me
     assert await tenants.upsert_installation("github.com", 8, "acme", 1) is not None
 
 
+async def test_the_state_setter_and_the_active_lookup_refuse_the_same_keys_in_memory() -> None:
+    """Mirrors `SqlTenants`: tombstoned, deleting and `deleted` keys raise, others do not."""
+    tenants = _tenants()
+    tenant_id = await tenants.upsert_installation("github.com", 7, "acme", 1)
+    assert await tenants.active_tenant_id_for("github.com", 7) == tenant_id
+    assert await tenants.active_tenant_id_for("github.com", 8) is None
+    tenants.deleting.add(("github.com", 7))
+    for call in (
+        tenants.active_tenant_id_for("github.com", 7),
+        tenants.set_installation_state("github.com", 7, "suspended"),
+    ):
+        with pytest.raises(TenantDeletedError) as deleting:
+            await call
+        assert deleting.value.reason == "deleting"
+    tenants.deleting.clear()
+    tenants.tombstones.add(("github.com", 7))
+    with pytest.raises(TenantDeletedError) as tombstone:
+        await tenants.set_installation_state("github.com", 7, "deleted")
+    assert tombstone.value.reason == "tombstone"
+    assert tenants._rows[tenant_id]["state"] == "active"
+    tenants.tombstones.clear()
+    assert await tenants.set_installation_state("github.com", 7, "deleted") == tenant_id
+    # `deleted` on `deleted` is a no-op that still answers; any other state is refused
+    assert await tenants.set_installation_state("github.com", 7, "deleted") == tenant_id
+    with pytest.raises(TenantDeletedError) as gone:
+        await tenants.set_installation_state("github.com", 7, "active")
+    assert gone.value.reason == "deleted"
+    with pytest.raises(TenantDeletedError):
+        await tenants.active_tenant_id_for("github.com", 7)
+    assert tenants._rows[tenant_id]["state"] == "deleted"
+
+
 async def test_repository_changes_are_applied_renamed_and_removed_in_memory() -> None:
     """Repository changes are applied renamed and removed in memory."""
     tenants = _tenants()

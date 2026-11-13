@@ -87,10 +87,21 @@ class InstallationStore(Protocol):
         """Return the tenant id of `(host, installation_id)`, or None if unknown."""
         ...
 
+    async def active_tenant_id_for(self, host: str, installation_id: int) -> UUID | None:
+        """Like `tenant_id_for`, for a caller that is about to write for or schedule the tenant.
+
+        Raises `TenantDeletedError` for a tenant that is deleted, being deleted or tombstoned.
+        """
+        ...
+
     async def set_installation_state(
         self, host: str, installation_id: int, state: str
     ) -> UUID | None:
-        """Set `active`, `suspended` or `deleted`; return the tenant id, or None if unknown."""
+        """Set `active`, `suspended` or `deleted`; return the tenant id, or None if unknown.
+
+        Raises `TenantDeletedError` for a tombstoned or deleting key and for a `deleted` tenant
+        given another state; `deleted` on a `deleted` tenant changes nothing and returns its id.
+        """
         ...
 
     async def apply_repository_changes(

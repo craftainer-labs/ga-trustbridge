@@ -100,7 +100,8 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    role has no `DELETE` on `tenants`), each batch its own transaction and
    counted. Webhook bodies are cleared for deliveries recorded for the tenant: an expand
    migration adds a nullable `tenant_id` to `webhook_deliveries`, set by the worker when it
-   resolves the delivery; deletion nulls `body` and sets the row terminal with status `deleted`, which the relay, the
+   resolves the delivery (NG6h-2: before it defers or handles it; an event with no registered
+   handler, or a payload naming no installation, is not resolved); deletion nulls `body` and sets the row terminal with status `deleted`, which the relay, the
    re-relay sweep and the worker skip (the row stays for deduplication, as the retention purge
    keeps rows, 0028 item 5), so a held, body-less row is never re-relayed. Rows with no `tenant_id` (never resolved, or older than
    the column) fall to the normal retention and are counted under `skipped` as
@@ -128,10 +129,18 @@ only at retention. What happens to the **other** audit rows of the tenant is use
 
 ### After deletion
 
-The tenant id no longer resolves. If the GitHub installation still exists, its next event
-creates a new tenant with a new id (`tb_upsert_tenant`); the response to the deletion request
-and its record state this, and recommend uninstalling the App first. Re-creation is not
-prevented (see Open issues).
+The tenant id no longer resolves. If the GitHub installation still exists (the App was not
+uninstalled), its events are **acknowledged and dropped**: a `done` row in `tenant_deletions` for
+`(host, installation_id)` is a tombstone, so `tb_upsert_tenant` and `SqlTenants` create nothing,
+and the worker marks the delivery processed without running a handler (user decision B2, NG6h-2).
+The only answer to the installation's admins is the response to the deletion request and its
+record, which say the App must be uninstalled; a reinstall gets a new installation id and works.
+The worker has no tenant to answer through (no row, no installation token mapping), so it logs the
+drop (host, delivery id and event only) and sends nothing to GitHub. While a deletion is in
+progress the tenant is admin-disabled, so its deliveries are deferred and left pending as for any
+disabled tenant (ADR 0033 invariant 19) until the deletion removes them; the lifecycle and
+repository handlers also refuse a deleting, `deleted` or tombstoned tenant (nothing is written or
+scheduled), and `set_installation_state` is refused for it under the same advisory lock.
 
 ## User decisions (G-api, 2026-11-03)
 
@@ -219,8 +228,8 @@ adapter fakes.
 15. A blocked step holds the deletion in that state and never advances to `database` without
     an acknowledgement (user decision 2); the acknowledgement is audited with
     the acknowledger's `sub` and what was left.
-16. A tenant whose installation still exists is re-created with a new tenant id on its next
-    event, and the deletion record and response say so.
+16. A tenant whose installation still exists is not re-created: its events are acknowledged and
+    dropped (tombstone), and the deletion record and response say the App must be uninstalled.
 17. The migration (the `tenant_deletions` table, the `webhook_deliveries.tenant_id` column)
     passes the `migration-compat` job and the previous release's suite (NFR-0027).
 
@@ -231,9 +240,12 @@ adapter fakes.
   `MemoryTenants` raise `TenantDeletedError`. A reinstall gets a new installation id and is not
   blocked; an open, failed or cancelled deletion is not a tombstone. The ports also refuse a
   `deleted` tenant and one with a non-terminal deletion, and the installation handler drops the
-  event (NG6h-1). `tb_upsert_tenant`, `tb_delete_tenant` and `SqlTenants.upsert_installation`
-  take one per-installation advisory lock first, so a concurrent delete and upsert cannot recreate
-  the tenant.
+  event (NG6h-1). `tb_upsert_tenant`, `tb_delete_tenant`, `tb_request_tenant_deletion`,
+  `SqlTenants.upsert_installation` and `SqlTenants.set_installation_state` take one
+  per-installation advisory lock first, so a concurrent delete and upsert or state change cannot
+  recreate or rewrite the tenant. From NG6h-2 `tb_upsert_tenant` also returns NULL for a tenant
+  with a non-terminal deletion (migration `3b8d6f2a4c17`), the DB-level twin of the `deleting`
+  reason, and the worker drops a tombstoned installation's deliveries.
 - **Grace window (decided, NG6h-1).** `tenant_deletions.not_before` (nullable, default NULL: no
   delay) is stored from the optional `tb_request_tenant_deletion` argument; the engine honours it.
 - **Export before delete.** EB-15 lists "data export and deletion". A per-tenant data export is
