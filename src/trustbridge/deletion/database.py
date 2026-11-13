@@ -14,9 +14,9 @@ and `last_error` (handler error text). The row becomes `deleted` (never relayed 
 
 Every pass starts with a lease check, in the same transaction as the batch: the holder, the
 fence and an unexpired lease for a deletion still in the `database` step (a `SELECT`, because the
-app role cannot lock `tenant_deletions`). It is a guard, not a lock: a holder that loses the lease in the
-instant after the check deletes at most one more batch of rows that the new holder would delete
-anyway, and `tb_delete_tenant` checks again that nothing is left.
+app role cannot lock `tenant_deletions`). It is a guard, not a lock: a holder that loses the
+lease in the instant after the check deletes at most one more batch of rows that the new holder
+would delete anyway, and `tb_delete_tenant` checks again that nothing is left.
 
 `audit_events` and `tenant_deletions` are retained (ADR 0034 decision 3 and "Deletion records'
 retention"). Rows of `webhook_deliveries` with no `tenant_id` are left to retention and are
