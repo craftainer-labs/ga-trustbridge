@@ -227,6 +227,7 @@ async def test_the_worker_and_reconciler_register_their_loops_with_derived_limit
         "deliveries",
         "retention",
         "audit-purge",
+        "tenant-deletion",
         "trim",
     }
     assert rbeat._limits["resweep"] == stale_after(h.settings, h.settings.relay_recheck_seconds)

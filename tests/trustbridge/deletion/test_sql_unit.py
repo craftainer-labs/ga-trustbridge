@@ -164,7 +164,7 @@ async def test_advance_and_its_events_are_one_transaction_in_the_tenant_context(
     rec = record(state="platform")
     events = [audit.step_event(rec, "github", {"a": 1})]
     await _store(log).advance(
-        LEASE, "github", cursor=None, counts={"a": 1}, skipped=[], events=events
+        LEASE, TENANT, "github", cursor=None, counts={"a": 1}, skipped=[], events=events
     )
     assert log.opened == 1
     assert log.committed == 1
@@ -177,12 +177,21 @@ async def test_advance_and_its_events_are_one_transaction_in_the_tenant_context(
     assert advance[2] == TENANT == insert[2]
 
 
-async def test_an_advance_without_events_runs_in_no_tenant_context() -> None:
-    """A cursor save writes no event, so it needs no tenant."""
+async def test_an_advance_runs_in_the_given_tenant_context_even_without_events() -> None:
+    """The tenant is explicit (NG6h-4a-3), never read from `events[0]`."""
     log = _Log()
-    await _store(log).advance(LEASE, "platform", cursor={"n": 1}, counts={}, skipped=[], events=[])
-    assert log.statements[0][2] is None
+    await _store(log).advance(
+        LEASE, TENANT, "platform", cursor={"n": 1}, counts={}, skipped=[], events=[]
+    )
+    assert log.statements[0][2] == TENANT
     assert json.loads(log.statements[0][1]["cursor"]) == {"n": 1}
+
+
+async def test_a_failure_without_events_still_runs_in_the_tenant_context() -> None:
+    """`fail` takes the tenant explicitly too."""
+    log = _Log()
+    await _store(log).fail(LEASE, TENANT, "bad", [])
+    assert log.statements[0][2] == TENANT
 
 
 async def test_finish_deletes_the_tenant_then_finishes_then_writes_completed() -> None:
@@ -205,8 +214,9 @@ async def test_fail_writes_the_reason_and_its_event() -> None:
     """One transaction for the terminal state and the `failed` event."""
     log = _Log()
     rec = record(state="github")
-    await _store(log).fail(LEASE, "bad", [audit.failed_event(rec, "bad")])
+    await _store(log).fail(LEASE, TENANT, "bad", [audit.failed_event(rec, "bad")])
     assert "tb_fail_tenant_deletion" in log.statements[0][0]
+    assert {s[2] for s in log.statements} == {TENANT}
     assert log.statements[0][1]["reason"] == "bad"
     assert "audit_events" in log.statements[1][0]
     assert log.committed == 1
@@ -222,6 +232,7 @@ async def test_a_lost_lease_and_a_terminal_record_both_mean_stop(sqlstate: str) 
     with pytest.raises(LeaseLost):
         await _store(log).advance(
             LEASE,
+            TENANT,
             "github",
             cursor=None,
             counts={},

@@ -244,7 +244,19 @@ adapter fakes.
   audit events are one session transaction (the functions write no `audit_events`), a run ends after about half
   the lease TTL, `TB003` and `TB004` both stop the run, the `tenants` row is removed by the engine's finish
   transaction (after the `DatabaseStep`'s batches), and a step that fails is retried with capped backoff while
-  `failed` needs a `NonRetryableError`. The reconciler duty, settings, gate and runbook are NG6h-4a-3.
+  `failed` needs a `NonRetryableError`. A `ValueError` while building the audit events of a step's output (a bad
+  category name or count) is a programming error and ends as `failed` (code `invalid_step_output`), not a retry loop.
+- **Wiring (NG6h-4a-3).** The reconciler runs the engine as a singleton duty (`tenant-deletion`, under a lease like
+  the audit purge) through the `DeletionDriver` Protocol only: at most `DELETION_BATCH_SIZE` claims per poll of
+  `DELETION_POLL_SECONDS`, a liveness beat per pass, and a store error that escapes `run_once` is logged and ends that
+  poll, so the deletion's own lease lapses and it is claimed again. Poll, batch, lease TTL, budget fraction, backoff
+  base and cap, drain passes and drain poll are settings with Helm values (`trustbridge.deletion.*`); at startup the drain
+  poll plus the configured step pass time must fit in half the deletion lease TTL (an error in production, a warning
+  elsewhere). The gate (B10): `SqlTenantGate.allows`, the adapter core's `OperationGate`, admits `delete` operations
+  through a disabled tenant only while a non-terminal deletion of that tenant exists; every other kind, a refresh and
+  an orphan sweep stay refused. Composing the engine with its steps is left to the items that build them (4b, 5, 6).
+  The runbook (cancel, operator-fail, and replaying `tenant.deletion.completed` after a restore) is
+  [`docs/runbooks/tenant-deletion.md`](../runbooks/tenant-deletion.md).
 - **Re-creation (decided, NG6h-1).** A `done` row in `tenant_deletions` for `(host, installation_id)`
   (or a `database`-step row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` creates nothing (NG6h-1 returned NULL; NG6h-2 raises, below), and `SqlTenants` and
   `MemoryTenants` raise `TenantDeletedError`. A reinstall gets a new installation id and is not
@@ -263,8 +275,10 @@ adapter fakes.
   not designed here; the audit export (0032) and the read endpoints (0033) cover most of what a
   customer could ask for, and a dedicated export is a follow-up.
 - **Backups.** Deleted rows persist in database backups until those expire; the backup
-  retention is the deployment's (EB-6) and is documented in the Helm chart's notes (NG7).
-- **Large tenants.** Batch size and a per-step time budget are settings; a tenant with very
+  retention is the deployment's (EB-6) and is documented in the Helm chart's notes (NG7). A
+  restore also undoes a deletion that completed after the backup: the runbook replays those from the
+  `tenant.deletion.completed` events (the SIEM export) before the worker and reconciler start.
+- **Large tenants.** Batch size and a per-step time budget are settings (`DELETION_*`, NG6h-4a-3); a tenant with very
   many repositories makes the GitHub step long, which the resumable cursor handles.
 - **Deletion records' retention.** `tenant_deletions` rows hold ids and counts only and are
   **kept indefinitely** as a compliance record (the app role has no `DELETE` on the table; a

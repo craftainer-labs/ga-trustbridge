@@ -44,6 +44,7 @@ class FakeStore:
     rec: DeletionRecord | None
     calls: list[tuple[str, Any]] = field(default_factory=list)
     events: list[AuditEvent] = field(default_factory=list)
+    tenants: list[UUID] = field(default_factory=list)
     lose_on: set[str] = field(default_factory=set)
     boom_on: dict[str, Exception] = field(default_factory=dict)
     final: str | None = None
@@ -82,6 +83,7 @@ class FakeStore:
     async def advance(  # noqa: PLR0913
         self,
         lease: Lease,
+        tenant_id: UUID,
         to_state: str,
         *,
         cursor: Mapping[str, Any] | None,
@@ -91,6 +93,7 @@ class FakeStore:
     ) -> None:
         """Validate the transition like `tb_advance_tenant_deletion` and keep the events."""
         self.calls.append(("advance", (to_state, cursor, dict(counts), list(skipped))))
+        self.tenants.append(tenant_id)
         self._guard("advance")
         assert self.rec is not None
         assert to_state in {self.rec.state, NEXT_STATE[self.rec.state]}
@@ -113,9 +116,12 @@ class FakeStore:
         self.final = "done"
         self.events.extend(events)
 
-    async def fail(self, lease: Lease, reason: str, events: Sequence[AuditEvent]) -> None:
+    async def fail(
+        self, lease: Lease, tenant_id: UUID, reason: str, events: Sequence[AuditEvent]
+    ) -> None:
         """Write `failed` and keep the events."""
         self.calls.append(("fail", reason))
+        self.tenants.append(tenant_id)
         self._guard("fail")
         self.final = "failed"
         self.last_error = reason

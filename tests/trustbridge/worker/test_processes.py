@@ -225,3 +225,21 @@ def test_migrate_cli_rejects_unknown_commands_and_wraps_autogenerate(
     # webhook_deliveries (NG3), adapter_credentials and github_host_registrations (NG4)
     tables = Base.metadata.tables
     assert {"webhook_deliveries", "adapter_credentials", "github_host_registrations"} <= set(tables)
+
+
+async def test_the_reconciler_runs_the_deletion_driver_it_is_given(key_signers: None) -> None:
+    """`ProcessOverrides.deletion` reaches the reconciler's duty; the worker ignores it."""
+    runs: list[int] = []
+    stop = asyncio.Event()
+
+    class Driver:
+        async def run_once(self) -> bool:
+            runs.append(1)
+            stop.set()
+            return False
+
+    overrides = ProcessOverrides(
+        redis=as_redis(FakeRedis()), checker=FakeHostChecker(), stop=stop, deletion=Driver()
+    )
+    assert await runtime.run_process("reconciler", make_settings(), overrides) == 0
+    assert runs == [1]

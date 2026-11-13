@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
+from uuid import UUID
 
 from trustbridge.audit import AuditEvent
 from trustbridge.deletion.model import DeletionRecord, Lease
@@ -32,6 +33,7 @@ class DeletionStore(Protocol):
     async def advance(  # noqa: PLR0913 -- the transition's own data, keyword-only
         self,
         lease: Lease,
+        tenant_id: UUID,
         to_state: str,
         *,
         cursor: Mapping[str, Any] | None,
@@ -39,7 +41,11 @@ class DeletionStore(Protocol):
         skipped: Sequence[Mapping[str, Any]],
         events: Sequence[AuditEvent],
     ) -> None:
-        """Move one step along (or, with the same state, save the cursor) and write `events`."""
+        """Move one step along (or, with the same state, save the cursor) and write `events`.
+
+        `tenant_id` is the deletion's tenant: the transaction runs in its context, whatever
+        `events` holds (the insert policy admits the context tenant).
+        """
         ...
 
     async def finish(
@@ -54,6 +60,8 @@ class DeletionStore(Protocol):
         """Remove the `tenants` row (fenced), write `done` and `events`, in one transaction."""
         ...
 
-    async def fail(self, lease: Lease, reason: str, events: Sequence[AuditEvent]) -> None:
-        """Write the terminal `failed` state and `events`."""
+    async def fail(
+        self, lease: Lease, tenant_id: UUID, reason: str, events: Sequence[AuditEvent]
+    ) -> None:
+        """Write the terminal `failed` state and `events`, in the context of `tenant_id`."""
         ...

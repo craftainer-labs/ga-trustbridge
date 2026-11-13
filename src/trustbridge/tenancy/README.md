@@ -112,7 +112,9 @@ errors. `tb_set_tenant_disabled` needs no change (a deletion needs a disabled te
 refused while one is open, and a repeated disable keeps the first values). The downgrade restores the
 `9c2e5a7f1d84` body (NULL for a tombstone).
 
-`gate.py`'s `SqlTenantGate.standing(host, installation_id)` returns `TenantStanding` (`standing.py`, kept here so `tenancy` never imports the worker: tenant id,
+`gate.py`'s `SqlTenantGate.allows(tenant_id, kind)` (the adapter core's `OperationGate`) refuses every new adapter call for an
+admin-disabled tenant except `OperationKind.DELETE` while a non-terminal deletion of the tenant exists (`tb_get_tenant`'s
+`deleting`; ADR 0034 B10, NG6h-4a-3). `SqlTenantGate.standing(host, installation_id)` returns `TenantStanding` (`standing.py`, kept here so `tenancy` never imports the worker: tenant id,
 disable flag, and a `deleting` or `tombstone` refusal) from `tb_get_tenant` and `tenant_deletions` in
 one statement (`tb_get_tenant` is `STABLE`, so it reads the statement's snapshot and the three
 answers agree). The tombstone rule exists in three places (`tb_upsert_tenant`, `SqlTenants._standing`

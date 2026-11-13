@@ -94,6 +94,16 @@ retention deletes only through `tb_audit_purge`.
   contain rows past retention, which the next purge batch removes (and
   records as an `audit.purge` event).
 
+### Tenant deletion after a restore
+
+A tenant deletion that completed after the backup is undone by the restore:
+the tenant and its data are back. Replay those deletions before the worker
+and reconciler start, using the `tenant.deletion.completed` events from your
+SIEM export or your change log. The procedure, with cancelling and failing a
+stuck deletion, is in the
+[tenant deletion runbook](runbooks/tenant-deletion.md)
+([ADR 0034](adrs/0034-tenant-data-deletion.md)).
+
 ## Valkey: what is lost
 
 Valkey holds the work stream `tb:events` (delivery ids only), its consumer

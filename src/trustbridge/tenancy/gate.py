@@ -30,16 +30,22 @@ _STANDING = text(
     "FROM (SELECT 1) one LEFT JOIN LATERAL "
     "tb_get_tenant(tb_resolve_tenant(CAST(:host AS text), CAST(:installation AS bigint))) t ON true"
 )
-_DISABLED_BY_ID = text("SELECT admin_disabled_at IS NOT NULL FROM tb_get_tenant(CAST(:id AS uuid))")
+# `deleting` is true while a non-terminal `tenant_deletions` row of the tenant exists (the same
+# `tb_get_tenant` snapshot as the disable flag).
+_STATE_BY_ID = text(
+    "SELECT admin_disabled_at IS NOT NULL, deleting FROM tb_get_tenant(CAST(:id AS uuid))"
+)
 
 
 class SqlTenantGate:
     """`TenantGate` (and the adapter core's `OperationGate`) over the definer functions.
 
     One short read per call, in no tenant context (`tb_get_tenant` and `tb_resolve_tenant` are
-    the unscoped paths to `tenants`, ADR 0031). An unknown tenant is not disabled. Whether a
-    deletion's own delete and revoke operations pass a disabled tenant is NG6h's: it replaces
-    the `kind` test in `allows` (ADR 0033 "Tenant disable").
+    the unscoped paths to `tenants`, ADR 0031). An unknown tenant is not disabled. A disabled
+    tenant refuses every new adapter call except a `delete` operation (a credential's delete and
+    revoke, the only destructive kind) while a non-terminal deletion of the tenant exists: that
+    is the deletion's own platform step (ADR 0034 B10, ADR 0033 "Tenant disable"). A `done`,
+    `failed` or `cancelled` deletion no longer admits it.
     """
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -73,6 +79,14 @@ class SqlTenantGate:
         return TenantStanding(row[0], bool(row[1]), "deleting" if row[2] else None)
 
     async def allows(self, tenant_id: UUID, kind: OperationKind | None) -> bool:
-        """True when a new adapter operation of `kind` may start for the tenant."""
-        del kind  # NG6h: a deletion's own delete and revoke operations are the exception
-        return not await self._flag(_DISABLED_BY_ID, {"id": tenant_id})
+        """True when a new adapter operation of `kind` may start for the tenant.
+
+        An enabled (or unknown) tenant admits everything. A disabled one admits only
+        `OperationKind.DELETE`, and only while a non-terminal deletion of it exists.
+        """
+        with tenant_context(None):
+            async with self._sf() as session, session.begin():
+                row = (await session.execute(_STATE_BY_ID, {"id": tenant_id})).first()
+        if row is None or not row[0]:
+            return True
+        return kind is OperationKind.DELETE and bool(row[1])

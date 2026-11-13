@@ -1,4 +1,5 @@
-"""The reconciler process: relay ticks, re-relay sweep, delivery reconciliation, retention, purge.
+"""The reconciler process: relay ticks, re-relay sweep, delivery reconciliation, retention, purge,
+tenant deletion.
 
 GitHub never redelivers on its own (ADR 0028 item 4). The delivery reconciler lists failed
 hook deliveries per `ready` host with the App JWT endpoints (`GET /app/hook/deliveries`,
@@ -6,7 +7,8 @@ hook deliveries per `ready` host with the App JWT endpoints (`GET /app/hook/deli
 implements it) and redelivers only those whose `X-GitHub-Delivery` guid has **no stored
 row** (invariant 8); a stored row is durable and owned by the relay and the worker.
 
-Singleton duties (delivery reconciliation per host, DB retention, audit purge) run under a
+Singleton duties (delivery reconciliation per host, DB retention, audit purge, tenant deletion)
+run under a
 lease row so replicas do not duplicate them (EB-6); the relay tick, the re-relay sweep and
 stream trimming are idempotent and run on every replica.
 """
@@ -22,6 +24,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.audit.store import purge_expired
+from trustbridge.deletion.ports import DeletionDriver
 from trustbridge.github.availability import HostMonitor
 from trustbridge.settings import GitHubHostConfig, TrustbridgeSettings
 from trustbridge.worker import metrics
@@ -148,6 +151,7 @@ class ReconcilerDeps:
     clock: Clock = utcnow
     heartbeat: Heartbeat | None = None
     audit_sessions: async_sessionmaker[AsyncSession] | None = None  # None: mock mode, no purge
+    deletion: DeletionDriver | None = None  # None: no deletion engine composed, no duty
 
 
 class Reconciler:
@@ -256,6 +260,38 @@ class Reconciler:
         logger.info("audit purge", extra={"deleted_events": deleted})
         return deleted
 
+    async def tenant_deletion(self) -> int:
+        """Run tenant deletions through the `DeletionDriver` (singleton under a lease).
+
+        Claims at most `DELETION_BATCH_SIZE` deletions per poll and beats once per pass, so a
+        long run (bounded by the engine's own budget) never looks stalled. A failure of the
+        record store that escapes `run_once` is logged and ends this poll only: the loop stays
+        alive, the deletion's own lease lapses and the next poll claims it again (ADR 0034).
+        Returns the number of deletions run.
+        """
+        driver = self._d.deletion
+        if driver is None:
+            return 0
+        ran = 0
+        try:
+            async with self._d.leases.hold(NIL_TENANT, CORE_ADAPTER, "tenant-deletion"):
+                for _ in range(self._s.deletion_batch_size):
+                    self._beat("tenant-deletion")
+                    try:
+                        claimed = await driver.run_once()
+                    except Exception:
+                        logger.exception("tenant deletion pass failed")
+                        break
+                    if not claimed:
+                        break
+                    ran += 1
+        except LeaseBusy:
+            return 0
+        self._beat("tenant-deletion")
+        if ran:
+            logger.info("tenant deletion", extra={"deletions_run": ran})
+        return ran
+
     async def trim_streams(self) -> None:
         """Trim `tb:events` below what the group acknowledged, the dead letter by age, set lag."""
         await self._d.queue.trim_events()
@@ -275,12 +311,18 @@ class Reconciler:
             ("deliveries", s.delivery_reconcile_interval_seconds, self.reconcile_deliveries),
             ("retention", s.retention_interval_seconds, self.retention),
             ("audit-purge", s.audit_purge_interval_seconds, self.audit_purge),
+            ("tenant-deletion", s.deletion_poll_seconds, self.tenant_deletion),
             ("trim", s.stream_trim_interval_seconds, self.trim_streams),
         ]
         for name, interval, _job in schedule:
-            beat.register(name, stale_after(s, interval))
+            limit = stale_after(s, interval)
+            if name == "tenant-deletion":  # a pass runs up to its own lease budget between beats
+                limit = interval + max(s.lease_ttl_seconds, s.deletion_lease_ttl_seconds)
+            beat.register(name, limit)
         if self._d.audit_sessions is None:
             logger.info("audit purge disabled: no audit store")
+        if self._d.deletion is None:
+            logger.info("tenant deletion disabled: no deletion engine")
         await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop
         jobs = [periodic(name, interval, job, stop, beat.beat) for name, interval, job in schedule]
         await asyncio.gather(*jobs)

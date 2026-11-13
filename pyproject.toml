@@ -224,14 +224,16 @@ source_modules = [
     "trustbridge.rbac",
 ]
 forbidden_modules = ["trustbridge.deletion"]
+# `github` reaches the reconciler, which holds the `DeletionDriver` Protocol (the one sanctioned
+# import, checked by the next contract), so that indirect chain is not a violation.
+ignore_imports = ["trustbridge.worker.** -> trustbridge.deletion.ports"]
 
 [[tool.importlinter.contracts]]
 name = "the worker reaches deletion only through its ports Protocol"
 type = "forbidden"
 source_modules = ["trustbridge.worker"]
 forbidden_modules = ["trustbridge.deletion"]
-# Nothing imports the Protocol yet (the reconciler wiring is NG6h-4a-3).
-unmatched_ignore_imports_alerting = "none"
+# The reconciler imports the Protocol (NG6h-4a-3), so an ignore that matches no import is an alert.
 ignore_imports = ["trustbridge.worker.** -> trustbridge.deletion.ports"]
 
 [[tool.importlinter.contracts]]

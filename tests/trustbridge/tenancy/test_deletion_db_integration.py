@@ -29,6 +29,7 @@ from tests.trustbridge.tenancy.test_rls_integration import (
     _provision,
 )
 from trustbridge.adapters.interface import GitHubHost
+from trustbridge.adapters.store import OperationKind
 from trustbridge.github.ports import TenantDeletedError
 from trustbridge.tenancy.gate import SqlTenantGate
 from trustbridge.tenancy.standing import TenantStanding
@@ -661,6 +662,31 @@ async def test_the_gate_reports_the_standing_of_an_installation(db: Db) -> None:
     assert await gate.standing(again.host, again.installation) == TenantStanding(
         again.id, disabled=True
     )
+
+
+async def test_the_gate_admits_a_deletions_own_delete_only_while_it_is_non_terminal(
+    db: Db,
+) -> None:
+    """B10: DELETE passes a disabled tenant with an open deletion; nothing else, never after."""
+    gate = SqlTenantGate(db.app)
+    tenant = await _tenant(db)
+    for kind in (OperationKind.DELETE, OperationKind.ISSUE, None):  # disabled, no deletion
+        assert await gate.allows(tenant.id, kind) is False
+    deletion = (await _request(db, tenant)).deletion_id
+    for state in OPEN_STATES:
+        await _set_state(db, deletion, state)
+        assert await gate.allows(tenant.id, OperationKind.DELETE) is True
+        for refused in (OperationKind.ISSUE, OperationKind.ROTATE, OperationKind.SWITCH, None):
+            assert await gate.allows(tenant.id, refused) is False
+    for state in TERMINAL_STATES:
+        await _set_state(db, deletion, state)
+        assert await gate.allows(tenant.id, OperationKind.DELETE) is False
+    other = await _tenant(db)  # another tenant's deletion admits nothing here
+    assert await gate.allows(other.id, OperationKind.DELETE) is False
+    enabled = await _tenant(db, disabled=False)
+    for kind in (OperationKind.ISSUE, OperationKind.DELETE, None):
+        assert await gate.allows(enabled.id, kind) is True
+    assert await gate.allows(uuid4(), OperationKind.ISSUE) is True  # unknown: not disabled
 
 
 @pytest.fixture(scope="module")

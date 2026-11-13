@@ -1,8 +1,10 @@
 """The deletion engine over fakes: order, lease and fence, budget, failure policy, audit."""
 
+from typing import Any
+
 import pytest
 
-from tests.trustbridge.deletion.fakes import Clock, FakeStore, ScriptedStep, record
+from tests.trustbridge.deletion.fakes import TENANT, Clock, FakeStore, ScriptedStep, record
 from trustbridge.audit import Action, Outcome
 from trustbridge.deletion.engine import DeletionEngine, EngineConfig, EngineSteps
 from trustbridge.deletion.model import (
@@ -324,3 +326,53 @@ async def test_the_engine_satisfies_the_driver_protocol_the_reconciler_holds() -
     engine, _ = _engine(FakeStore(None))
     driver: DeletionDriver = engine
     assert await driver.run_once() is False
+
+
+async def test_every_write_carries_the_records_tenant() -> None:
+    """`advance` and `fail` get the tenant explicitly, with or without audit events."""
+    store = FakeStore(record(state="platform"))
+    engine, _ = _engine(
+        store,
+        platform=ScriptedStep(StepOutcome(cursor={"n": 1}, done=False), StepOutcome()),
+        github=ScriptedStep(NonRetryableError("bad")),
+    )
+    await engine.run_once()
+    assert store.names().count("advance") == 2  # a cursor save (no events), then platform > github
+    assert store.names()[-1] == "fail"
+    assert store.tenants == [TENANT] * 3
+
+
+@pytest.mark.parametrize(
+    ("state", "outcome"),
+    [
+        ("platform", StepOutcome(counts={"has space\n": 1})),
+        ("platform", StepOutcome(counts={"rows": -1}, cursor={"n": 1}, done=False)),
+        ("github", StepOutcome(skipped=[{"category": "x", "reason": "r", "count": float("nan")}])),
+        ("database", StepOutcome(counts={"rows": -3})),
+    ],
+)
+async def test_an_unauditable_step_output_ends_as_failed_not_a_retry_loop(
+    state: str, outcome: StepOutcome
+) -> None:
+    """A ValueError from the audit builders is a programming error: `failed`, with an alert."""
+    store = FakeStore(record(state=state))
+    slots: dict[str, Any] = {state: ScriptedStep(outcome)}
+    engine, _ = _engine(store, **slots)
+    assert await engine.run_once() is True
+    assert store.final == "failed"
+    assert store.last_error is not None
+    assert store.last_error.startswith("invalid_step_output")
+    assert "retry" not in store.names()
+    (event,) = store.events
+    assert event.action is Action.TENANT_DELETION_FAILED
+    assert event.after is not None
+    assert event.after["error_code"] == "invalid_step_output"
+
+
+async def test_a_value_error_raised_by_the_step_itself_stays_transient() -> None:
+    """Only the audit-building ValueError is non-retryable."""
+    store = FakeStore(record(state="platform"))
+    engine, _ = _engine(store, platform=ScriptedStep(ValueError("boom")))
+    await engine.run_once()
+    assert store.final is None
+    assert store.names()[-1] == "retry"

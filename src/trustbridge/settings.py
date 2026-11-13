@@ -60,6 +60,12 @@ DEFAULT_ADMIN_MAX_BODY_BYTES = 16384
 """The default of `ADMIN_MAX_BODY_BYTES`; `admin.runtime.DEFAULT_MAX_BODY_BYTES` is this value."""
 MIN_STATE_KEY_LENGTH = 32
 """The shortest `REGISTRATION_STATE_KEY` accepted."""
+MAX_DELETION_LEASE_TTL_SECONDS = 3600
+"""The longest `DELETION_LEASE_TTL_SECONDS` (the database functions' bound)."""
+MAX_DELETION_DELAY_SECONDS = 86400
+"""The longest `DELETION_BACKOFF_*` delay (the engine's bound)."""
+DELETION_LEASE_MARGIN = 0.5
+"""The share of the deletion lease TTL that the drain poll plus one step pass may use."""
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 """The hosts `public_base_url` may reach over plain http (local development only)."""
 
@@ -180,6 +186,25 @@ class TrustbridgeSettings(Settings):
     audit_purge_interval_seconds: float = Field(default=3600.0, gt=0)
     audit_purge_batch_size: int = Field(default=1000, ge=1, le=10000)
     audit_purge_max_batches: int = Field(default=100, ge=1, le=10000)
+
+    # Tenant deletion (ADR 0034, NG6h-4a-3). The reconciler's singleton duty polls every
+    # `deletion_poll_seconds` and runs at most `deletion_batch_size` claimed deletions per poll.
+    # The engine's own lease (`deletion_lease_ttl_seconds`, a fenced database lease per deletion)
+    # is separate from `lease_ttl_seconds`; a run ends after `deletion_budget_fraction` of it. A
+    # failed attempt backs off `min(cap, base * 2**attempts)`. The drain step re-scans the
+    # tenant's writers every `deletion_drain_poll_seconds`, at most `deletion_drain_max_passes`
+    # times. `deletion_step_pass_seconds` is the longest one step pass may take between two lease
+    # renewals (the steps size their batches to it); `_deletion_timing_problems` keeps the drain
+    # poll plus one pass inside half the lease TTL.
+    deletion_poll_seconds: float = Field(default=10.0, gt=0)
+    deletion_batch_size: int = Field(default=10, ge=1, le=1000)
+    deletion_lease_ttl_seconds: int = Field(default=120, ge=1, le=MAX_DELETION_LEASE_TTL_SECONDS)
+    deletion_budget_fraction: float = Field(default=0.5, gt=0, lt=1)
+    deletion_backoff_base_seconds: int = Field(default=30, ge=0, le=MAX_DELETION_DELAY_SECONDS)
+    deletion_backoff_cap_seconds: int = Field(default=3600, ge=0, le=MAX_DELETION_DELAY_SECONDS)
+    deletion_drain_max_passes: int = Field(default=30, ge=2, le=10000)
+    deletion_drain_poll_seconds: float = Field(default=2.0, ge=0)
+    deletion_step_pass_seconds: float = Field(default=30.0, gt=0)
 
     # Adapters the api process loads for the admin API's capability summaries (ADR 0029: an
     # adapter not listed is never imported). Entry-point names, for example `ghcr,jfrog`.
@@ -340,11 +365,34 @@ class TrustbridgeSettings(Settings):
             problems.append("RETRY_BACKOFF_MAX_SECONDS must be >= RETRY_BACKOFF_BASE_SECONDS")
         if 0 < self.audit_retention_days < self.audit_retention_min_days:
             problems.append("AUDIT_RETENTION_DAYS must be 0 or >= AUDIT_RETENTION_MIN_DAYS")
+        timing = self._deletion_timing_problems()
+        if self.deletion_backoff_base_seconds > self.deletion_backoff_cap_seconds:
+            problems.append("DELETION_BACKOFF_BASE_SECONDS must be <= DELETION_BACKOFF_CAP_SECONDS")
+        if self.production:
+            problems.extend(timing)  # a lease that can lapse mid-step: fail closed
+        else:
+            warnings.extend(timing)
         if problems:
             raise ValueError("; ".join(problems))
         for warning in warnings:
             logger.warning(warning)
         return self
+
+    def _deletion_timing_problems(self) -> list[str]:
+        """Whether the drain poll plus one step pass fit inside the deletion lease TTL.
+
+        The engine renews its lease before each pass, so the longest gap between two renewals is
+        the drain poll plus one pass. It must stay within `DELETION_LEASE_MARGIN` of the TTL, or
+        the lease can lapse under a running step and a second holder starts the same step.
+        """
+        gap = self.deletion_drain_poll_seconds + self.deletion_step_pass_seconds
+        limit = self.deletion_lease_ttl_seconds * DELETION_LEASE_MARGIN
+        if gap <= limit:
+            return []
+        return [
+            f"DELETION_DRAIN_POLL_SECONDS + DELETION_STEP_PASS_SECONDS ({gap:g} s) must be at "
+            f"most half of DELETION_LEASE_TTL_SECONDS ({limit:g} s)"
+        ]
 
     def _production_problems(self) -> list[str]:
         """Production-only refusals (ADR 0028 invariants 17 and 26)."""

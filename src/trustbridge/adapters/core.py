@@ -136,8 +136,9 @@ class TenantDisabledError(Exception):
 class OperationGate(Protocol):
     """Decides whether a new adapter call may start for a tenant (admin disable, ADR 0033).
 
-    `kind` is the operation about to start (`None` for a refresh or an orphan sweep). NG6h's
-    deletion passes its own delete and revoke operations through a disabled tenant here.
+    `kind` is the operation about to start (`None` for a refresh or an orphan sweep). While a
+    non-terminal tenant deletion exists, the gate admits `OperationKind.DELETE` (the deletion's
+    own delete and revoke operations, ADR 0034) through a disabled tenant; nothing else.
     """
 
     async def allows(self, tenant_id: UUID, kind: OperationKind | None) -> bool:
