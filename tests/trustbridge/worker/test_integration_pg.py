@@ -27,6 +27,7 @@ from alembic import command
 from app.db import engine, session_factory
 from tests.trustbridge.helpers import make_settings
 from trustbridge.adapters.interface import GitHubHost
+from trustbridge.github.ports import TenantDeletedError
 from trustbridge.worker import migrate
 from trustbridge.worker.deliveries import (
     DeliveryKey,
@@ -50,7 +51,7 @@ from trustbridge.worker.models import (
     TenantRepository,
     WebhookDelivery,
 )
-from trustbridge.worker.ports import SqlTenants, TenantDeletedError, UnknownTenantError
+from trustbridge.worker.ports import SqlTenants, UnknownTenantError
 from trustbridge.worker.schema import REQUIRED_SCHEMA_VERSION, SchemaGate
 
 pytestmark = pytest.mark.integration
@@ -467,7 +468,8 @@ async def test_the_installation_sync_never_changes_the_admin_disable_columns() -
             )
         await tenants.upsert_installation(host, 5150, "acme-renamed", 9, suspended=True)
         await tenants.set_installation_state(host, 5150, "deleted")
-        await tenants.upsert_installation(host, 5150, "acme-again", 9)
+        with pytest.raises(TenantDeletedError):
+            await tenants.upsert_installation(host, 5150, "acme-again", 9)
         async with session_factory() as session:
             row = await session.get(Tenant, tenant_id)
         assert row is not None
@@ -500,8 +502,11 @@ async def test_a_done_deletion_tombstones_only_its_own_installation_key() -> Non
     # the record is a compliance record (no DELETE grant), so the unique host stays behind
     await record("failed")
     await record("cancelled")
-    await record("database")
     assert await tenants.upsert_installation(host, 77, "acme-2", 9) == tenant_id
+    await record("database")  # a deletion in progress: the tenant is refused, not tombstoned
+    with pytest.raises(TenantDeletedError) as deleting:
+        await tenants.upsert_installation(host, 77, "acme-2", 9)
+    assert deleting.value.reason == "deleting"
     async with session_factory() as session, session.begin():
         await session.execute(
             text(
@@ -510,13 +515,33 @@ async def test_a_done_deletion_tombstones_only_its_own_installation_key() -> Non
             {"h": host},
         )
         await session.execute(delete(Tenant).where(Tenant.host == host))
-    with pytest.raises(TenantDeletedError):
+    with pytest.raises(TenantDeletedError) as tombstone:
         await tenants.upsert_installation(host, 77, "acme-3", 9)
+    assert tombstone.value.reason == "tombstone"
     assert await tenants.tenant_id_for(host, 77) is None
     other = await tenants.upsert_installation(host, 78, "acme", 9)
     assert other != tenant_id
     async with session_factory() as session, session.begin():
         await session.execute(delete(Tenant).where(Tenant.host == host))
+
+
+async def test_the_upsert_waits_for_the_installation_advisory_lock() -> None:
+    """SqlTenants takes the same key as the tb_* functions: a held lock blocks it until commit."""
+    tenants = SqlTenants(session_factory, _github_host)
+    host = f"it-{uuid.uuid4().hex[:8]}"
+    try:
+        async with session_factory() as holder, holder.begin():
+            await holder.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+                {"k": f"tb_tenant:{host}:91"},
+            )
+            waiting = asyncio.create_task(tenants.upsert_installation(host, 91, "acme", 9))
+            await asyncio.sleep(0.5)
+            assert not waiting.done()
+        assert await waiting is not None
+    finally:
+        async with session_factory() as session, session.begin():
+            await session.execute(delete(Tenant).where(Tenant.host == host))
 
 
 async def test_repository_changes_are_applied_renamed_and_removed() -> None:

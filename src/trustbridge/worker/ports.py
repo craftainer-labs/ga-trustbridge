@@ -25,11 +25,12 @@ from uuid import UUID, uuid4
 
 from pydantic import SecretStr
 from redis.asyncio import Redis
-from sqlalchemy import and_, case, delete, or_, select, update
+from sqlalchemy import and_, case, delete, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters.interface import AdapterConfig, GitHubHost, IssuedSecret, Tenant
+from trustbridge.github.ports import TenantDeletedError
 from trustbridge.worker.models import Tenant as TenantRow
 from trustbridge.worker.models import TenantDeletion, TenantRepository
 from trustbridge.worker.secrets import SecretNotFound, SecretUnavailable
@@ -42,18 +43,6 @@ HostLookup = Callable[[str], GitHubHost]
 
 class UnknownTenantError(LookupError):
     """No tenant has this id."""
-
-
-class TenantDeletedError(Exception):
-    """The installation's tenant was deleted (ADR 0034): nothing is created or revived for it.
-
-    Carries the host and installation id only, never the organisation login.
-    """
-
-    def __init__(self, host: str, installation_id: int) -> None:
-        """Name the tombstoned key."""
-        super().__init__(f"installation {installation_id} on {host} was deleted")
-        self.host, self.installation_id = host, installation_id
 
 
 class WritableSecrets(Protocol):
@@ -91,10 +80,13 @@ class SqlTenants:
     ) -> UUID:
         """Create or update the tenant of `(host, installation_id)` as `suspended` or `active`.
 
-        A tenant whose state is `deleted` is returned unchanged, as `tb_upsert_tenant` does: a
-        late or replayed event cannot revive it (ADR 0034). A `done` deletion of the key (or a
-        `database`-step one whose tenant row is gone) is a tombstone: nothing is created and
-        `TenantDeletedError` is raised.
+        `TenantDeletedError` is raised, and nothing changes, for a tenant whose state is `deleted`
+        (`reason` "deleted"), one with a non-terminal deletion ("deleting"), and a key with a
+        `done` deletion (or a `database`-step one whose tenant row is gone), a tombstone
+        ("tombstone"): a late or replayed event cannot revive or recreate it (ADR 0034). The
+        checks run under the same per-installation advisory lock as `tb_upsert_tenant` and
+        `tb_delete_tenant` (`tb_tenant:<host>:<installation_id>`, hashed with
+        `hashtextextended`), so a concurrent delete cannot slip between check and insert.
         """
         state = "suspended" if suspended else "active"
         insert = pg_insert(TenantRow).values(
@@ -124,9 +116,28 @@ class SqlTenants:
                 ),
             ),
         )
+        existing = select(
+            TenantRow.state,
+            select(TenantDeletion.id)
+            .where(
+                TenantDeletion.tenant_id == TenantRow.id,
+                TenantDeletion.state.not_in(("done", "failed", "cancelled")),
+            )
+            .exists()
+            .label("deleting"),
+        ).where(TenantRow.host == host, TenantRow.installation_id == installation_id)
         async with self._sf() as session, session.begin():
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"tb_tenant:{host}:{installation_id}"},
+            )
             if (await session.execute(tombstone.limit(1))).first() is not None:
-                raise TenantDeletedError(host, installation_id)
+                raise TenantDeletedError(host, installation_id, "tombstone")
+            current = (await session.execute(existing)).first()
+            if current is not None and current.deleting:
+                raise TenantDeletedError(host, installation_id, "deleting")
+            if current is not None and current.state == "deleted":
+                raise TenantDeletedError(host, installation_id, "deleted")
             tenant_id: UUID = (await session.execute(upsert)).scalar_one()
         return tenant_id
 
@@ -217,20 +228,25 @@ class MemoryTenants:
         self._rows: dict[UUID, dict[str, Any]] = {}
         self.repositories: dict[UUID, dict[int, str]] = {}
         self.tombstones: set[tuple[str, int]] = set()  # keys whose deletion is `done`
+        self.deleting: set[tuple[str, int]] = set()  # keys with a non-terminal deletion
 
     async def upsert_installation(
         self, host: str, installation_id: int, org: str, org_id: int, *, suspended: bool = False
     ) -> UUID:
         """Create or update the tenant as `suspended` or `active`.
 
-        Mirrors `SqlTenants`: a `deleted` tenant is unchanged, and a tombstoned key raises
+        Mirrors `SqlTenants`: a tombstoned key, a key being deleted and a `deleted` tenant raise
         `TenantDeletedError`.
         """
-        if (host, installation_id) in self.tombstones:
-            raise TenantDeletedError(host, installation_id)
-        tenant_id = self._by_key.setdefault((host, installation_id), uuid4())
-        if self._rows.get(tenant_id, {}).get("state") == "deleted":
-            return tenant_id  # a deleted installation is never revived
+        key = (host, installation_id)
+        if key in self.tombstones:
+            raise TenantDeletedError(host, installation_id, "tombstone")
+        if key in self.deleting:
+            raise TenantDeletedError(host, installation_id, "deleting")
+        known = self._by_key.get(key)
+        if known is not None and self._rows[known].get("state") == "deleted":
+            raise TenantDeletedError(host, installation_id, "deleted")
+        tenant_id = self._by_key.setdefault(key, uuid4())
         self._rows[tenant_id] = {
             "host": host,
             "installation_id": installation_id,

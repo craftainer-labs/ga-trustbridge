@@ -11,8 +11,10 @@ function body replaced under the same signature and return type.
 * ``tenant_deletions``: the write-ahead record of a deletion. Host-scoped, outside RLS, no foreign
   key to ``tenants`` (it outlives the tenant row). States ``requested``, ``draining``, ``platform``,
   ``github``, ``database``, ``done``, ``failed``, ``cancelled``; the last three are terminal. A
-  partial unique index allows one non-terminal row per tenant. The app role gets ``SELECT``,
-  ``INSERT`` and ``UPDATE`` and no ``DELETE``: the record is kept as a compliance record.
+  partial unique index allows one non-terminal row per tenant. The app role gets ``SELECT`` only:
+  every write goes through a ``SECURITY DEFINER`` function (``tb_request_tenant_deletion`` here,
+  the engine's transitions in NG6h-4a), which runs as the owner role, so the record cannot be
+  inserted, rewritten or deleted by the application directly (it is kept as a compliance record).
   ``delete_platform_resources`` stores the request flag (ADR 0034 user decision 1). The record
   holds ids, counts and what was skipped, never the organisation login.
 * ``webhook_deliveries.tenant_id`` (nullable uuid, no default: catalog only) with a partial index
@@ -32,17 +34,22 @@ function body replaced under the same signature and return type.
   ``database`` step whose tenant row is already gone) is a tombstone: the function then returns
   ``NULL`` and creates nothing (an open, ``failed`` or ``cancelled`` deletion is not a tombstone,
   and another installation id of the host is unaffected). The lookup uses a partial index on
-  ``state = 'done'``.
+  ``state = 'done'``. The function and ``tb_delete_tenant`` first take a transaction-level
+  advisory lock on the installation (see ``_lock``), so a concurrent delete and upsert are
+  serialised and a deleted tenant cannot be recreated by an upsert that checked just before the
+  delete committed.
 * ``tb_request_tenant_deletion(...)``: a ``SECURITY DEFINER`` function that, under the tenant row
   lock, returns the open deletion, or checks that the tenant is admin-disabled and that the typed
   confirmation (host, installation id, organisation login) matches, and writes the record. The
   confirmation is compared (case-insensitively, as GitHub logins are) and never stored. The
   optional ``p_not_before`` (default ``NULL``, no delay) is stored in the nullable
-  ``not_before`` column for the engine to honour as a grace window.
+  ``not_before`` column as a grace window. The confirmation is validated before the open deletion
+  is returned, so a replay needs the right echo too.
 * ``tb_delete_tenant(uuid)``: removes the ``tenants`` row as the last step of a deletion. Under the
   row lock it refuses unless the tenant is admin-disabled, has a deletion in its ``database`` step
-  and has no rows left in the five other tenant-owned tables; it checks again after the delete, so
-  a row that committed in between rolls the delete back. The tables have no foreign key, so a
+  (non-terminal, so running) whose ``not_before`` has passed, and has no rows left in the five
+  other tenant-owned tables; it checks again after the delete, so a row that committed in
+  between rolls the delete back. The tables have no foreign key, so a
   writer is not blocked by the lock: the engine must stop writing for a deleting tenant first.
   It does not touch ``audit_events``, ``tenant_deletions`` or ``webhook_deliveries``.
 
@@ -77,6 +84,22 @@ CHANGED_FUNCTIONS = (
     "tb_upsert_tenant(text, bigint, text, bigint, text)",
 )
 OPEN = "NOT IN ('done', 'failed', 'cancelled')"
+
+
+def _lock(host: str, installation_id: str) -> str:
+    """PL/pgSQL taking the per-installation advisory lock.
+
+    The key is ``hashtextextended('tb_tenant:' || host || ':' || installation_id, 0)``, a stable
+    64-bit hash of the installation's identity (the host name may contain ``:``, but the last
+    segment is always the numeric id, so two installations never share the string). The
+    application's ``SqlTenants.upsert_installation`` builds the same string. The lock is held to
+    the end of the transaction.
+    """
+    return (
+        "PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended("
+        f"'tb_tenant:' || {host} || ':' || {installation_id}::text, 0));"
+    )
+
 
 _TABLE = """
 CREATE TABLE tenant_deletions (
@@ -207,7 +230,7 @@ END
 $$
 """  # noqa: S608 -- constants only
 
-_UPSERT_FN = """
+_UPSERT_FN = f"""
 CREATE OR REPLACE FUNCTION tb_upsert_tenant(
     p_host text, p_installation_id bigint, p_org text, p_org_id bigint, p_state text
 ) RETURNS uuid
@@ -220,6 +243,8 @@ BEGIN
     IF p_state NOT IN ('active', 'suspended', 'deleted') THEN
         RAISE EXCEPTION 'invalid tenant state' USING ERRCODE = '22023';
     END IF;
+    -- Serialise with tb_delete_tenant before any check (see the module docstring).
+    {_lock("p_host", "p_installation_id")}
     -- Tombstone: once a deletion of this installation is `done` (or is in its `database` step and
     -- tb_delete_tenant has already removed the row), no tenant is created or revived for it.
     -- NULL is returned (a distinct outcome: the other paths always return an id).
@@ -246,7 +271,7 @@ BEGIN
     RETURN v_id;
 END
 $$
-"""
+"""  # noqa: S608 -- constants only
 
 _REQUEST_FN = f"""
 CREATE FUNCTION tb_request_tenant_deletion(
@@ -276,13 +301,6 @@ BEGIN
                             NULL::boolean;
         RETURN;
     END IF;
-    SELECT * INTO v_open FROM public.tenant_deletions d
-     WHERE d.tenant_id = p_tenant AND d.state {OPEN};
-    IF FOUND THEN
-        RETURN QUERY SELECT 'existing'::text, v_open.id, v_open.state, v_open.requested_at,
-                            v_open.delete_platform_resources;
-        RETURN;
-    END IF;
     IF v_row.admin_disabled_at IS NULL THEN
         RETURN QUERY SELECT 'not_disabled'::text, NULL::uuid, NULL::text, NULL::timestamptz,
                             NULL::boolean;
@@ -293,6 +311,13 @@ BEGIN
        OR lower(v_row.org) IS DISTINCT FROM lower(p_org) THEN
         RETURN QUERY SELECT 'confirmation_mismatch'::text, NULL::uuid, NULL::text,
                             NULL::timestamptz, NULL::boolean;
+        RETURN;
+    END IF;
+    SELECT * INTO v_open FROM public.tenant_deletions d
+     WHERE d.tenant_id = p_tenant AND d.state {OPEN};
+    IF FOUND THEN
+        RETURN QUERY SELECT 'existing'::text, v_open.id, v_open.state, v_open.requested_at,
+                            v_open.delete_platform_resources;
         RETURN;
     END IF;
     INSERT INTO public.tenant_deletions (
@@ -329,19 +354,35 @@ SET search_path = pg_catalog, public
 AS $$
 DECLARE
     v_row public.tenants%ROWTYPE;
+    v_host text;
+    v_inst bigint;
+    v_not_before timestamptz;
     v_left text;
 BEGIN
-    SELECT * INTO v_row FROM public.tenants WHERE id = p_id FOR UPDATE;
+    -- The advisory lock comes first (it is keyed on the installation, read without a lock), then
+    -- the row lock: tb_upsert_tenant takes the advisory lock and then touches the row, so no
+    -- order can deadlock.
+    SELECT t.host, t.installation_id INTO v_host, v_inst FROM public.tenants t WHERE t.id = p_id;
     IF NOT FOUND THEN
         RETURN;  -- already gone: a resumed database step is a no-op
+    END IF;
+    {_lock("v_host", "v_inst")}
+    SELECT * INTO v_row FROM public.tenants WHERE id = p_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN;  -- deleted while this call waited for the lock
     END IF;
     IF v_row.admin_disabled_at IS NULL THEN
         RAISE EXCEPTION 'tenant is not admin-disabled' USING ERRCODE = '55000';
     END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM public.tenant_deletions d WHERE d.tenant_id = p_id AND d.state = 'database'
-    ) THEN
+    -- `database` is a non-terminal (running) state. NG6h-4a adds the holder and fence arguments
+    -- and checks them here (the columns exist, but nothing passes them yet).
+    SELECT d.not_before INTO v_not_before FROM public.tenant_deletions d
+     WHERE d.tenant_id = p_id AND d.state = 'database';
+    IF NOT FOUND THEN
         RAISE EXCEPTION 'tenant has no deletion in its database step' USING ERRCODE = '55000';
+    END IF;
+    IF v_not_before IS NOT NULL AND v_not_before > now() THEN
+        RAISE EXCEPTION 'the deletion grace window has not elapsed' USING ERRCODE = '55000';
     END IF;
     {_REMAINING} INTO v_left;
     IF v_left <> '' THEN
@@ -363,15 +404,26 @@ _OLD_ROW = (
     "t.id, t.host::text, t.installation_id, t.org::text, t.org_id, t.state::text, "
     "t.admin_disabled_at, false, t.admin_disabled_by, t.admin_disable_reason"
 )
-_OLD_LIST_FN = _LIST_FN.replace(_ROW, _OLD_ROW)
-_OLD_GET_FN = _GET_FN.replace(_ROW, _OLD_ROW)
-_OLD_SET_FN = _SET_FN.replace(
-    f"""    SELECT EXISTS (
+
+
+def _replaced(body: str, old: str, new: str) -> str:
+    """`body` with `old` replaced by `new`; a no-match is an error, never a silent no-op."""
+    if old not in body:
+        raise ValueError(f"expected text not found in the function body: {old[:60]!r}")
+    return body.replace(old, new)
+
+
+_OLD_LIST_FN = _replaced(_LIST_FN, _ROW, _OLD_ROW)
+_OLD_GET_FN = _replaced(_GET_FN, _ROW, _OLD_ROW)
+_OLD_SET_FN = _replaced(
+    _replaced(
+        _SET_FN,
+        f"""    SELECT EXISTS (
         SELECT 1 FROM public.tenant_deletions d WHERE d.tenant_id = p_id AND d.state {OPEN}
     ) INTO v_deleting;
 """,  # noqa: S608 -- constants only
-    "",
-).replace(
+        "",
+    ),
     "    v_deleting boolean;\n",
     "    v_deleting boolean := false;  -- NG6h: a non-terminal deletion exists\n",
 )
@@ -493,8 +545,11 @@ def upgrade() -> None:
         "CREATE INDEX ix_tenant_deletions_done_key ON tenant_deletions (host, installation_id) "
         "WHERE state = 'done'"
     )
-    for role in (APP_ROLE, OWNER_ROLE):
-        op.execute(_if_role(role, f"GRANT SELECT, INSERT, UPDATE ON tenant_deletions TO {role};"))
+    # The app role only reads; the writes are the definer functions' (they run as the owner role).
+    op.execute(_if_role(APP_ROLE, f"GRANT SELECT ON tenant_deletions TO {APP_ROLE};"))
+    op.execute(
+        _if_role(OWNER_ROLE, f"GRANT SELECT, INSERT, UPDATE ON tenant_deletions TO {OWNER_ROLE};")
+    )
 
     # Same signatures and row types: only the bodies change. Created functions come next.
     for statement in (_LIST_FN, _GET_FN, _SET_FN, _UPSERT_FN, _REQUEST_FN, _DELETE_FN):
@@ -521,13 +576,20 @@ def downgrade() -> None:
         "RAISE EXCEPTION 'cannot downgrade: tenant_deletions has rows; keep the compliance "
         "record' USING ERRCODE = '55000'; END IF; END $$"
     )
+    # A `deleted` delivery cannot be represented by the previous status CHECK: refuse before
+    # anything is dropped, so a refusal leaves the schema as it was.
+    op.execute(
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM webhook_deliveries WHERE status = 'deleted') THEN "
+        "RAISE EXCEPTION 'cannot downgrade: webhook_deliveries has rows with status deleted' "
+        "USING ERRCODE = '55000'; END IF; END $$"
+    )
     for signature in reversed(NEW_FUNCTIONS):
         op.execute(f"DROP FUNCTION IF EXISTS {signature}")
     for statement in (_OLD_LIST_FN, _OLD_GET_FN, _OLD_SET_FN, _OLD_UPSERT_FN):
         op.execute(statement)
     _grant_functions(CHANGED_FUNCTIONS)
     op.execute("-- squawk-ignore ban-drop-table\nDROP TABLE IF EXISTS tenant_deletions")
-    # No row can be `deleted` (only a deletion writes that status, and no deletion record exists).
+    # No row is `deleted` (checked above), so the validation cannot fail.
     op.execute(
         f"DO $$ BEGIN IF NOT {_has_constraint('ck_wd_status_v1')} THEN "
         "ALTER TABLE webhook_deliveries ADD CONSTRAINT ck_wd_status_v1 "

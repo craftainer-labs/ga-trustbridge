@@ -18,7 +18,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from trustbridge.github.installations import InstallationInfo
-from trustbridge.github.ports import InstallationStore, ReconcileScheduler
+from trustbridge.github.ports import InstallationStore, ReconcileScheduler, TenantDeletedError
 
 _MAX_SENDER_ID = 2**63 - 1
 
@@ -141,13 +141,23 @@ class InstallationHandlers:
             if gone is not None:
                 await self._record(ctx, gone, "deleted")
             return
-        tenant_id = await self._store.upsert_installation(
-            ctx.host,
-            installation_id,
-            info.login or login,
-            info.account_id or acct,
-            suspended=info.suspended,
-        )
+        try:
+            tenant_id = await self._store.upsert_installation(
+                ctx.host,
+                installation_id,
+                info.login or login,
+                info.account_id or acct,
+                suspended=info.suspended,
+            )
+        except TenantDeletedError as refused:
+            # Deleted, being deleted or tombstoned (ADR 0034): acknowledge the event, no retry.
+            _log.info(
+                "dropping installation event for %s installation %s (%s)",
+                ctx.host,
+                installation_id,
+                refused.reason,
+            )
+            return
         if ctx.action == "created":
             await self._store.apply_repository_changes(
                 tenant_id, self._repos(ctx.payload.get("repositories")), []

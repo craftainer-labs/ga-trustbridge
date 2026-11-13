@@ -10,13 +10,13 @@ from pydantic import SecretStr
 from tests.trustbridge.fakes import FakeRedis
 from tests.trustbridge.helpers import as_redis, host
 from trustbridge.adapters.interface import IssuedSecret, Tenant
+from trustbridge.github.ports import TenantDeletedError
 from trustbridge.worker.ports import (
     PRIVILEGED_KEY,
     ConnectionData,
     MemoryTenants,
     ParkedValues,
     ReconcileRequests,
-    TenantDeletedError,
     UnknownTenantError,
 )
 from trustbridge.worker.secrets import MemorySecrets, SecretUnavailable
@@ -41,12 +41,14 @@ async def test_installation_lifecycle_in_memory() -> None:
     assert await tenants.set_installation_state("github.com", 8, "suspended") is None
 
 
-async def test_a_deleted_installation_is_not_revived_by_an_upsert_in_memory() -> None:
-    """A deleted installation keeps its id, state and org when a later event upserts it."""
+async def test_a_deleted_installation_is_refused_by_an_upsert_in_memory() -> None:
+    """A deleted installation keeps its id, state and org; the upsert raises instead."""
     tenants = _tenants()
     tenant_id = await tenants.upsert_installation("github.com", 7, "acme", 1)
     await tenants.set_installation_state("github.com", 7, "deleted")
-    assert await tenants.upsert_installation("github.com", 7, "acme2", 2) == tenant_id
+    with pytest.raises(TenantDeletedError) as refused:
+        await tenants.upsert_installation("github.com", 7, "acme2", 2)
+    assert refused.value.reason == "deleted"
     tenant = await tenants.get_tenant(tenant_id)
     assert tenant.org == "acme"
     assert tenants._rows[tenant_id]["state"] == "deleted"
@@ -59,9 +61,23 @@ async def test_a_tombstoned_installation_is_refused_and_others_are_not_in_memory
     with pytest.raises(TenantDeletedError) as refused:
         await tenants.upsert_installation("github.com", 7, "acme", 1)
     assert (refused.value.host, refused.value.installation_id) == ("github.com", 7)
+    assert refused.value.reason == "tombstone"
     assert await tenants.tenant_id_for("github.com", 7) is None
     assert await tenants.upsert_installation("github.com", 8, "acme", 1) is not None
     assert await tenants.upsert_installation("other.host", 7, "acme", 1) is not None
+
+
+async def test_an_installation_being_deleted_is_refused_and_others_are_not_in_memory() -> None:
+    """A non-terminal deletion refuses the upsert and changes nothing; other keys are unaffected."""
+    tenants = _tenants()
+    tenant_id = await tenants.upsert_installation("github.com", 7, "acme", 1)
+    tenants.deleting.add(("github.com", 7))
+    with pytest.raises(TenantDeletedError) as refused:
+        await tenants.upsert_installation("github.com", 7, "acme2", 2, suspended=True)
+    assert refused.value.reason == "deleting"
+    assert (await tenants.get_tenant(tenant_id)).org == "acme"
+    assert tenants._rows[tenant_id]["state"] == "active"
+    assert await tenants.upsert_installation("github.com", 8, "acme", 1) is not None
 
 
 async def test_repository_changes_are_applied_renamed_and_removed_in_memory() -> None:

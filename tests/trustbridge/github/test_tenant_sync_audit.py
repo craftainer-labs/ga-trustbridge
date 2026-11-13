@@ -98,6 +98,30 @@ async def test_a_known_installation_that_is_gone_records_deleted() -> None:
     ]
 
 
+@pytest.mark.parametrize("reason", ["tombstone", "deleting", "deleted"])
+async def test_an_event_for_a_deleted_installation_is_dropped_without_a_retry(
+    reason: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The store refuses it: no error, no audit event, no repository change, an info log."""
+    tenants, audit, _lookup, handlers = _setup()
+    await handlers.on_installation(_ctx("created"))
+    audit.calls.clear()
+    if reason == "deleted":
+        await tenants.set_installation_state("github.com", 4242, "deleted")
+    else:
+        getattr(tenants, "tombstones" if reason == "tombstone" else "deleting").add(
+            ("github.com", 4242)
+        )
+    caplog.set_level("INFO")
+    repos: Sequence[dict[str, object]] = [{"id": 11, "full_name": "acme/api"}]
+    await handlers.on_installation(_ctx("created", {"repositories": repos}))
+    assert audit.calls == []
+    tenant = await tenants.tenant_id_for("github.com", 4242)
+    assert tenant is not None
+    assert 11 not in tenants.repositories.get(tenant, {})
+    assert f"github.com installation 4242 ({reason})" in caplog.text
+
+
 async def test_a_gone_installation_we_never_knew_changes_nothing_and_records_nothing() -> None:
     """No tenant row was touched, so there is nothing to record."""
     _tenants, audit, lookup, handlers = _setup()

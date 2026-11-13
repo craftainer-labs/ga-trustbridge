@@ -229,8 +229,11 @@ adapter fakes.
 - **Re-creation (decided, NG6h-1).** A `done` row in `tenant_deletions` for `(host, installation_id)`
   (or a `database`-step row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` returns NULL and creates nothing, and `SqlTenants` and
   `MemoryTenants` raise `TenantDeletedError`. A reinstall gets a new installation id and is not
-  blocked; an open, failed or cancelled deletion is not a tombstone. The worker's ack-and-drop
-  handling of the refusal is NG6h-2.
+  blocked; an open, failed or cancelled deletion is not a tombstone. The ports also refuse a
+  `deleted` tenant and one with a non-terminal deletion, and the installation handler drops the
+  event (NG6h-1). `tb_upsert_tenant`, `tb_delete_tenant` and `SqlTenants.upsert_installation`
+  take one per-installation advisory lock first, so a concurrent delete and upsert cannot recreate
+  the tenant.
 - **Grace window (decided, NG6h-1).** `tenant_deletions.not_before` (nullable, default NULL: no
   delay) is stored from the optional `tb_request_tenant_deletion` argument; the engine honours it.
 - **Export before delete.** EB-15 lists "data export and deletion". A per-tenant data export is

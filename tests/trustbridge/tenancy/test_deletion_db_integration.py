@@ -184,6 +184,16 @@ async def test_a_request_writes_the_record_without_the_login_and_repeats_return_
     assert (second.outcome, second.deletion_id == created.deletion_id) == ("created", False)
 
 
+async def test_a_replay_needs_the_confirmation_too(db: Db) -> None:
+    """The open record is returned only to a caller that echoes the tenant correctly."""
+    tenant = await _tenant(db)
+    created = await _request(db, tenant)
+    for wrong in ({"org": "other-org"}, {"host": "other.host"}, {"inst": tenant.installation + 1}):
+        row = (await _app_rows(db, REQUEST, {**tenant.request(), **wrong}))[0]
+        assert (row.outcome, row.deletion_id) == ("confirmation_mismatch", None)
+    assert (await _request(db, tenant)).deletion_id == created.deletion_id
+
+
 async def test_the_grace_window_is_stored_and_defaults_to_no_delay(db: Db) -> None:
     """`not_before` round-trips through the request function; omitted, it is NULL."""
     stored = "SELECT not_before FROM tenant_deletions WHERE id = :d"
@@ -314,17 +324,28 @@ async def test_at_most_one_open_deletion_per_tenant_and_states_are_checked(db: D
         await _admin(db, insert, {"t": uuid4(), "s": "bogus"})
 
 
-async def test_the_app_role_can_read_and_update_but_not_delete_deletion_records(db: Db) -> None:
-    """SELECT, INSERT and UPDATE are granted; DELETE is not (a compliance record)."""
+async def test_the_app_role_can_only_read_deletion_records(db: Db) -> None:
+    """SELECT is granted; every write goes through a definer function (a compliance record)."""
     tenant = await _tenant(db)
-    deletion = (await _request(db, tenant)).deletion_id
-    await _app_rows(
-        db,
-        "UPDATE tenant_deletions SET updated_at = now() WHERE id = :d RETURNING 1",
-        {"d": deletion},
+    deletion = (await _request(db, tenant)).deletion_id  # the definer function may write
+    assert len(
+        await _app_rows(db, "SELECT id FROM tenant_deletions WHERE id = :d", {"d": deletion})
     )
-    with pytest.raises(DBAPIError, match="permission denied"):
-        await _app_rows(db, "DELETE FROM tenant_deletions WHERE id = :d", {"d": deletion})
+    writes = (
+        "INSERT INTO tenant_deletions (tenant_id, host, installation_id, requested_by_sub, "
+        "requested_by_iss, state) VALUES (:t, 'h', 1, 's', 'i', 'database')",
+        "UPDATE tenant_deletions SET state = 'cancelled' WHERE id = :d",
+        "DELETE FROM tenant_deletions WHERE id = :d",
+    )
+    for write in writes:
+        with pytest.raises(DBAPIError, match="permission denied"):
+            await _app_rows(db, write, {"t": tenant.id, "d": deletion})
+    assert (
+        await _admin_scalar(
+            db, "SELECT state FROM tenant_deletions WHERE tenant_id = :t", {"t": tenant.id}
+        )
+        == "requested"
+    )
     assert (
         await _admin_scalar(
             db, "SELECT count(*) FROM tenant_deletions WHERE id = :d", {"d": deletion}
@@ -363,6 +384,56 @@ async def test_tb_delete_tenant_refuses_unless_disabled_and_in_the_database_step
             await _app_rows(db, DELETE, {"t": tenant.id})
     assert await _exists(db, enabled)
     assert await _exists(db, tenant)
+
+
+async def test_tb_delete_tenant_refuses_during_the_grace_window(db: Db) -> None:
+    """A future `not_before` blocks it even in the database step; once it has passed, it runs."""
+    tenant = await _tenant(db)
+    deletion = (await _request(db, tenant)).deletion_id
+    await _set_state(db, deletion, "database")
+    await _admin(
+        db,
+        "UPDATE tenant_deletions SET not_before = now() + interval '1 hour' WHERE id = :d",
+        {"d": deletion},
+    )
+    with pytest.raises(DBAPIError, match="grace window"):
+        await _app_rows(db, DELETE, {"t": tenant.id})
+    assert await _exists(db, tenant)
+    await _admin(
+        db,
+        "UPDATE tenant_deletions SET not_before = now() - interval '1 second' WHERE id = :d",
+        {"d": deletion},
+    )
+    await _app_rows(db, DELETE, {"t": tenant.id})
+    assert not await _exists(db, tenant)
+
+
+async def test_a_delete_and_an_upsert_never_recreate_the_tenant(db: Db) -> None:
+    """The advisory lock serialises them: an upsert queued behind a delete sees the tombstone."""
+    upsert = "SELECT tb_upsert_tenant(:h, :i, 'acme-org', 1, 'active')"
+    tenant = await _tenant(db)
+    deletion = (await _request(db, tenant)).deletion_id
+    await _set_state(db, deletion, "database")
+    args = {"h": tenant.host, "i": tenant.installation}
+    async with db.app() as deleter, deleter.begin():
+        await deleter.execute(text(DELETE), {"t": tenant.id})  # uncommitted: lock held
+        racing = asyncio.create_task(_app_rows(db, upsert, args))
+        await asyncio.sleep(0.5)
+        assert not racing.done()  # without the lock it would have found the row and returned
+    assert (await racing)[0][0] is None
+    count = "SELECT count(*) FROM tenants WHERE host = :h AND installation_id = :i"
+    assert await _admin_scalar(db, count, args) == 0
+    # the reverse order: an upsert holding the lock makes the delete wait, then it still deletes
+    other = await _tenant(db)
+    other_deletion = (await _request(db, other)).deletion_id
+    await _set_state(db, other_deletion, "database")
+    async with db.app() as upserter, upserter.begin():
+        await upserter.execute(text(upsert), {"h": other.host, "i": other.installation})
+        waiting = asyncio.create_task(_app_rows(db, DELETE, {"t": other.id}))
+        await asyncio.sleep(0.5)
+        assert not waiting.done()
+    await waiting
+    assert not await _exists(db, other)
 
 
 async def test_tb_delete_tenant_refuses_while_any_tenant_keyed_row_remains(db: Db) -> None:
@@ -543,6 +614,13 @@ async def test_downgrade_is_refused_while_a_deletion_record_exists_and_round_tri
         assert "cannot downgrade" in refused.stderr
         assert await _admin_scalar(scratch, "SELECT count(*) FROM tenant_deletions") == 1
         await _admin(scratch, "DELETE FROM tenant_deletions WHERE id = :d", {"d": deletion})
+        # a `deleted` delivery cannot be represented by the previous CHECK: refused up front
+        await _admin(scratch, DELIVERY, {"d": "gone", "s": "deleted"})
+        deliveries = await _alembic(scratch.name, "downgrade", PREVIOUS)
+        assert deliveries.returncode != 0
+        assert "status deleted" in deliveries.stderr
+        assert await _admin_scalar(scratch, "SELECT to_regclass('tenant_deletions') IS NOT NULL")
+        await _admin(scratch, "DELETE FROM webhook_deliveries WHERE delivery_id = 'gone'")
         done = await _alembic(scratch.name, "downgrade", PREVIOUS)
         assert done.returncode == 0, done.stderr[-2000:]
         assert await _admin_scalar(scratch, "SELECT to_regclass('tenant_deletions') IS NULL")
