@@ -1,27 +1,29 @@
 """The tenant reconcile requests with claim/ack semantics (NG5r, ADR 0028 invariants 9 and 10).
 
 The api records a request with `SADD tb:reconcile <tenant_id>` (`ReconcileRequests.schedule`; a
-set, so a repeat is one request). The reconciler drains it here:
+set, so a repeat is one request). The reconciler drains it here. Every step that changes two keys
+together is one Lua script (one atomic server-side step, so there is no window between the keys
+and a stale holder cannot undo a newer claim):
 
-1. **claim**: `SMOVE tb:reconcile tb:reconcile:inflight <tenant_id>`, atomic, so two replicas
-   never claim the same member, and a crash leaves it in the inflight set, never nowhere. The
-   claim time and a per-claim token go to the hash `tb:reconcile:claims`.
-2. **ack**: `SREM` from inflight and `HDEL` of the claim, after the reconcile finished (or the
-   request was dropped on purpose). A request made again while its claim is held is a new member
-   of the pending set, so it is not lost by the ack.
+1. **claim**: `SMOVE tb:reconcile tb:reconcile:inflight <tenant_id>` and `HSET` of the claim
+   (time and a per-claim token) in `tb:reconcile:claims`. Two replicas never claim the same member,
+   and a crash leaves it in the inflight set, never nowhere.
+2. **ack**: only if the stored token is still the caller's: `HDEL` of the claim and `SREM` from
+   inflight. A request made again while its claim is held is a new member of the pending set, so
+   it is not lost by the ack.
 3. **reclaim**: a member that stays inflight longer than the claim TTL is moved back to the pending
-   set. A member with no claim entry (a crash between the `SMOVE` and the `HSET`) is stamped first
-   and reclaimed one TTL later, so a claimer that is only slow to write its entry is not undone.
-4. **release**: `SMOVE` back to pending, for a request that was claimed and deliberately not
-   acted on.
+   set, only if its claim entry is still the one that was listed (`HDEL` and `SMOVE` together). A
+   member with no claim entry (written by nothing here, but possible after a manual edit or an
+   older release) is stamped first and reclaimed one TTL later.
+4. **release**: the same token check, then `HDEL` and `SMOVE` back to pending, for a request that
+   was claimed and deliberately not acted on.
 
-A slow holder whose claim was reclaimed finds out at its ack: the member left the inflight set or
-carries another token, `ack` returns False and the caller logs it. The reconcile itself is
-idempotent (ADR 0029), so the double run is detected, not harmful. Residual (documented): between
-the token check and the `HDEL` in `reclaim` a holder can ack and a new claim can start, which makes
-that one new claim reclaimable early; the request is then processed twice, never lost. A crash
-between the `SREM` and the `HDEL` of an ack leaves a claim entry for a request that is no longer
-inflight; the next claim of that tenant overwrites it, so it never matters.
+A slow holder whose claim was reclaimed finds out at its ack: the claim entry is gone or carries
+another token, so `ack` returns False and the caller logs it. The reconcile itself is idempotent
+(ADR 0029), so the double run is detected, not harmful. A request is never lost: it is always in
+the pending or the inflight set until a holder that still owns the claim acks it. Residual
+(documented, not harmful): when a holder acks after its claim was reclaimed but before anyone
+re-claimed it, the request stays pending and runs once more.
 """
 
 import logging
@@ -37,6 +39,36 @@ logger = logging.getLogger(__name__)
 INFLIGHT_SET = "tb:reconcile:inflight"
 CLAIMS_HASH = "tb:reconcile:claims"
 _SEP = "|"
+
+# KEYS: pending set, inflight set, claims hash. ARGV: see each script. The token is the text after
+# the last `|` of a claim entry (`<epoch>|<token>`).
+_CLAIM = """
+if redis.call('SMOVE', KEYS[1], KEYS[2], ARGV[1]) == 1 then
+    redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
+    return 1
+end
+return 0
+"""
+# ARGV: member, token
+_ACK = """
+local v = redis.call('HGET', KEYS[3], ARGV[1])
+if not v or string.match(v, '|(.*)$') ~= ARGV[2] then return 0 end
+redis.call('HDEL', KEYS[3], ARGV[1])
+return redis.call('SREM', KEYS[2], ARGV[1])
+"""
+# ARGV: member, token
+_RELEASE = """
+local v = redis.call('HGET', KEYS[3], ARGV[1])
+if not v or string.match(v, '|(.*)$') ~= ARGV[2] then return 0 end
+redis.call('HDEL', KEYS[3], ARGV[1])
+return redis.call('SMOVE', KEYS[2], KEYS[1], ARGV[1])
+"""
+# ARGV: member, the claim entry as listed
+_RECLAIM = """
+if redis.call('HGET', KEYS[3], ARGV[1]) ~= ARGV[2] then return 0 end
+redis.call('HDEL', KEYS[3], ARGV[1])
+return redis.call('SMOVE', KEYS[2], KEYS[1], ARGV[1])
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,40 +119,32 @@ class ReconcileQueue:
         claimed: list[Claim] = []
         for raw in await self._r.srandmember(RECONCILE_SET, limit) or []:
             member = _text(raw)
-            if not await self._r.smove(RECONCILE_SET, INFLIGHT_SET, member):
-                continue  # another replica claimed it first
             try:
                 tenant_id = UUID(member)
+                if str(tenant_id) != member:
+                    raise ValueError(member)  # a non-canonical spelling would key the claim wrongly
             except ValueError:
                 logger.warning("dropped a malformed reconcile request")
-                await self._r.srem(INFLIGHT_SET, member)
+                await self._r.srem(RECONCILE_SET, member)
                 continue
             token = uuid4().hex
-            await self._r.hset(CLAIMS_HASH, member, _stamp(now, token))
-            claimed.append(Claim(tenant_id, token))
+            if await self._run(_CLAIM, member, _stamp(now, token)):
+                claimed.append(Claim(tenant_id, token))
+            # else: another replica claimed it first
         return claimed
 
-    async def _holds(self, claim: Claim) -> bool:
-        stored = await self._r.hget(CLAIMS_HASH, str(claim.tenant_id))
-        parsed = None if stored is None else _parse(_text(stored))
-        return parsed is not None and parsed[1] == claim.token
+    async def _run(self, script: str, *args: str) -> int:
+        """Run one of the scripts over the three keys; its integer reply."""
+        keys = (RECONCILE_SET, INFLIGHT_SET, CLAIMS_HASH)
+        return int(await self._r.eval(script, len(keys), *keys, *args))
 
     async def ack(self, claim: Claim) -> bool:
         """Remove the request from inflight. False when the claim was reclaimed meanwhile."""
-        member = str(claim.tenant_id)
-        if not await self._holds(claim):
-            return False
-        removed = await self._r.srem(INFLIGHT_SET, member)
-        await self._r.hdel(CLAIMS_HASH, member)
-        return bool(removed)
+        return bool(await self._run(_ACK, str(claim.tenant_id), claim.token))
 
     async def release(self, claim: Claim) -> bool:
         """Put the request back to pending without acting on it. False when the claim was lost."""
-        member = str(claim.tenant_id)
-        if not await self._holds(claim):
-            return False
-        await self._r.hdel(CLAIMS_HASH, member)
-        return bool(await self._r.smove(INFLIGHT_SET, RECONCILE_SET, member))
+        return bool(await self._run(_RELEASE, str(claim.tenant_id), claim.token))
 
     async def reclaim(self, now: datetime, ttl_seconds: float) -> int:
         """Return requests inflight for longer than `ttl_seconds` to pending; returns the count."""
@@ -130,16 +154,13 @@ class ReconcileQueue:
             member = _text(raw)
             value = entries.get(member)
             parsed = None if value is None else _parse(value)
-            if parsed is None:
+            if parsed is None or value is None:
                 # no (or an unreadable) claim entry: stamp it once, reclaim a TTL from now
                 await self._r.hsetnx(CLAIMS_HASH, member, _stamp(now, "unclaimed"))
                 continue
             if now.timestamp() - parsed[0] < ttl_seconds:
                 continue
-            if _text(await self._r.hget(CLAIMS_HASH, member) or "") != value:
-                continue  # claimed again since the listing
-            await self._r.hdel(CLAIMS_HASH, member)
-            if await self._r.smove(INFLIGHT_SET, RECONCILE_SET, member):
+            if await self._run(_RECLAIM, member, value):
                 reclaimed += 1
                 logger.warning("reclaimed a stranded reconcile request", extra={"tenant": member})
         return reclaimed

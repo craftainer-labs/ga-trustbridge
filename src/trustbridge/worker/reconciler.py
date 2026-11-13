@@ -351,7 +351,9 @@ class Reconciler:
         `TENANT_RECONCILE_ENABLED` true, the body runs and the claim is acknowledged. Without the
         body the request goes back to pending: a request already answered 202 is never consumed
         by a duty that does nothing. A body or database failure leaves the claim inflight, so it is
-        retried after the claim TTL. Returns the number of requests acknowledged.
+        retried after the claim TTL. A run starts no body after half the claim TTL (the rest of its
+        claims go back to pending), so a claim never expires before its body starts. Returns the
+        number of requests acknowledged.
         """
         queue, refusals = self._d.reconcile_requests, self._d.refusals
         if queue is None or refusals is None:
@@ -360,10 +362,16 @@ class Reconciler:
         now = self._d.clock()
         await queue.reclaim(now, s.tenant_reconcile_claim_ttl_seconds)
         body = self._d.tenant_reconciler if s.tenant_reconcile_enabled else None
-        acked = kept = 0
+        # Every claim of this run is stamped `now`, so claims not started within half the TTL go
+        # back to pending, to be claimed fresh by the next run (or another replica).
+        deadline = now + timedelta(seconds=s.tenant_reconcile_claim_ttl_seconds / 2)
+        acked = kept = deferred = 0
         for claim in await queue.claim(now, s.tenant_reconcile_batch_size):
             self._beat("tenant-reconcile")
             try:
+                if self._d.clock() >= deadline:
+                    deferred += await queue.release(claim)
+                    continue
                 done = await self._reconcile_claim(queue, refusals, body, claim)
             except Exception:
                 logger.exception(
@@ -374,6 +382,11 @@ class Reconciler:
             acked += done
             kept += not done
         self._beat("tenant-reconcile")
+        if deferred:
+            logger.info(
+                "reconcile requests returned to pending: run budget used",
+                extra={"count": deferred},
+            )
         if kept:
             logger.info("reconcile requests left pending: no reconcile body", extra={"count": kept})
         return acked

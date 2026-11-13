@@ -9,6 +9,7 @@ from pydantic import SecretStr
 from redis.exceptions import ResponseError
 
 from trustbridge.github.hosts import GitHubHostConfig
+from trustbridge.worker import reconcile_queue
 from trustbridge.worker.reconciler import HookDelivery
 from trustbridge.worker.secrets import SecretUnavailable
 
@@ -171,6 +172,31 @@ class FakeRedis:
         if name in self.hashes and not fields:
             del self.hashes[name]
         return gone
+
+    async def eval(self, script: str, numkeys: int, *args: str) -> int:
+        """Run one of the reconcile queue's scripts: a Python mirror of each (no Lua here).
+
+        The scripts' real behaviour is checked against Valkey in
+        `tests/trustbridge/worker/test_reconcile_queue_integration.py`.
+        """
+        self._check()
+        pending, inflight, claims = args[:3]
+        member, extra = args[numkeys], args[numkeys + 1]
+        entry = self.hashes.get(claims, {}).get(member)
+        if script == reconcile_queue._CLAIM:
+            moved = await self.smove(pending, inflight, member)
+            if moved:
+                await self.hset(claims, member, extra)
+            return int(moved)
+        token = None if entry is None else entry.partition("|")[2]
+        # reclaim compares the whole entry, ack and release the token
+        held = entry == extra if script == reconcile_queue._RECLAIM else token == extra
+        if not held:
+            return 0
+        await self.hdel(claims, member)
+        if script == reconcile_queue._ACK:
+            return await self.srem(inflight, member)
+        return int(await self.smove(inflight, pending, member))
 
     async def flushall(self) -> None:
         """Lose everything (restart without persistence)."""

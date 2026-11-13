@@ -121,19 +121,20 @@ async def test_an_unreadable_claim_entry_is_restamped_not_trusted() -> None:
 
 
 async def test_a_claim_taken_again_since_the_listing_is_not_reclaimed() -> None:
-    """The entry is re-read before it is deleted."""
+    """The entry is compared again, in the same step as the delete and the move."""
     valkey, queue, clock = _queue()
     tenant = uuid4()
     await _request(valkey, tenant)
     (claim,) = await queue.claim(clock(), 1)
     clock.advance(seconds=TTL + 1)
-    real_hget = valkey.hget
+    real_hgetall = valkey.hgetall
 
-    async def renewed(name: str, key: str) -> str | None:
-        valkey.hashes[CLAIMS_HASH][key] = f"{clock().timestamp():.3f}|other"
-        return await real_hget(name, key)
+    async def renewed(name: str) -> dict[str, str]:
+        listed = await real_hgetall(name)
+        valkey.hashes[CLAIMS_HASH][str(tenant)] = f"{clock().timestamp():.3f}|other"
+        return listed
 
-    valkey.hget = renewed  # type: ignore[method-assign]
+    valkey.hgetall = renewed  # type: ignore[method-assign]
     assert await queue.reclaim(clock(), TTL) == 0
     assert valkey.sets == {INFLIGHT_SET: {str(tenant)}}
     assert claim.token not in valkey.hashes[CLAIMS_HASH][str(tenant)]
@@ -380,19 +381,66 @@ def test_the_claim_ttl_must_not_be_shorter_than_the_lease_ttl() -> None:
 
 
 async def test_a_request_acked_between_the_listing_and_the_reclaim_is_not_counted() -> None:
-    """The SMOVE finds the member gone (its holder acked); nothing is reclaimed."""
+    """The holder acked after the listing: the entry is gone, so nothing is moved."""
     valkey, queue, clock = _queue()
     await _request(valkey, uuid4())
-    await queue.claim(clock(), 1)
+    (claim,) = await queue.claim(clock(), 1)
     clock.advance(seconds=TTL + 1)
-    real = valkey.hdel
+    real_hgetall = valkey.hgetall
 
-    async def holder_acks(name: str, *keys: str) -> int:
-        valkey.sets.pop(INFLIGHT_SET, None)
-        return await real(name, *keys)
+    async def holder_acks(name: str) -> dict[str, str]:
+        listed = await real_hgetall(name)
+        assert await queue.ack(claim) is True
+        return listed
 
-    valkey.hdel = holder_acks  # type: ignore[method-assign]
+    valkey.hgetall = holder_acks  # type: ignore[method-assign]
     assert await queue.reclaim(clock(), TTL) == 0
+    assert valkey.sets == {}
+
+
+async def test_a_stale_holder_cannot_undo_a_newer_claim() -> None:
+    """Ack and release check the token in the same step as they change the sets."""
+    valkey, queue, clock = _queue()
+    tenant = uuid4()
+    await _request(valkey, tenant)
+    (stale,) = await queue.claim(clock(), 1)
+    clock.advance(seconds=TTL + 1)
+    assert await queue.reclaim(clock(), TTL) == 1
+    (fresh,) = await queue.claim(clock(), 1)
+    assert await queue.ack(stale) is False
+    assert await queue.release(stale) is False
+    assert valkey.sets == {INFLIGHT_SET: {str(tenant)}}
+    assert fresh.token in valkey.hashes[CLAIMS_HASH][str(tenant)]
+
+
+async def test_a_non_canonical_member_is_dropped_not_keyed_wrongly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`UUID()` accepts upper case; a claim stored under it could never be acknowledged."""
+    valkey, queue, clock = _queue()
+    valkey.sets[RECONCILE_SET] = {str(uuid4()).upper()}
+    with caplog.at_level(logging.WARNING):
+        assert await queue.claim(clock(), 5) == []
+    assert valkey.sets == {}
+    assert "malformed reconcile request" in caplog.text
+
+
+async def test_claims_not_started_within_half_the_ttl_go_back_to_pending() -> None:
+    """A long batch never lets a queued claim expire before its body starts."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    first, second = uuid4(), uuid4()
+    body = Body()
+
+    async def slow() -> None:
+        h.advance(TTL)  # the first body outlasts half the claim TTL
+
+    body.hook = slow
+    await _request(h.valkey, first, second)
+    assert await _duty(h, Refusals(), body).tenant_reconcile() == 1
+    assert len(body.calls) == 1
+    left = {str(first), str(second)} - {str(body.calls[0])}
+    assert h.valkey.sets == {RECONCILE_SET: left}
+    assert h.valkey.hashes == {}
 
 
 async def test_run_logs_why_requests_stay_pending(caplog: pytest.LogCaptureFixture) -> None:
