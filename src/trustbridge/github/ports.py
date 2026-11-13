@@ -11,6 +11,21 @@ from uuid import UUID
 from pydantic import SecretStr
 
 
+class TenantDeletedError(Exception):
+    """The installation's tenant is deleted, being deleted or tombstoned (ADR 0034).
+
+    Nothing is created or revived for it, so a caller must not treat the installation as active.
+    `reason` is `tombstone` (a finished deletion of the key), `deleting` (a deletion is in
+    progress) or `deleted` (GitHub reported the installation gone). Carries the host and
+    installation id only, never the organisation login.
+    """
+
+    def __init__(self, host: str, installation_id: int, reason: str = "tombstone") -> None:
+        """Name the key and why it is refused."""
+        super().__init__(f"installation {installation_id} on {host} is {reason}")
+        self.host, self.installation_id, self.reason = host, installation_id, reason
+
+
 class SecretReader(Protocol):
     """Reads a secret by reference from the secret store (Vault KV, Kubernetes Secret...)."""
 
@@ -63,7 +78,8 @@ class InstallationStore(Protocol):
     ) -> UUID:
         """Create or update the tenant for `(host, installation_id)` and return its id.
 
-        The state is written in the same statement: `suspended` or else `active`.
+        The state is written in the same statement: `suspended` or else `active`. Raises
+        `TenantDeletedError` for a tenant that is deleted, being deleted or tombstoned.
         """
         ...
 
