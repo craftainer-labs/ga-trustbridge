@@ -432,6 +432,17 @@ trustbridge:
     purgeBatchSize: 1000
     # Batches per purge run, 1..10000; a run also stops after half the lease TTL.
     purgeMaxBatches: 100
+  ## Tenant reconcile requests (NG5r): the reconciler's `tenant-reconcile` duty drains the requests
+  ## the admin API records. Requests for a disabled, deleting or deleted tenant are dropped; others
+  ## stay pending until the reconcile body exists, and enabled turns that body on. An unacknowledged
+  ## claim returns to pending after claimTtlSeconds, which must be at least lease.ttlSeconds
+  ## (validated by the app).
+  tenantReconcile:
+    enabled: false
+    intervalSeconds: 30
+    # Claims per poll, 1..1000.
+    batchSize: 50
+    claimTtlSeconds: 300
   lease:
     ttlSeconds: 120
     adapterCallTimeoutSeconds: 30

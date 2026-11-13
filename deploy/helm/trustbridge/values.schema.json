@@ -130,6 +130,27 @@
             }
           }
         },
+        "tenantReconcile": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "intervalSeconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "batchSize": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "claimTtlSeconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
         "deletion": {
           "type": "object",
           "properties": {
