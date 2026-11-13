@@ -52,9 +52,9 @@ write them), drops and recreates both read functions to return them (a function'
 with `CREATE OR REPLACE`; the readers select named columns, so it is N-1 safe) and adds
 `tb_set_tenant_disabled(id, by, reason, disable)`, a definer function that makes the disable or enable one
 row-locked write and returns the before and after values. A repeat disable keeps the first time, actor and
-reason. `TenantInfo` has the two new fields (defaulted, last). `deleting` stays the constant `false`
-until NG6h, which also adds the refusal to enable a tenant with a non-terminal deletion at the
-`v_deleting` hook in `tb_set_tenant_disabled`.
+reason. `TenantInfo` has the two new fields (defaulted, last). `deleting` was the constant `false`
+until migration `9c2e5a7f1d84` (below), which makes it real and adds the refusal to enable a tenant with a
+non-terminal deletion at the `v_deleting` hook in `tb_set_tenant_disabled`.
 
 Migration `9c2e5a7f1d84` (NG6h-1, ADR 0034) is the database foundation of tenant data deletion; no
 application code calls it yet. It adds the host-scoped `tenant_deletions` table (outside RLS, no foreign key
@@ -65,7 +65,7 @@ It replaces, under the same signatures, `tb_list_tenants` and `tb_get_tenant` (`
 `tb_set_tenant_disabled` (`enable` is refused with SQLSTATE 55000 while a non-terminal deletion exists; the
 state is read after the tenant row lock) and `tb_upsert_tenant` (a `deleted` tenant is returned unchanged,
 and `SqlTenants.upsert_installation` does the same until release N+1 moves it onto the function; a `done` deletion of
-`(host, installation_id)` is a tombstone, so the function returns NULL and creates nothing, and `SqlTenants` and
+`(host, installation_id)`, or a `database`-step deletion whose tenant row is already gone, is a tombstone, so the function returns NULL and creates nothing, and `SqlTenants` and
 `MemoryTenants` raise `TenantDeletedError`, while a new installation id is unaffected). It adds
 `tb_request_tenant_deletion(...)`, which takes the same row lock as enable and disable and stores an optional
 `not_before` (default NULL: no delay; the engine honours it as a grace window), and

@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 
 from pydantic import SecretStr
 from redis.asyncio import Redis
-from sqlalchemy import case, delete, select, update
+from sqlalchemy import and_, case, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -92,8 +92,9 @@ class SqlTenants:
         """Create or update the tenant of `(host, installation_id)` as `suspended` or `active`.
 
         A tenant whose state is `deleted` is returned unchanged, as `tb_upsert_tenant` does: a
-        late or replayed event cannot revive it (ADR 0034). A `done` deletion of the key is a
-        tombstone: nothing is created and `TenantDeletedError` is raised.
+        late or replayed event cannot revive it (ADR 0034). A `done` deletion of the key (or a
+        `database`-step one whose tenant row is gone) is a tombstone: nothing is created and
+        `TenantDeletedError` is raised.
         """
         state = "suspended" if suspended else "active"
         insert = pg_insert(TenantRow).values(
@@ -113,7 +114,15 @@ class SqlTenants:
         tombstone = select(TenantDeletion.id).where(
             TenantDeletion.host == host,
             TenantDeletion.installation_id == installation_id,
-            TenantDeletion.state == "done",
+            or_(
+                TenantDeletion.state == "done",
+                and_(
+                    TenantDeletion.state == "database",
+                    ~select(TenantRow.id)
+                    .where(TenantRow.host == host, TenantRow.installation_id == installation_id)
+                    .exists(),
+                ),
+            ),
         )
         async with self._sf() as session, session.begin():
             if (await session.execute(tombstone.limit(1))).first() is not None:

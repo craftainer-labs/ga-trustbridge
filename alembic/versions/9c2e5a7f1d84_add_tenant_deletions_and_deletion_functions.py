@@ -28,10 +28,11 @@ function body replaced under the same signature and return type.
   ``tb_request_tenant_deletion``.
 * ``tb_upsert_tenant``: a tenant whose ``state`` is ``deleted`` is returned unchanged (the existing
   id; ``org``, ``org_id`` and ``state`` are kept) instead of being revived by a late event.
-  A ``done`` ``tenant_deletions`` row for ``(host, installation_id)`` is a tombstone: the function
-  then returns ``NULL`` and creates nothing (an open, ``failed`` or ``cancelled`` deletion is not a
-  tombstone, and another installation id of the host is unaffected). The lookup uses a partial
-  index on ``state = 'done'``.
+  A ``done`` ``tenant_deletions`` row for ``(host, installation_id)`` (or one in its
+  ``database`` step whose tenant row is already gone) is a tombstone: the function then returns
+  ``NULL`` and creates nothing (an open, ``failed`` or ``cancelled`` deletion is not a tombstone,
+  and another installation id of the host is unaffected). The lookup uses a partial index on
+  ``state = 'done'``.
 * ``tb_request_tenant_deletion(...)``: a ``SECURITY DEFINER`` function that, under the tenant row
   lock, returns the open deletion, or checks that the tenant is admin-disabled and that the typed
   confirmation (host, installation id, organisation login) matches, and writes the record. The
@@ -219,11 +220,16 @@ BEGIN
     IF p_state NOT IN ('active', 'suspended', 'deleted') THEN
         RAISE EXCEPTION 'invalid tenant state' USING ERRCODE = '22023';
     END IF;
-    -- Tombstone: once a deletion of this installation is `done`, no tenant is created or revived
-    -- for it. NULL is returned (a distinct outcome: the other paths always return an id).
+    -- Tombstone: once a deletion of this installation is `done` (or is in its `database` step and
+    -- tb_delete_tenant has already removed the row), no tenant is created or revived for it.
+    -- NULL is returned (a distinct outcome: the other paths always return an id).
     IF EXISTS (
         SELECT 1 FROM public.tenant_deletions d
-         WHERE d.host = p_host AND d.installation_id = p_installation_id AND d.state = 'done'
+         WHERE d.host = p_host AND d.installation_id = p_installation_id
+           AND (d.state = 'done'
+                OR (d.state = 'database' AND NOT EXISTS (
+                    SELECT 1 FROM public.tenants t
+                     WHERE t.host = p_host AND t.installation_id = p_installation_id)))
     ) THEN
         RETURN NULL;
     END IF;

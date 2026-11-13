@@ -227,7 +227,7 @@ adapter fakes.
 ## Open issues
 
 - **Re-creation (decided, NG6h-1).** A `done` row in `tenant_deletions` for `(host, installation_id)`
-  is a tombstone: `tb_upsert_tenant` returns NULL and creates nothing, and `SqlTenants` and
+  (or a `database`-step row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` returns NULL and creates nothing, and `SqlTenants` and
   `MemoryTenants` raise `TenantDeletedError`. A reinstall gets a new installation id and is not
   blocked; an open, failed or cancelled deletion is not a tombstone. The worker's ack-and-drop
   handling of the refusal is NG6h-2.

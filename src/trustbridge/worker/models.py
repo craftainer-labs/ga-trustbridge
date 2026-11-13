@@ -137,6 +137,12 @@ class TenantDeletion(Base):
             postgresql_where=text("state NOT IN ('done', 'failed', 'cancelled')"),
         ),
         Index("ix_tenant_deletions_state_updated", "state", "updated_at"),
+        Index(
+            "ix_tenant_deletions_done_key",
+            "host",
+            "installation_id",
+            postgresql_where=text("state = 'done'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -158,6 +164,7 @@ class TenantDeletion(Base):
     holder: Mapped[str | None] = mapped_column(Text)
     fence: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_error: Mapped[str | None] = mapped_column(Text)
 

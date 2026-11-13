@@ -468,8 +468,11 @@ async def test_tb_upsert_tenant_treats_a_done_deletion_as_a_tombstone(db: Db) ->
     for state in (*OPEN_STATES, "failed", "cancelled"):  # none of these is a tombstone
         await _set_state(db, deletion, state)
         assert (await _app_rows(db, upsert, args(tenant)))[0][0] == tenant.id
-    await _set_state(db, deletion, "done")
+    await _set_state(db, deletion, "database")
     await _admin(db, "DELETE FROM tenants WHERE id = :t", {"t": tenant.id})
+    # the window after tb_delete_tenant and before `done`: the row is gone, so it counts
+    assert (await _app_rows(db, upsert, args(tenant)))[0][0] is None
+    await _set_state(db, deletion, "done")
     assert (await _app_rows(db, upsert, args(tenant)))[0][0] is None
     count = "SELECT count(*) FROM tenants WHERE host = :h AND installation_id = :i"
     assert await _admin_scalar(db, count, {"h": tenant.host, "i": tenant.installation}) == 0
