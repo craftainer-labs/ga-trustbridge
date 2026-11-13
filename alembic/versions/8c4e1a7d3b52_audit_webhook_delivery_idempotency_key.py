@@ -53,6 +53,7 @@ PREDICATE = "on_behalf_of IS NOT NULL"
 _DUPLICATES = (
     "SELECT tenant_id, action, (on_behalf_of->>'delivery_id') AS delivery_id, count(*) AS n "
     "FROM audit_events WHERE on_behalf_of IS NOT NULL AND tenant_id IS NOT NULL "
+    "AND (on_behalf_of->>'delivery_id') IS NOT NULL "
     "GROUP BY tenant_id, action, (on_behalf_of->>'delivery_id') HAVING count(*) > 1"
 )
 

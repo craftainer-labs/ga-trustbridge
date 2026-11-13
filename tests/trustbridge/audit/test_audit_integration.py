@@ -865,7 +865,7 @@ async def _migration_steps(conn: AsyncConnection) -> dict[str, object]:
     steps: dict[str, object] = {}
     # The later idempotency index is built on `on_behalf_of`'s jsonb operators, so the column's
     # type cannot change under it; the test's transaction is rolled back, so the drop is scoped.
-    await conn.execute(text("DROP INDEX IF EXISTS ux_audit_events_webhook_delivery"))
+    await conn.execute(text("DROP INDEX ux_audit_events_webhook_delivery"))
     await conn.run_sync(_run_migration, "downgrade")
     steps["column before"] = (await conn.execute(text(_COLUMN_TYPE))).scalar_one()
     for suffix, value in (("a", "sender=1;delivery=d"), ("b", None), ("c", "garbage")):

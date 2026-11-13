@@ -243,6 +243,7 @@ delivery id). Nothing has changed at that point: no index, no rows.
    ```sql
    SELECT tenant_id, action, (on_behalf_of->>'delivery_id') AS delivery_id, count(*) AS n
    FROM audit_events WHERE on_behalf_of IS NOT NULL AND tenant_id IS NOT NULL
+     AND (on_behalf_of->>'delivery_id') IS NOT NULL
    GROUP BY tenant_id, action, (on_behalf_of->>'delivery_id') HAVING count(*) > 1;
    ```
 
@@ -257,7 +258,8 @@ delivery id). Nothing has changed at that point: no index, no rows.
    SELECT * FROM (
      SELECT e.*, row_number() OVER (
        PARTITION BY tenant_id, action, (on_behalf_of->>'delivery_id') ORDER BY seq) AS rn
-     FROM audit_events e WHERE on_behalf_of IS NOT NULL AND tenant_id IS NOT NULL) d
+     FROM audit_events e WHERE on_behalf_of IS NOT NULL AND tenant_id IS NOT NULL
+     AND (on_behalf_of->>'delivery_id') IS NOT NULL) d
    WHERE rn > 1;
    DELETE FROM audit_events WHERE seq IN (SELECT seq FROM audit_events_duplicates_archive);
    COMMIT;
