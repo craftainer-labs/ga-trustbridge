@@ -137,11 +137,14 @@ class OperationGate(Protocol):
     """Decides whether a new adapter call may start for a tenant (admin disable, ADR 0033).
 
     `kind` is the operation about to start (`None` for a refresh or an orphan sweep). While a
-    non-terminal tenant deletion exists, the gate admits `OperationKind.DELETE` (the deletion's
-    own delete and revoke operations, ADR 0034) through a disabled tenant; nothing else.
+    non-terminal tenant deletion exists, the gate admits a `OperationKind.DELETE` through a
+    disabled tenant, but only when the call carries that deletion's own `deletion_id` (set only
+    by the deletion engine's steps through `delete_scope`, ADR 0034); nothing else.
     """
 
-    async def allows(self, tenant_id: UUID, kind: OperationKind | None) -> bool:
+    async def allows(
+        self, tenant_id: UUID, kind: OperationKind | None, deletion_id: UUID | None = None
+    ) -> bool:
         """True when the call may start."""
         ...
 
@@ -253,8 +256,20 @@ class CredentialCore:
                 raise RotationNotApplicableError(msg)
             return await self._start(ctx, OperationKind.ROTATE, offered=False)
 
-    async def delete_scope(self, tenant: Tenant, adapter: str, scope_id: ScopeId) -> ScopeResult:
-        """Delete a scope's credential and its GitHub outputs."""
+    async def delete_scope(
+        self,
+        tenant: Tenant,
+        adapter: str,
+        scope_id: ScopeId,
+        *,
+        deletion_id: UUID | None = None,
+    ) -> ScopeResult:
+        """Delete a scope's credential and its GitHub outputs.
+
+        `deletion_id` is the origin of a tenant deletion's own call (ADR 0034 B10): only the
+        deletion engine's steps set it, and only with it does the gate let a delete through a
+        disabled tenant. A user-initiated delete leaves it `None`.
+        """
         async with self._locked(tenant, adapter, scope_id) as ctx:
             open_op = await self._d.store.get_open_operation(tenant.id, adapter, ctx.scope.key)
             if open_op is not None:
@@ -263,7 +278,9 @@ class CredentialCore:
                     return result
             if ctx.stored.state.current is None:
                 return ScopeResult(None, None, ChangeState.UNCHANGED)
-            return await self._start(ctx, OperationKind.DELETE, offered=False)
+            return await self._start(
+                ctx, OperationKind.DELETE, offered=False, deletion_id=deletion_id
+            )
 
     async def resume_operation(self, operation_id: UUID) -> ScopeResult | None:
         """Resume one non-terminal operation (the reconciler's entry point); None if it is done."""
@@ -418,9 +435,12 @@ class CredentialCore:
         await self._d.store.save(ctx.lease, ctx.stored, op)
         raise AdapterConfigurationError(message)
 
-    async def _admit(self, tenant_id: UUID, kind: OperationKind | None) -> None:
+    async def _admit(
+        self, tenant_id: UUID, kind: OperationKind | None, deletion_id: UUID | None = None
+    ) -> None:
         """Refuse a new adapter call for a tenant the gate does not admit (admin disable)."""
-        if self._d.gate is not None and not await self._d.gate.allows(tenant_id, kind):
+        gate = self._d.gate
+        if gate is not None and not await gate.allows(tenant_id, kind, deletion_id):
             msg = f"tenant {tenant_id} is disabled; no new adapter operation starts"
             raise TenantDisabledError(msg)
 
@@ -455,8 +475,15 @@ class CredentialCore:
         return ScopeResult(None, None, outcome.change.state)
 
     # ---- starting an operation ------------------------------------------
-    async def _start(self, ctx: _Ctx, kind: OperationKind, *, offered: bool) -> ScopeResult:
-        await self._admit(ctx.tenant.id, kind)
+    async def _start(
+        self,
+        ctx: _Ctx,
+        kind: OperationKind,
+        *,
+        offered: bool,
+        deletion_id: UUID | None = None,
+    ) -> ScopeResult:
+        await self._admit(ctx.tenant.id, kind, deletion_id)
         await self._require_privileged(ctx)
         stored = ctx.stored
         old = stored.state.current

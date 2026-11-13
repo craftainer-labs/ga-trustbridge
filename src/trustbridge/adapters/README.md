@@ -42,8 +42,9 @@ is a separate package under `adapters/<name>/` (NG5) that registers itself in th
 - This package must not import `trustbridge.github`; the GitHub core imports it.
 - `CoreDeps.gate` (an `OperationGate`) refuses a new operation, a refresh and an orphan sweep for an
   admin-disabled tenant with `TenantDisabledError`; an operation already in flight still resumes
-  (ADR 0033 invariant 19). The one exception: `SqlTenantGate` admits `OperationKind.DELETE` (a
-  deletion's own delete and revoke operations) while a non-terminal tenant deletion exists (ADR 0034).
+  (ADR 0033 invariant 19). The one exception: `SqlTenantGate` admits `OperationKind.DELETE` only when
+  the call carries a `deletion_id` (`delete_scope(..., deletion_id=)`, set only by the deletion engine's steps) of a
+  non-terminal deletion of the same tenant (ADR 0034).
 
 ## Rotation when a scope switches kind (settles ADR 0029's open issue)
 

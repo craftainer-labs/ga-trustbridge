@@ -198,9 +198,9 @@ async def test_a_scope_with_nothing_to_rotate_is_a_409() -> None:
 class Gate:
     """An `OperationGate` that refuses everything."""
 
-    async def allows(self, tenant_id: UUID, kind: object) -> bool:
+    async def allows(self, tenant_id: UUID, kind: object, deletion_id: UUID | None = None) -> bool:
         """Never."""
-        del tenant_id, kind
+        del tenant_id, kind, deletion_id
         return False
 
 

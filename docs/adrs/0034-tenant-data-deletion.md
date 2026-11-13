@@ -252,9 +252,10 @@ adapter fakes.
   poll, so the deletion's own lease lapses and it is claimed again. Poll, batch, lease TTL, budget fraction, backoff
   base and cap, drain passes and drain poll are settings with Helm values (`trustbridge.deletion.*`); at startup the drain
   poll plus the configured step pass time must fit in half the deletion lease TTL (an error in production, a warning
-  elsewhere). The gate (B10): `SqlTenantGate.allows`, the adapter core's `OperationGate`, admits `delete` operations
-  through a disabled tenant only while a non-terminal deletion of that tenant exists; every other kind, a refresh and
-  an orphan sweep stay refused. Composing the engine with its steps is left to the items that build them (4b, 5, 6).
+  elsewhere). The gate (B10): `SqlTenantGate.allows`, the adapter core's `OperationGate`, admits a `delete` operation
+  through a disabled tenant only when it carries the id of a non-terminal deletion of that same tenant (checked in the
+  gate's one statement; `CredentialCore.delete_scope(..., deletion_id=)`, which only the deletion engine's steps set).
+  A user-initiated delete on a deleting tenant, every other kind, a refresh and an orphan sweep stay refused. Composing the engine with its steps is left to the items that build them (4b, 5, 6).
   The runbook (cancel, operator-fail, and replaying `tenant.deletion.completed` after a restore) is
   [`docs/runbooks/tenant-deletion.md`](../runbooks/tenant-deletion.md).
 - **Re-creation (decided, NG6h-1).** A `done` row in `tenant_deletions` for `(host, installation_id)`

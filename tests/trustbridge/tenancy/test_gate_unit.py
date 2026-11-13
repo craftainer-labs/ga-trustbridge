@@ -1,5 +1,6 @@
 """`SqlTenantGate.allows` over a scripted session (the Postgres half is in
-`test_deletion_db_integration.py`): which `(disabled, deleting)` rows admit which operation."""
+`test_deletion_db_integration.py`): which `(disabled, own deletion open)` rows admit which
+operation."""
 
 from types import TracebackType
 from typing import Any, cast
@@ -51,33 +52,44 @@ def _gate(row: tuple[bool, bool] | None, seen: list[Any]) -> SqlTenantGate:
 async def test_an_enabled_or_unknown_tenant_admits_everything(
     row: tuple[bool, bool] | None, kind: OperationKind | None
 ) -> None:
-    """Only a disabled tenant is refused; an open deletion alone changes nothing."""
+    """Only a disabled tenant is refused."""
     assert await _gate(row, []).allows(uuid4(), kind) is True
 
 
 @pytest.mark.parametrize("kind", [None, *OperationKind])
-async def test_a_disabled_tenant_without_a_deletion_refuses_everything(
+async def test_a_disabled_tenant_without_its_own_open_deletion_refuses_everything(
     kind: OperationKind | None,
 ) -> None:
-    """The admin disable of ADR 0033, unchanged."""
+    """The admin disable of ADR 0033, unchanged; a stray or terminal deletion id changes nothing."""
+    assert await _gate((True, False), []).allows(uuid4(), kind, uuid4()) is False
     assert await _gate((True, False), []).allows(uuid4(), kind) is False
 
 
 @pytest.mark.parametrize("kind", [None, *OperationKind])
-async def test_a_disabled_tenant_with_an_open_deletion_admits_only_delete(
+async def test_a_disabled_tenant_admits_only_a_delete_carrying_its_own_open_deletion(
     kind: OperationKind | None,
 ) -> None:
     """B10: the deletion's own delete and revoke operations, nothing else."""
-    assert await _gate((True, True), []).allows(uuid4(), kind) is (kind is OperationKind.DELETE)
+    allowed = await _gate((True, True), []).allows(uuid4(), kind, uuid4())
+    assert allowed is (kind is OperationKind.DELETE)
+
+
+@pytest.mark.parametrize("kind", [None, *OperationKind])
+async def test_a_user_initiated_delete_carries_no_deletion_and_is_refused(
+    kind: OperationKind | None,
+) -> None:
+    """Even if the tenant has an open deletion (the row says so), no id means no admission."""
+    assert await _gate((True, True), []).allows(uuid4(), kind) is False
 
 
 async def test_the_read_is_one_statement_in_no_tenant_context() -> None:
     """`tb_get_tenant` is the unscoped path to `tenants` (ADR 0031)."""
     seen: list[Any] = []
     tenant_id = uuid4()
-    await _gate((True, True), seen).allows(tenant_id, OperationKind.DELETE)
+    deletion = uuid4()
+    await _gate((True, True), seen).allows(tenant_id, OperationKind.DELETE, deletion)
     ((sql, params, context),) = seen
     assert "tb_get_tenant" in sql
-    assert "deleting" in sql
-    assert params == {"id": tenant_id}
+    assert "tenant_deletions" in sql
+    assert params == {"id": tenant_id, "deletion": deletion}
     assert context is None

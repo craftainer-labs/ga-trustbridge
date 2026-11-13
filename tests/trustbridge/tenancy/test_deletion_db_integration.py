@@ -667,22 +667,30 @@ async def test_the_gate_reports_the_standing_of_an_installation(db: Db) -> None:
 async def test_the_gate_admits_a_deletions_own_delete_only_while_it_is_non_terminal(
     db: Db,
 ) -> None:
-    """B10: DELETE passes a disabled tenant with an open deletion; nothing else, never after."""
+    """B10: only its own DELETE passes a disabled tenant with an open deletion, never after."""
     gate = SqlTenantGate(db.app)
     tenant = await _tenant(db)
+    stray = uuid4()
     for kind in (OperationKind.DELETE, OperationKind.ISSUE, None):  # disabled, no deletion
         assert await gate.allows(tenant.id, kind) is False
+        assert await gate.allows(tenant.id, kind, stray) is False
     deletion = (await _request(db, tenant)).deletion_id
     for state in OPEN_STATES:
         await _set_state(db, deletion, state)
-        assert await gate.allows(tenant.id, OperationKind.DELETE) is True
+        assert await gate.allows(tenant.id, OperationKind.DELETE, deletion) is True
+        # a user-initiated delete (no origin) or a made-up origin is refused on a deleting tenant
+        assert await gate.allows(tenant.id, OperationKind.DELETE) is False
+        assert await gate.allows(tenant.id, OperationKind.DELETE, stray) is False
         for refused in (OperationKind.ISSUE, OperationKind.ROTATE, OperationKind.SWITCH, None):
-            assert await gate.allows(tenant.id, refused) is False
+            assert await gate.allows(tenant.id, refused, deletion) is False
     for state in TERMINAL_STATES:
         await _set_state(db, deletion, state)
-        assert await gate.allows(tenant.id, OperationKind.DELETE) is False
-    other = await _tenant(db)  # another tenant's deletion admits nothing here
-    assert await gate.allows(other.id, OperationKind.DELETE) is False
+        assert await gate.allows(tenant.id, OperationKind.DELETE, deletion) is False
+    other = await _tenant(db)  # another tenant's deletion id admits nothing here
+    assert await gate.allows(other.id, OperationKind.DELETE, deletion) is False
+    other_deletion = (await _request(db, other)).deletion_id
+    assert await gate.allows(other.id, OperationKind.DELETE, other_deletion) is True
+    assert await gate.allows(tenant.id, OperationKind.DELETE, other_deletion) is False
     enabled = await _tenant(db, disabled=False)
     for kind in (OperationKind.ISSUE, OperationKind.DELETE, None):
         assert await gate.allows(enabled.id, kind) is True

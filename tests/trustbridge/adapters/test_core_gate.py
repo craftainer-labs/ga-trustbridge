@@ -17,11 +17,13 @@ class Gate:
     def __init__(self, *, open_: bool) -> None:
         """Start open or closed."""
         self.open = open_
-        self.asked: list[tuple[UUID, OperationKind | None]] = []
+        self.asked: list[tuple[UUID, OperationKind | None, UUID | None]] = []
 
-    async def allows(self, tenant_id: UUID, kind: OperationKind | None) -> bool:
+    async def allows(
+        self, tenant_id: UUID, kind: OperationKind | None, deletion_id: UUID | None = None
+    ) -> bool:
         """Record the question and answer."""
-        self.asked.append((tenant_id, kind))
+        self.asked.append((tenant_id, kind, deletion_id))
         return self.open
 
 
@@ -45,7 +47,7 @@ async def test_the_gate_is_asked_with_the_operation_kind(secret_world: World) ->
     gate = Gate(open_=True)
     core = _gated(w, gate)
     await core.ensure_scope(w.tenant, "fake", PUSH_PROD)
-    assert gate.asked == [(w.tenant.id, OperationKind.ISSUE)]
+    assert gate.asked == [(w.tenant.id, OperationKind.ISSUE, None)]
 
 
 async def test_an_in_flight_operation_finishes_after_the_tenant_is_disabled(
@@ -77,7 +79,7 @@ async def test_a_refresh_and_an_orphan_sweep_are_refused(oidc_world: World) -> N
         await core.ensure_scope(w.tenant, "fake", PULL)
     with pytest.raises(TenantDisabledError):
         await core.sweep_orphans(w.tenant, "fake")
-    assert gate.asked[-2:] == [(w.tenant.id, None), (w.tenant.id, None)]
+    assert gate.asked[-2:] == [(w.tenant.id, None, None), (w.tenant.id, None, None)]
 
 
 async def test_without_a_gate_nothing_changes() -> None:
@@ -85,3 +87,19 @@ async def test_without_a_gate_nothing_changes() -> None:
     w = build_world(fake_capabilities(oidc=False))
     result = await w.core.ensure_scope(w.tenant, "fake", PULL)
     assert result.status is OperationStatus.FINISHED
+
+
+async def test_only_a_deletion_origin_reaches_the_gate_on_a_delete(secret_world: World) -> None:
+    """A user's delete carries no deletion id; the deletion engine's call passes its own."""
+    w = secret_world
+    gate = Gate(open_=True)
+    core = _gated(w, gate)
+    await core.ensure_scope(w.tenant, "fake", PUSH_PROD)
+    deletion = UUID(int=7)
+    await core.delete_scope(w.tenant, "fake", PUSH_PROD, deletion_id=deletion)
+    first = gate.asked[-1]
+    assert first == (w.tenant.id, OperationKind.DELETE, deletion)
+    await core.ensure_scope(w.tenant, "fake", PUSH_PROD)
+    await core.delete_scope(w.tenant, "fake", PUSH_PROD)
+    second: tuple[UUID, OperationKind | None, UUID | None] = gate.asked[-1]
+    assert second == (w.tenant.id, OperationKind.DELETE, None)
