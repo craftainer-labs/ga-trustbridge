@@ -13,7 +13,7 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -43,7 +43,15 @@ NEW_FUNCTIONS = (
     "tb_get_tenant(uuid)",
     "tb_set_tenant_disabled(uuid, text, text, boolean)",
     "tb_request_tenant_deletion(uuid, text, bigint, text, text, text, boolean, timestamptz)",
-    "tb_delete_tenant(uuid)",
+    "tb_delete_tenant(uuid, text, bigint)",
+    "tb_claim_tenant_deletion(text, integer)",
+    "tb_renew_tenant_deletion(uuid, text, bigint, integer)",
+    "tb_advance_tenant_deletion(uuid, text, bigint, text, jsonb, jsonb, jsonb)",
+    "tb_retry_tenant_deletion(uuid, text, bigint, text, integer)",
+    "tb_release_tenant_deletion(uuid, text, bigint)",
+    "tb_fail_tenant_deletion(uuid, text, bigint, text)",
+    "tb_cancel_tenant_deletion(uuid)",
+    "tb_finish_tenant_deletion(uuid, text, bigint, jsonb, jsonb)",
 )
 REQUEST = "SELECT * FROM tb_request_tenant_deletion(:t, :host, :inst, :org, :sub, :iss, :platform)"
 REQUEST_NOT_BEFORE = (
@@ -140,9 +148,22 @@ async def _request(db: Db, tenant: Tenant, **kwargs: Any) -> Row[Any]:  # noqa: 
     return (await _app_rows(db, REQUEST, tenant.request(**kwargs)))[0]
 
 
+HOLDER, FENCE = "test-holder", 1
+
+
 async def _set_state(db: Db, deletion: UUID, state: str) -> None:
+    """Force `state`; the `database` step comes with the live lease (`HOLDER`, `FENCE`)."""
     await _admin(
-        db, "UPDATE tenant_deletions SET state = :s WHERE id = :d", {"s": state, "d": deletion}
+        db,
+        "UPDATE tenant_deletions SET state = :s, holder = :h, fence = :f, expires_at = :e "
+        "WHERE id = :d",
+        {
+            "s": state,
+            "d": deletion,
+            "h": HOLDER if state == "database" else None,
+            "f": FENCE,
+            "e": datetime.now(UTC) + timedelta(hours=1) if state == "database" else None,
+        },
     )
 
 
@@ -376,7 +397,7 @@ async def test_the_app_role_can_only_read_deletion_records(db: Db) -> None:
 
 # --- tb_delete_tenant ----------------------------------------------------------------------
 
-DELETE = "SELECT tb_delete_tenant(:t)"
+DELETE = "SELECT tb_delete_tenant(:t, 'test-holder', 1)"
 
 
 async def _exists(db: Db, tenant: Tenant) -> bool:

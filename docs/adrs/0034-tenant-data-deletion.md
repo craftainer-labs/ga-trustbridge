@@ -235,6 +235,11 @@ adapter fakes.
 
 ## Open issues
 
+- **Engine transitions (NG6h-4a-1, migration `5d7a2c8e1b94`).** The record is written only by `SECURITY DEFINER`
+  functions (claim with a fence bump and `SKIP LOCKED`, renew, release, retry with `attempts` and `retry_at`, advance,
+  fail, cancel, finish), each guarded by the live lease (`TB003`) and a valid transition (`TB004`); `tb_delete_tenant`
+  checks holder and fence. `failed` is written only for an explicit non-retryable error or by an operator; transient
+  errors retry with capped backoff. The engine package, reconciler duty, settings, gate and runbook are NG6h-4a-2 and -3.
 - **Re-creation (decided, NG6h-1).** A `done` row in `tenant_deletions` for `(host, installation_id)`
   (or a `database`-step row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` creates nothing (NG6h-1 returned NULL; NG6h-2 raises, below), and `SqlTenants` and
   `MemoryTenants` raise `TenantDeletedError`. A reinstall gets a new installation id and is not
