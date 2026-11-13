@@ -22,7 +22,8 @@ request is retried after the claim TTL, up to `TENANT_RECONCILE_MAX_ATTEMPTS` ti
 """
 
 import logging
-from collections.abc import Awaitable, Mapping, Sequence
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -63,6 +64,33 @@ _STEP_ERRORS = (
 )
 
 
+# `sweep_parked_values` is global (it lists every parked value and reads each operation), so one
+# process runs it at most this often, however many tenants it reconciles in between.
+PARKED_SWEEP_INTERVAL_SECONDS = 60.0
+
+
+class SweepThrottle:
+    """Lets the global parked-value sweep through at most once per interval."""
+
+    def __init__(
+        self,
+        interval: float = PARKED_SWEEP_INTERVAL_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Allow one sweep per `interval` seconds of `monotonic` time."""
+        self._interval = interval
+        self._monotonic = monotonic
+        self._last: float | None = None
+
+    def due(self) -> bool:
+        """True when no sweep was recorded within the interval."""
+        return self._last is None or self._monotonic() - self._last >= self._interval
+
+    def done(self) -> None:
+        """Record a successful sweep."""
+        self._last = self._monotonic()
+
+
 class ReconcileIncompleteError(Exception):
     """Some steps failed; the others ran. The request is retried after the claim TTL."""
 
@@ -76,8 +104,11 @@ class CredentialReconciler:
         store: CredentialStore,
         tenants: TenantResolver,
         adapters: Sequence[str],
+        *,
+        sweep: SweepThrottle | None = None,
     ) -> None:
         """Bind the core, the store it reads, the tenant resolver and the enabled adapters."""
+        self._sweep = sweep or SweepThrottle()
         self._core = core
         self._store = store
         self._tenants = tenants
@@ -109,10 +140,7 @@ class CredentialReconciler:
                         tenant_id,
                         f"{adapter} sweep_orphans",
                     )
-            await extend()
-            failed += await self._guarded(
-                self._core.sweep_parked_values(), tenant_id, "sweep_parked_values"
-            )
+            failed += await self._sweep_parked(tenant_id, extend)
         except TenantDisabledError:
             logger.info(
                 "tenant reconcile stopped: tenant is disabled", extra={"tenant": str(tenant_id)}
@@ -121,6 +149,18 @@ class CredentialReconciler:
         if failed:
             msg = f"{failed} reconcile step(s) failed"
             raise ReconcileIncompleteError(msg)
+
+    async def _sweep_parked(self, tenant_id: UUID, extend: Extend) -> int:
+        """The global parked-value sweep, at most once per interval; the number that failed."""
+        if not self._sweep.due():
+            return 0
+        await extend()
+        failed = await self._guarded(
+            self._core.sweep_parked_values(), tenant_id, "sweep_parked_values"
+        )
+        if not failed:
+            self._sweep.done()
+        return failed
 
     async def _resume(self, tenant_id: UUID, extend: Extend) -> int:
         """Resume the tenant's open operations; the number that failed."""

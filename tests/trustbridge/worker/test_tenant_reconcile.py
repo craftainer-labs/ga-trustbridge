@@ -25,6 +25,7 @@ from trustbridge.worker.runtime import Core
 from trustbridge.worker.tenant_reconcile import (
     CredentialReconciler,
     ReconcileIncompleteError,
+    SweepThrottle,
     build_tenant_reconciler,
 )
 
@@ -239,3 +240,22 @@ def test_the_factory_composes_the_core_for_the_reconciler_only_with_a_database()
     body = build_tenant_reconciler(core, sessions, classes)
     assert isinstance(body, CredentialReconciler)
     assert body._adapters == ("a", "b")
+
+
+async def test_the_global_parked_sweep_runs_once_per_interval() -> None:
+    """Many requests in a minute cost one sweep; a failed sweep is not counted as done."""
+    w = build_world(fake_capabilities(oidc=False))
+    core = StubCore()
+    await _stubbed(w, core)
+    now = [0.0]
+    body = CredentialReconciler(
+        cast("Any", core),
+        w.store,
+        w.deps.tenants,
+        ["fake"],
+        sweep=SweepThrottle(60.0, lambda: now[0]),
+    )
+    for at in (0.0, 10.0, 59.0, 61.0):
+        now[0] = at
+        await body.reconcile(w.tenant.id, Extender())
+    assert core.steps.count("parked") == 2
