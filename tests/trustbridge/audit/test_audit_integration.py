@@ -863,6 +863,9 @@ async def _snapshot(conn: AsyncConnection, step: str) -> dict[str, object]:
 async def _migration_steps(conn: AsyncConnection) -> dict[str, object]:
     """Walk the revision down and up with legacy and object rows; each step's full snapshot."""
     steps: dict[str, object] = {}
+    # The later idempotency index is built on `on_behalf_of`'s jsonb operators, so the column's
+    # type cannot change under it; the test's transaction is rolled back, so the drop is scoped.
+    await conn.execute(text("DROP INDEX ux_audit_events_webhook_delivery"))
     await conn.run_sync(_run_migration, "downgrade")
     steps["column before"] = (await conn.execute(text(_COLUMN_TYPE))).scalar_one()
     for suffix, value in (("a", "sender=1;delivery=d"), ("b", None), ("c", "garbage")):
@@ -1144,7 +1147,7 @@ async def test_a_conflict_on_the_primary_key_still_raises(db: Db) -> None:
     event = _event(tenant, action="tenant.disable")
     async with tenant_session(db.app, tenant) as session, session.begin():
         await append(session, event)
-    with pytest.raises(DBAPIError, match="audit_events_pkey"):
+    with pytest.raises(DBAPIError, match="pk_audit_events"):
         async with tenant_session(db.app, tenant) as session, session.begin():
             await append(session, event)
 
