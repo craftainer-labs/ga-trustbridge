@@ -297,12 +297,14 @@ async def test_the_engine_resumes_the_step_across_runs_when_its_budget_ends(db: 
         github=ScriptedStep(),
         database=_step(db),
     )
-    # A budget of a few passes: the engine releases the lease and a second run finishes.
+    # Every renew ticks the clock once and the budget is 0.15 * 60 = 9 ticks: enough for the
+    # drain's three renews (the drain keeps no cursor) but not for the whole database step, so the
+    # engine releases the lease mid-step and a later run resumes from the saved cursor.
     ticks = iter(range(10_000))
     engine = DeletionEngine(
         SqlDeletionStore(db.app),
         steps,
-        replace(CONFIG, budget_fraction=0.05),
+        replace(CONFIG, budget_fraction=0.15),
         clock=lambda: next(ticks) * 1.0,
     )
     states = []
