@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tests.trustbridge.helpers import host, make_settings
 from trustbridge.audit import (
     MAX_PAGE_SIZE,
+    Action,
     ActorType,
     AuditEvent,
     AuditQuery,
@@ -329,3 +330,57 @@ def test_the_purge_settings_have_defaults_and_bounds() -> None:
     ):
         with pytest.raises(ValidationError):
             make_settings([host()], **bad)
+
+
+class _InsertResult:
+    def __init__(self, rowcount: int) -> None:
+        self.rowcount = rowcount
+
+
+class _InsertSession:
+    """Records the statement `append` sends and answers with a fixed inserted-row count."""
+
+    def __init__(self, rowcount: int) -> None:
+        self.rowcount = rowcount
+        self.statements: list[str] = []
+
+    async def execute(self, statement: object, params: object = None) -> _InsertResult:
+        self.statements.append(str(statement))
+        return _InsertResult(self.rowcount)
+
+
+def _sync_event(**overrides: Any) -> AuditEvent:  # noqa: ANN401
+    values: dict[str, Any] = {
+        "actor_type": ActorType.SYSTEM,
+        "actor_sub": "github-webhook",
+        "action": Action.TENANT_SYNC,
+        "resource_type": "tenant",
+        "outcome": Outcome.SUCCESS,
+        "tenant_id": uuid4(),
+        "on_behalf_of": {"github_sender_id": 1, "delivery_id": "d"},
+    }
+    values.update(overrides)
+    return AuditEvent(**values)
+
+
+@pytest.mark.parametrize(("inserted", "returns_id"), [(1, True), (0, False)])
+async def test_a_keyed_append_returns_the_id_only_when_a_row_was_inserted(
+    inserted: int, returns_id: bool
+) -> None:
+    """A no-op insert (a redelivered webhook's event) is `None`, never an id nothing stored."""
+    session = _InsertSession(inserted)
+    event = _sync_event()
+    result = await store_module.append(cast("AsyncSession", session), event)
+    assert result == (event.id if returns_id else None)
+    (sql,) = session.statements
+    assert "ON CONFLICT (tenant_id, action, (on_behalf_of->>'delivery_id'))" in sql
+    assert "WHERE on_behalf_of IS NOT NULL DO NOTHING" in sql
+
+
+@pytest.mark.parametrize("overrides", [{"on_behalf_of": None}, {"tenant_id": None}])
+async def test_an_unkeyed_append_is_a_plain_insert(overrides: dict[str, Any]) -> None:
+    """No delivery id, or no tenant (the SELECT policy would reject it): no ON CONFLICT."""
+    session = _InsertSession(1)
+    event = _sync_event(**overrides)
+    assert await store_module.append(cast("AsyncSession", session), event) == event.id
+    assert "ON CONFLICT" not in session.statements[0]

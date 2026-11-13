@@ -26,7 +26,7 @@ async def record_export(  # noqa: PLR0913 - one value per recorded fact
     complete: bool,
     source_ip: str | None,
     request_id: str | None,
-) -> UUID:
+) -> UUID | None:
     """Write the export's own event in its own transaction (in the tenant's context if any)."""
     details: dict[str, object] = {
         "scope": "instance" if tenant_id is None else "tenant",

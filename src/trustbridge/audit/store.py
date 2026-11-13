@@ -14,10 +14,10 @@ import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import RowMapping, text
+from sqlalchemy import CursorResult, RowMapping, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.audit.model import (
@@ -40,7 +40,7 @@ _COLUMNS = (
     'resource_id, outcome, "before"::text AS "before", "after"::text AS "after", request_id, '
     "trace_id, schema_version"
 )
-_INSERT = text(
+_INSERT_SQL = (
     "INSERT INTO audit_events (id, tenant_id, actor_type, actor_sub, actor_iss, on_behalf_of, "
     'source_ip, action, resource_type, resource_id, outcome, "before", "after", request_id, '
     "trace_id, schema_version) VALUES (CAST(:id AS uuid), CAST(:tenant_id AS uuid), :actor_type, "
@@ -49,6 +49,18 @@ _INSERT = text(
     ":resource_type, :resource_id, :outcome, CAST(CAST(:before AS text) AS jsonb), "
     "CAST(CAST(:after AS text) AS jsonb), :request_id, :trace_id, :schema_version)"
 )
+# `preserve_rowcount` (SQLAlchemy 2.0.28+) memoizes the DBAPI's count for an INSERT, which
+# SQLAlchemy otherwise keeps only for UPDATE and DELETE; `append` reads it for a no-op insert.
+_INSERT = text(_INSERT_SQL).execution_options(preserve_rowcount=True)
+# The idempotency key of a webhook-driven event (NG6h-2b): the target repeats the partial unique
+# index `ux_audit_events_webhook_delivery` exactly, so PostgreSQL infers it. Used only for an
+# event that has the key (`on_behalf_of` and `tenant_id` set): a conflict target needs SELECT on
+# its columns, so the SELECT policy would also apply to the new row, and a null-tenant row
+# (a denial, no tenant context) is not selectable by the app role.
+_INSERT_ONCE = text(
+    _INSERT_SQL + " ON CONFLICT (tenant_id, action, (on_behalf_of->>'delivery_id')) "
+    "WHERE on_behalf_of IS NOT NULL DO NOTHING"
+).execution_options(preserve_rowcount=True)
 _LIST_ALL = text(
     f"SELECT {_COLUMNS} FROM tb_audit_list("  # noqa: S608 -- constants only
     "CAST(:tenant_id AS uuid), CAST(:after_seq AS bigint), CAST(:before_seq AS bigint), "
@@ -75,13 +87,19 @@ def _load(value: str | None) -> dict[str, Any] | None:
     return None if value is None else json.loads(value)
 
 
-async def append(session: AsyncSession, event: AuditEvent) -> UUID:
+async def append(session: AsyncSession, event: AuditEvent) -> UUID | None:
     """Insert `event` in the session's transaction and return its id. Does not commit.
 
     The row's `tenant_id` must be null or the session's tenant context (the insert policy).
+
+    A webhook-driven event (`on_behalf_of` set) is idempotent on `(tenant_id, action,
+    delivery_id)`: a redelivery finds the row and inserts nothing, and this returns `None`
+    (the count of inserted rows, not `RETURNING`, which a null-tenant row could not read back).
+    Every other event always inserts (with a plain `INSERT`) and returns its id.
     """
-    await session.execute(
-        _INSERT,
+    keyed = event.on_behalf_of is not None and event.tenant_id is not None
+    result = await session.execute(
+        _INSERT_ONCE if keyed else _INSERT,
         {
             "id": event.id,
             "tenant_id": event.tenant_id,
@@ -101,7 +119,7 @@ async def append(session: AsyncSession, event: AuditEvent) -> UUID:
             "schema_version": event.schema_version,
         },
     )
-    return event.id
+    return event.id if cast("CursorResult[Any]", result).rowcount else None
 
 
 def _record(row: RowMapping) -> AuditRecord:

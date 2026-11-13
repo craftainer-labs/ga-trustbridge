@@ -20,6 +20,8 @@ LEASE = Lease(record().id, "h-1", 7)
 
 
 class _Result:
+    rowcount = 1  # an audit `append` inserted its row (NG6h-2b reads the count)
+
     def __init__(self, rows: list[dict[str, Any]], scalar: Any = None) -> None:  # noqa: ANN401
         self._rows = rows
         self._scalar = scalar
