@@ -39,6 +39,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import Settings
 from app.db import build_engine
+from tests.trustbridge.worker.harness import Harness
 from trustbridge.adapters.interface import CredentialSlot, CredentialState
 from trustbridge.adapters.store import (
     Operation,
@@ -70,6 +71,7 @@ from trustbridge.audit.credentials import (
 )
 from trustbridge.audit.denial import Denial
 from trustbridge.tenancy import install_tenant_hook, tenant_session
+from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
 
 pytestmark = pytest.mark.integration
 
@@ -505,6 +507,36 @@ async def test_retention_zero_never_purges_and_otherwise_purges_in_batches(
     assert await purge_expired(db.app, retention_days=100, min_days=90, now=past) == 0
     assert await purge_expired(db.app, retention_days=100, min_days=90) == 1
     assert await _count(db, "resource_id IN ('age-10', 'age-150')") == 1
+
+
+async def test_the_reconciler_purge_job_removes_old_rows_in_bounded_runs(
+    fresh_db: Db,
+) -> None:  # inv. 15
+    """Old rows go, recent rows stay; a run stops at its batch cap and the next one continues."""
+    db = fresh_db
+    await _seed_aged(db, [400, 399, 398, 397, 396, 150, 10])
+    h = await Harness(
+        {}, audit_retention_days=365, audit_purge_batch_size=2, audit_purge_max_batches=2
+    ).start()
+    recon = Reconciler(
+        h.settings,
+        ReconcilerDeps(
+            store=h.store,
+            queue=h.queue,
+            relay=h.relay,
+            hosts=h.hosts,
+            leases=h.leases,
+            deliveries=None,
+            clock=lambda: datetime.now(UTC),
+            audit_sessions=db.app,
+        ),
+    )
+    assert await recon.audit_purge() == 4  # two batches of two: the cap, though one row is left
+    assert await _count(db, "resource_id LIKE 'age-%'") == 3
+    assert await recon.audit_purge() == 1
+    assert await _count(db, "resource_id IN ('age-150', 'age-10')") == 2
+    assert await recon.audit_purge() == 0
+    assert await _count(db, "action = 'audit.purge'") == 3  # the database's own summaries
 
 
 async def _count(db: Db, where: str) -> int:

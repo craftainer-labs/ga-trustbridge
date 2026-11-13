@@ -1,4 +1,4 @@
-"""The reconciler process: relay ticks, re-relay sweep, delivery reconciliation, retention.
+"""The reconciler process: relay ticks, re-relay sweep, delivery reconciliation, retention, purge.
 
 GitHub never redelivers on its own (ADR 0028 item 4). The delivery reconciler lists failed
 hook deliveries per `ready` host with the App JWT endpoints (`GET /app/hook/deliveries`,
@@ -6,9 +6,9 @@ hook deliveries per `ready` host with the App JWT endpoints (`GET /app/hook/deli
 implements it) and redelivers only those whose `X-GitHub-Delivery` guid has **no stored
 row** (invariant 8); a stored row is durable and owned by the relay and the worker.
 
-Singleton duties (delivery reconciliation per host, DB retention) run under a lease row so
-replicas do not duplicate them (EB-6); the relay tick, the re-relay sweep and stream trimming
-are idempotent and run on every replica.
+Singleton duties (delivery reconciliation per host, DB retention, audit purge) run under a
+lease row so replicas do not duplicate them (EB-6); the relay tick, the re-relay sweep and
+stream trimming are idempotent and run on every replica.
 """
 
 import asyncio
@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from trustbridge.audit.store import purge_expired
 from trustbridge.github.availability import HostMonitor
 from trustbridge.settings import GitHubHostConfig, TrustbridgeSettings
 from trustbridge.worker import metrics
@@ -144,6 +147,7 @@ class ReconcilerDeps:
     deliveries: HookDeliveryClient | None
     clock: Clock = utcnow
     heartbeat: Heartbeat | None = None
+    audit_sessions: async_sessionmaker[AsyncSession] | None = None  # None: mock mode, no purge
 
 
 class Reconciler:
@@ -214,6 +218,35 @@ class Reconciler:
         except LeaseBusy:
             return
 
+    async def audit_purge(self) -> int:
+        """Delete audit events past `AUDIT_RETENTION_DAYS` (singleton under a lease).
+
+        Retention 0 never purges. Bounded: batches of `AUDIT_PURGE_BATCH_SIZE`, at most
+        `AUDIT_PURGE_MAX_BATCHES` per run, a heartbeat per batch. The purge's own summary event
+        is written by `tb_audit_purge` (ADR 0032), so this job writes no audit row.
+        """
+        s = self._s
+        sessions = self._d.audit_sessions
+        if sessions is None or s.audit_retention_days == 0:
+            return 0
+        try:
+            async with self._d.leases.hold(NIL_TENANT, CORE_ADAPTER, "audit-purge"):
+                self._beat("audit-purge")
+                deleted = await purge_expired(
+                    sessions,
+                    retention_days=s.audit_retention_days,
+                    min_days=s.audit_retention_min_days,
+                    batch_size=s.audit_purge_batch_size,
+                    max_batches=s.audit_purge_max_batches,
+                    on_batch=lambda: self._beat("audit-purge"),
+                    now=self._d.clock(),
+                )
+        except LeaseBusy:
+            return 0
+        metrics.audit_purged.add(deleted)
+        logger.info("audit purge", extra={"deleted_events": deleted})
+        return deleted
+
     async def trim_streams(self) -> None:
         """Trim `tb:events` below what the group acknowledged, the dead letter by age, set lag."""
         await self._d.queue.trim_events()
@@ -232,6 +265,7 @@ class Reconciler:
             ("resweep", s.relay_recheck_seconds, self.resweep),
             ("deliveries", s.delivery_reconcile_interval_seconds, self.reconcile_deliveries),
             ("retention", s.retention_interval_seconds, self.retention),
+            ("audit-purge", s.audit_purge_interval_seconds, self.audit_purge),
             ("trim", s.stream_trim_interval_seconds, self.trim_streams),
         ]
         for name, interval, _job in schedule:

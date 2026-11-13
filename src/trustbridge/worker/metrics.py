@@ -21,6 +21,9 @@ deliveries_dead = _meter.create_counter(
 deliveries_failed = _meter.create_counter(
     "trustbridge.deliveries.failed", description="Handler failures (the failure counter)"
 )
+audit_purged = _meter.create_counter(
+    "trustbridge.audit.purged", description="Audit events deleted by the retention purge"
+)
 
 _lag: dict[str, int] = {}
 

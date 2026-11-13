@@ -217,6 +217,9 @@ existing Secret. A null or empty value is not set, so the application default ap
 {{- $_ := set $c "AUDIT_RETENTION_DAYS" $tb.audit.retentionDays -}}
 {{- $_ := set $c "AUDIT_RETENTION_MIN_DAYS" $tb.audit.retentionMinDays -}}
 {{- $_ := set $c "AUDIT_EXPORT_LAG_SECONDS" $tb.audit.exportLagSeconds -}}
+{{- $_ := set $c "AUDIT_PURGE_INTERVAL_SECONDS" $tb.audit.purgeIntervalSeconds -}}
+{{- $_ := set $c "AUDIT_PURGE_BATCH_SIZE" $tb.audit.purgeBatchSize -}}
+{{- $_ := set $c "AUDIT_PURGE_MAX_BATCHES" $tb.audit.purgeMaxBatches -}}
 {{- $_ := set $c "AUDIT_DENIED_WINDOW_SECONDS" $tb.audit.deniedWindowSeconds -}}
 {{- $_ := set $c "AUDIT_DENIED_BURST" $tb.audit.deniedBurst -}}
 {{- $_ := set $c "AUDIT_DENIED_TIMEOUT_MS" $tb.audit.deniedTimeoutMs -}}

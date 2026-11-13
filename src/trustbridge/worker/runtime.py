@@ -273,6 +273,7 @@ async def run_process(
                     leases=core.leases,
                     deliveries=core.runtime.deliveries,
                     heartbeat=heartbeat,
+                    audit_sessions=sessions,
                 )
                 await Reconciler(settings, rdeps).run(stop)
         finally:

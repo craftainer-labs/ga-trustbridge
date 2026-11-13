@@ -388,6 +388,9 @@ trustbridge:
     retentionDays: 365
     retentionMinDays: 90
     exportLagSeconds: 30
+    purgeIntervalSeconds: 3600
+    purgeBatchSize: 1000
+    purgeMaxBatches: 100
     deniedWindowSeconds: 60
     deniedBurst: 5
     deniedTimeoutMs: 50

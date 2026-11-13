@@ -143,7 +143,7 @@ ADR names them, with no emitter:
 | --- | --- |
 | (none left for the admin API.) The router walk `admin.guards.mutations_without_emitter` fails any mutating route without an `emits` marker. Emitted since NG6e-2 to NG6e-5: `credential.rotate`, `tenant.disable`, `tenant.enable`, `tenant.reconcile`, `delivery.requeue` and `host.registration.start`, `.manual`, `.complete` (the `host_registration` shape); the credential events of a rotation made through the API have the system actor `api` | done |
 | The deletion's own events (0034) | NG6h |
-| The reconciler duty calling `purge_expired` (ADR 0032 "Retention") | NG6h |
+| The reconciler duty calling `purge_expired` (ADR 0032 "Retention") | done (NG6h-3a): the `audit-purge` job |
 | A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export"). No such timeout exists on main and the engine is the template's (`app.db`) | NG6h (api and deletion batches). Left out of NG6d: the read routes do not need it, and no connection on main sets a timeout to check against |
 
 An operation ending `failed` (rolled back, previous state restored) has no event of its own
@@ -161,7 +161,7 @@ All take an `AsyncSession` (or factory) and leave the transaction to the caller,
 | `get_event(session, event_id) -> AuditRecord \| None` | One event by id, any tenant (null-tenant included), through `tb_audit_get()`. Instance scope like `list_events(instance_scope=True)`: the caller must have checked the instance-scoped `auditor` role. Imported from `trustbridge.audit.store`. |
 | `export_ndjson(session, query, *, tenant_id=None, instance_scope=False, lag_seconds, page_size) -> AsyncIterator[bytes]` | Ascending `seq`, one line per event, resumable with `AuditQuery.after_seq`. Same scope rules as `list_events`. |
 | `purge_batch(session, *, before, min_days, batch_size)` | One `tb_audit_purge` call; returns rows deleted. |
-| `purge_expired(factory, *, retention_days, min_days, batch_size, now)` | Loops `purge_batch`, one short transaction per batch; `retention_days=0` never purges. For the reconciler's singleton duty. |
+| `purge_expired(factory, *, retention_days, min_days, batch_size, max_batches, on_batch, now)` | Loops `purge_batch`, one short transaction per batch, at most `max_batches` per call; `retention_days=0` never purges. Raises `ValueError` before any transaction for a negative retention, a non-zero retention below `min_days`, a `batch_size` outside 1..10000 or `max_batches < 1`. `on_batch()` runs after each committed batch. For the reconciler's singleton duty. |
 
 **Cursor.** `AuditPage.next_seq` is the last item's `seq` when more follow, else `None`. Continue
 an ascending read with `AuditQuery(after_seq=next_seq)`, a descending one
@@ -213,7 +213,15 @@ numeric `github_sender_id` and a string `delivery_id`. No roles, no grants.
 ## Settings
 
 `AUDIT_RETENTION_DAYS` (365; `0` never purges; otherwise at least the floor),
-`AUDIT_RETENTION_MIN_DAYS` (90), `AUDIT_EXPORT_LAG_SECONDS` (30).
+`AUDIT_RETENTION_MIN_DAYS` (90), `AUDIT_EXPORT_LAG_SECONDS` (30), and for the purge duty
+`AUDIT_PURGE_INTERVAL_SECONDS` (3600), `AUDIT_PURGE_BATCH_SIZE` (1000, at most 10000) and
+`AUDIT_PURGE_MAX_BATCHES` (100 batches per run, so a run holds its lease for a bounded time; the
+next run continues).
+
+The reconciler's `audit-purge` job (`Reconciler.audit_purge`) holds the `audit-purge` lease (one
+replica at a time), beats its heartbeat per batch, is a no-op when retention is 0, counts rows in
+the `trustbridge.audit.purged` metric and logs the count. It writes no audit row itself:
+`tb_audit_purge` writes the `audit.purge` summary event per batch.
 
 ## Rules
 

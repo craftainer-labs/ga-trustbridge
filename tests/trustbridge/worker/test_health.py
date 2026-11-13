@@ -221,7 +221,14 @@ async def test_the_worker_and_reconciler_register_their_loops_with_derived_limit
         ),
     )
     await recon.run(rstop)
-    assert set(rbeat._limits) == {"relay-tick", "resweep", "deliveries", "retention", "trim"}
+    assert set(rbeat._limits) == {
+        "relay-tick",
+        "resweep",
+        "deliveries",
+        "retention",
+        "audit-purge",
+        "trim",
+    }
     assert rbeat._limits["resweep"] == stale_after(h.settings, h.settings.relay_recheck_seconds)
 
 
