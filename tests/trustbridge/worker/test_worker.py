@@ -352,14 +352,15 @@ async def test_a_lost_claim_does_not_dead_letter_a_row_that_was_settled() -> Non
 
     h = await Harness({"push": handler}).start()
     counted = h.store.record_failure
+    target = key("d1")
 
     async def record_then_settle(
-        k: DeliveryKey, error: str, now: datetime, later: datetime, *, attempts: int
+        key: DeliveryKey, error: str, now: datetime, next_attempt_at: datetime, *, attempts: int
     ) -> int:
-        value = await counted(k, error, now, later, attempts=attempts)
+        value = await counted(key, error, now, next_attempt_at, attempts=attempts)
         if value == 3:
             # settled by someone else between the counted failure and the dead mark
-            await h.store.mark_processed(key("d1"), h.clock(), attempts=3)
+            await h.store.mark_processed(target, h.clock(), attempts=3)
         return value
 
     h.store.record_failure = record_then_settle  # type: ignore[method-assign]
