@@ -464,7 +464,8 @@ def upgrade() -> None:
         op.execute("SET statement_timeout = '600s'")
         # A failed or cancelled CONCURRENTLY build leaves an INVALID index of the same name, which
         # IF NOT EXISTS would skip: drop it so this run (or a re-run) rebuilds it.
-        if op.get_bind().scalar(
+        # Offline rendering (the SQL lint) has no catalog to query.
+        if not op.get_context().as_sql and op.get_bind().scalar(
             sa.text(
                 "SELECT EXISTS (SELECT 1 FROM pg_index WHERE NOT indisvalid"
                 " AND indexrelid = to_regclass('public.ix_wd_tenant'))"
