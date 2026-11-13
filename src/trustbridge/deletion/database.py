@@ -12,9 +12,9 @@ every field that can hold personal or tenant data: `body`, `headers` (the allow-
 headers, which are not read once a row is `deleted`; the column is NOT NULL, so it becomes `{}`)
 and `last_error` (handler error text). The row becomes `deleted` (never relayed or handled again).
 
-Every pass starts with a lease check in its own transaction: the holder, the fence and an
-unexpired lease for a deletion still in the `database` step (a `SELECT`, because the app role
-cannot lock `tenant_deletions`). It is a guard, not a lock: a holder that loses the lease in the
+Every pass starts with a lease check, in the same transaction as the batch: the holder, the
+fence and an unexpired lease for a deletion still in the `database` step (a `SELECT`, because the
+app role cannot lock `tenant_deletions`). It is a guard, not a lock: a holder that loses the lease in the
 instant after the check deletes at most one more batch of rows that the new holder would delete
 anyway, and `tb_delete_tenant` checks again that nothing is left.
 
