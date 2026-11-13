@@ -31,7 +31,7 @@ spec:
   {{- end }}
 {{- end }}
 ---
-{{- /* worker and reconciler listen on nothing: no ingress at all */ -}}
+# worker and reconciler listen on nothing: no ingress at all
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
