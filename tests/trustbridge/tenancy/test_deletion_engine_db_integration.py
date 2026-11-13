@@ -49,6 +49,7 @@ CANCEL = "SELECT tb_cancel_tenant_deletion(:d)"
 FINISH = "SELECT tb_finish_tenant_deletion(:d, :h, :f, CAST(:counts AS jsonb), NULL)"
 DELETE = "SELECT tb_delete_tenant(:t, :h, :f)"
 LOST = "deletion lease lost"
+OLDER_FUNCTIONS = NEW_FUNCTIONS[:3]  # tb_get_tenant, tb_set_tenant_disabled, tb_request_
 CHAIN = ("requested", "draining", "platform", "github", "database")
 
 
@@ -176,14 +177,18 @@ async def test_the_app_role_may_execute_but_not_write_and_the_search_path_is_pin
 ) -> None:
     """The app role may execute but not write and the search path is pinned."""
     for function in NEW_FUNCTIONS:
+        # the older definers keep their path; this migration's functions add pg_temp last
+        path = (
+            "pg_catalog, public" if function in OLDER_FUNCTIONS else "pg_catalog, public, pg_temp"
+        )
         row = (
             await _admin_rows(
                 db,
                 "SELECT has_function_privilege('trustbridge_app', :f, 'EXECUTE'), "
                 "has_function_privilege('public', :f, 'EXECUTE'), "
-                "(SELECT p.prosecdef AND p.proconfig @> ARRAY['search_path=pg_catalog, public'] "
+                "(SELECT p.prosecdef AND p.proconfig @> ARRAY[CAST(:p AS text)] "
                 "FROM pg_proc p WHERE p.oid = CAST(:f AS regprocedure))",
-                {"f": function},
+                {"f": function, "p": f"search_path={path}"},
             )
         )[0]
         assert tuple(row) == (True, False, True), function
@@ -521,7 +526,7 @@ async def test_operator_fail_needs_no_lease_but_refuses_a_live_one(db: Db) -> No
         None,
         "operator admin-7: stuck",
     )
-    with pytest.raises(DBAPIError, match=LOST):  # the former holder
+    with pytest.raises(DBAPIError, match="deletion is terminal"):  # the former holder
         await _app_rows(db, RENEW, {**_lease(deletion, row), "ttl": 10})
     with pytest.raises(DBAPIError, match="deletion is terminal"):
         await _app_rows(db, OPERATOR_FAIL, args)

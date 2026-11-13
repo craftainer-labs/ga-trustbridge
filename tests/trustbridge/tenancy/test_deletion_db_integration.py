@@ -792,6 +792,14 @@ async def test_downgrade_is_refused_while_a_deletion_record_exists_and_round_tri
         deletion = (await _request(scratch, tenant)).deletion_id
         refused = await _alembic(scratch.name, "downgrade", PREVIOUS)
         assert refused.returncode != 0
+        assert "non-terminal tenant deletions exist" in refused.stderr  # 5d7a2c8e1b94's guard
+        await _admin(
+            scratch,
+            "UPDATE tenant_deletions SET state = 'cancelled' WHERE id = :d",
+            {"d": deletion},
+        )
+        refused = await _alembic(scratch.name, "downgrade", PREVIOUS)
+        assert refused.returncode != 0
         assert "cannot downgrade" in refused.stderr
         assert await _admin_scalar(scratch, "SELECT count(*) FROM tenant_deletions") == 1
         await _admin(scratch, "DELETE FROM tenant_deletions WHERE id = :d", {"d": deletion})
