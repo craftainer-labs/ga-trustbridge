@@ -298,23 +298,17 @@ class Reconciler:
 
         Retention 0 (the default) never purges, and with no `RecordPurger` composed the duty does
         nothing. Bounded by the purger (batches, and half the lease TTL), with a beat per batch.
-        The database function deletes `cancelled` records and `done` records whose tombstone exists; an eligible
-        `done` record without one is never deleted and is logged here at WARNING (ADR 0034, B4).
+        The database function deletes `cancelled` records and `done` records whose tombstone
+        exists; an eligible `done` record without one is never deleted and is logged here at
+        WARNING (ADR 0034, B4).
         """
         purger = self._d.record_purger
         if purger is None or self._s.deletion_retention_days == 0:
             return 0
-        purged = 0
         try:
             async with self._d.leases.hold(NIL_TENANT, CORE_ADAPTER, "deletion-purge"):
                 self._beat("deletion-purge")
-
-                def account(batch: int) -> None:
-                    nonlocal purged
-                    purged += batch
-                    self._beat("deletion-purge")
-
-                result = await purger.purge(account)
+                result = await purger.purge(lambda _batch: self._beat("deletion-purge"))
         except LeaseBusy:
             return 0
         if result.unprotected:
@@ -322,8 +316,9 @@ class Reconciler:
                 "finished tenant deletion records without a tombstone were left in place",
                 extra={"unprotected_records": result.unprotected},
             )
-        logger.info("deletion record purge", extra={"purged_records": purged})
-        return purged
+        if result.purged:
+            logger.info("deletion record purge", extra={"purged_records": result.purged})
+        return result.purged
 
     async def trim_streams(self) -> None:
         """Trim `tb:events` below what the group acknowledged, the dead letter by age, set lag."""

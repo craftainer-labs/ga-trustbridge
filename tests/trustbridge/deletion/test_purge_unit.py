@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.deletion import metrics
 from trustbridge.deletion.ports import PurgeResult
-from trustbridge.deletion.purge import SqlRecordPurger
+from trustbridge.deletion.purge import CLOCK_SKEW_MARGIN, SqlRecordPurger
 
 NOW = datetime(2026, 6, 1, tzinfo=UTC)
 
@@ -77,6 +77,8 @@ def _purger(log: _Log, **over: Any) -> SqlRecordPurger:  # noqa: ANN401
         ({"retention_days": -1}, "must not be negative"),
         ({"retention_days": 30}, "at least min_days"),
         ({"min_days": 0, "retention_days": 0}, "min_days must be at least 1"),
+        ({"min_days": 0}, "min_days must be at least 1"),
+        ({"budget_seconds": 0}, "budget_seconds must be positive"),
         ({"batch_size": 0}, "batch_size"),
         ({"batch_size": 10001}, "batch_size"),
         ({"max_batches": 0}, "max_batches"),
@@ -111,7 +113,7 @@ async def test_it_runs_batches_until_a_short_one_and_reports_each(
     assert added == [5, 5, 2]
     assert log.transactions == 3
     assert log.calls[0] == {
-        "before": NOW - timedelta(days=400),
+        "before": NOW - timedelta(days=400) - CLOCK_SKEW_MARGIN,
         "min_days": 90,
         "batch": 5,
     }

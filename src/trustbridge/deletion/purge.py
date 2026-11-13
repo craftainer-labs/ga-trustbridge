@@ -2,8 +2,8 @@
 
 `SqlRecordPurger` calls `tb_purge_tenant_deletions` (migration `7b2d4f8a1c36`) in short
 transactions, one per batch, and implements `RecordPurger` (`deletion.ports`). The function removes
-only `cancelled` records and `done` records (whose tombstone exists) older than the cut-off; the tombstone itself
-(`tenant_tombstones`) is never touched, so a still-installed App stays refused (B2). Retention 0
+only `cancelled` records and `done` records (whose tombstone exists) older than the cut-off; the
+tombstone itself (`tenant_tombstones`) is never touched, so a still-installed App stays refused (B2). Retention 0
 never purges. Mirrors the audit purge (`audit.store.purge_expired`): negative retention, a non-zero
 retention below the floor, a batch outside 1..10000 and a batch count below 1 fail closed with
 `ValueError` before any transaction.
@@ -23,6 +23,10 @@ from trustbridge.deletion.ports import PurgeResult
 
 logger = logging.getLogger(__name__)
 
+# The cut-off is the app's clock minus the retention, and the function refuses one younger than the
+# database's now() minus the floor; a retention equal to the floor would fail on any app-clock lead.
+# Purging a little later is harmless, so the cut-off is moved back by this margin.
+CLOCK_SKEW_MARGIN: Final = timedelta(minutes=5)
 MAX_PURGE_BATCH: Final = 10000  # the ceiling `tb_purge_tenant_deletions` enforces
 _PURGE = text(
     "SELECT purged, unprotected FROM tb_purge_tenant_deletions("
@@ -48,10 +52,12 @@ class SqlRecordPurger:
         """Validate the bounds (fail closed) and keep them; nothing touches the database yet."""
         if retention_days < 0:
             raise ValueError("retention_days must not be negative (0 means never purge)")
-        if 0 < retention_days < min_days:
-            raise ValueError(f"retention_days must be 0 or at least min_days ({min_days})")
         if min_days < 1:
             raise ValueError("min_days must be at least 1")
+        if 0 < retention_days < min_days:
+            raise ValueError(f"retention_days must be 0 or at least min_days ({min_days})")
+        if budget_seconds is not None and budget_seconds <= 0:
+            raise ValueError("budget_seconds must be positive")
         if not 1 <= batch_size <= MAX_PURGE_BATCH:
             raise ValueError(f"batch_size must be between 1 and {MAX_PURGE_BATCH}")
         if max_batches < 1:
@@ -70,11 +76,11 @@ class SqlRecordPurger:
 
         Stops early when a batch is short, or when `budget_seconds` has elapsed (so a caller
         holding a lease ends before it could lapse); the next call continues. Returns the total
-        purged and the unprotected count the last batch reported.
+        purged and the unprotected count the last batch reported (0 when no batch ran).
         """
         if self._retention_days == 0:
             return PurgeResult()
-        cutoff = self._clock() - timedelta(days=self._retention_days)
+        cutoff = self._clock() - timedelta(days=self._retention_days) - CLOCK_SKEW_MARGIN
         total = unprotected = 0
         started = self._monotonic()
         for _ in range(self._max_batches):

@@ -2,8 +2,8 @@
 
 `tb_purge_tenant_deletions` (migration `7b2d4f8a1c36`) and `SqlRecordPurger`: `done` records past
 the cut-off whose tombstone exists, and old `cancelled` records, are deleted; the tombstone survives,
-nothing else is touched, the arguments are validated, and the one-way door (the `4e9a1c7b5d23` downgrade refuses
-once records are purged) holds. Runs in CI's stack (integration), never in the unit lane.
+nothing else is touched, the arguments are validated, and the one-way door (the `4e9a1c7b5d23`
+downgrade refuses once records are purged) holds. Runs in CI's stack (integration), never in the unit lane.
 """
 
 from collections.abc import AsyncIterator

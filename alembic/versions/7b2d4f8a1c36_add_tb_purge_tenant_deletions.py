@@ -21,8 +21,9 @@ the app role, the one runtime role) deletes at most ``p_batch`` records and retu
   record without one is skipped and counted in ``unprotected`` (it can only exist if the tombstone
   invariant broke); the duty logs it at WARNING. A ``cancelled`` record needs no tombstone: a
   cancelled deletion left the tenant standing, and a new request makes a new record. It holds the
-  requester's identity, so it follows the same retention (storage limitation). The purge therefore can never remove the last
-  tombstone record, and it does not repair anything (it does not re-run the backfill);
+  requester's identity, so it follows the same retention (storage limitation). The purge therefore
+  never deletes a ``done`` record whose tombstone is missing, and it does not repair anything (it
+  does not re-run the backfill);
 * the arguments are validated like ``tb_audit_purge`` (``22023``): ``p_min_days >= 1``,
   ``p_batch`` 1..10000, and a cut-off no younger than ``p_min_days`` (the floor a typo cannot pass);
 * rows are taken ``FOR UPDATE SKIP LOCKED``, oldest first, so two callers never wait on each other.
