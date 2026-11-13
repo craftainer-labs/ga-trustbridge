@@ -231,6 +231,47 @@ the table already holds duplicates for the key (the log is append-only and migra
 history); the error names the count and the query. Reconcile them as the table owner, then upgrade
 again. A failed build leaves an INVALID index, which the next upgrade drops and rebuilds.
 
+### Reconciling existing duplicates (operator procedure)
+
+Needed only when the upgrade stops with `audit_events holds N duplicate webhook delivery
+group(s)`. A duplicate is a redelivered webhook's repeated event (same tenant, action and
+delivery id). Nothing has changed at that point: no index, no rows.
+
+1. List the groups (the query the error prints; null-tenant rows are not keyed, so they are not
+   listed):
+
+   ```sql
+   SELECT tenant_id, action, (on_behalf_of->>'delivery_id') AS delivery_id, count(*) AS n
+   FROM audit_events WHERE on_behalf_of IS NOT NULL AND tenant_id IS NOT NULL
+   GROUP BY tenant_id, action, (on_behalf_of->>'delivery_id') HAVING count(*) > 1;
+   ```
+
+2. Review them. For the same delivery the rows record the same fact twice.
+3. Connect as `trustbridge_owner` (the migrate Job's role): the append-only guard and the RLS
+   `owner_all` policy let only that role delete. Keep the earliest row of each group and archive the
+   rest in one transaction, so nothing is lost:
+
+   ```sql
+   BEGIN;
+   CREATE TABLE audit_events_duplicates_archive AS
+   SELECT * FROM (
+     SELECT e.*, row_number() OVER (
+       PARTITION BY tenant_id, action, (on_behalf_of->>'delivery_id') ORDER BY seq) AS rn
+     FROM audit_events e WHERE on_behalf_of IS NOT NULL AND tenant_id IS NOT NULL) d
+   WHERE rn > 1;
+   DELETE FROM audit_events WHERE seq IN (SELECT seq FROM audit_events_duplicates_archive);
+   COMMIT;
+   ```
+
+   The `seq` gaps are harmless: exports resume with `after_seq`. Keep or drop the archive table
+   under your retention policy; it is outside the app's grants.
+4. Run the upgrade again (`alembic upgrade head`, or re-run the migrate Job). If an earlier
+   attempt left an INVALID `ux_audit_events_webhook_delivery`, the upgrade drops it first. Check
+   with `SELECT indisvalid FROM pg_index WHERE indexrelid = 'ux_audit_events_webhook_delivery'::regclass;`.
+
+The duplicate check scans the table under a 120 s statement timeout; on a very large table that
+timeout fails the upgrade before anything changes, and the check can be run by hand (step 1) first.
+
 ## Settings
 
 `AUDIT_RETENTION_DAYS` (365; `0` never purges; otherwise at least the floor),

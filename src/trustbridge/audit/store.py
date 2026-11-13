@@ -49,7 +49,9 @@ _INSERT_SQL = (
     ":resource_type, :resource_id, :outcome, CAST(CAST(:before AS text) AS jsonb), "
     "CAST(CAST(:after AS text) AS jsonb), :request_id, :trace_id, :schema_version)"
 )
-_INSERT = text(_INSERT_SQL)
+# `preserve_rowcount` (SQLAlchemy 2.0.28+) memoizes the DBAPI's count for an INSERT, which
+# SQLAlchemy otherwise keeps only for UPDATE and DELETE; `append` reads it for a no-op insert.
+_INSERT = text(_INSERT_SQL).execution_options(preserve_rowcount=True)
 # The idempotency key of a webhook-driven event (NG6h-2b): the target repeats the partial unique
 # index `ux_audit_events_webhook_delivery` exactly, so PostgreSQL infers it. Used only for an
 # event that has the key (`on_behalf_of` and `tenant_id` set): a conflict target needs SELECT on
@@ -58,7 +60,7 @@ _INSERT = text(_INSERT_SQL)
 _INSERT_ONCE = text(
     _INSERT_SQL + " ON CONFLICT (tenant_id, action, (on_behalf_of->>'delivery_id')) "
     "WHERE on_behalf_of IS NOT NULL DO NOTHING"
-)
+).execution_options(preserve_rowcount=True)
 _LIST_ALL = text(
     f"SELECT {_COLUMNS} FROM tb_audit_list("  # noqa: S608 -- constants only
     "CAST(:tenant_id AS uuid), CAST(:after_seq AS bigint), CAST(:before_seq AS bigint), "
