@@ -31,7 +31,7 @@ function body replaced under the same signature and return type.
 * ``tb_request_tenant_deletion(...)``: a ``SECURITY DEFINER`` function that, under the tenant row
   lock, returns the open deletion, or checks that the tenant is admin-disabled and that the typed
   confirmation (host, installation id, organisation login) matches, and writes the record. The
-  confirmation is compared and never stored.
+  confirmation is compared (case-insensitively, as GitHub logins are) and never stored.
 * ``tb_delete_tenant(uuid)``: removes the ``tenants`` row as the last step of a deletion. Under the
   row lock it refuses unless the tenant is admin-disabled, has a deletion in its ``database`` step
   and has no rows left in the five other tenant-owned tables; it checks again after the delete, so
@@ -46,6 +46,8 @@ lost) and otherwise restores the previous function bodies. ``schema_compat`` is 
 """
 
 from collections.abc import Sequence
+
+import sqlalchemy as sa
 
 from alembic import op
 
@@ -266,7 +268,7 @@ BEGIN
     END IF;
     IF v_row.host IS DISTINCT FROM p_host
        OR v_row.installation_id IS DISTINCT FROM p_installation_id
-       OR v_row.org IS DISTINCT FROM p_org THEN
+       OR lower(v_row.org) IS DISTINCT FROM lower(p_org) THEN
         RETURN QUERY SELECT 'confirmation_mismatch'::text, NULL::uuid, NULL::text,
                             NULL::timestamptz, NULL::boolean;
         RETURN;
@@ -437,6 +439,15 @@ def upgrade() -> None:
     with op.get_context().autocommit_block():
         op.execute("SET lock_timeout = '5s'")
         op.execute("SET statement_timeout = '600s'")
+        # A failed or cancelled CONCURRENTLY build leaves an INVALID index of the same name, which
+        # IF NOT EXISTS would skip: drop it so this run (or a re-run) rebuilds it.
+        if op.get_bind().scalar(
+            sa.text(
+                "SELECT EXISTS (SELECT 1 FROM pg_index WHERE NOT indisvalid"
+                " AND indexrelid = to_regclass('public.ix_wd_tenant'))"
+            )
+        ):
+            op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_wd_tenant")
         op.execute(
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_wd_tenant ON webhook_deliveries "
             "(tenant_id) WHERE tenant_id IS NOT NULL"
@@ -470,9 +481,14 @@ def downgrade() -> None:
     op.execute("SET statement_timeout = '120s'")
     # The records are kept as a compliance record: dropping the table would lose them, and the
     # previous release cannot represent a tenant that is being deleted.
-    op.execute("LOCK TABLE tenant_deletions IN ACCESS EXCLUSIVE MODE")
+    # Retry-safe: a re-run after a partial failure finds the table already dropped.
     op.execute(
-        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM tenant_deletions) THEN "
+        "DO $$ BEGIN IF to_regclass('public.tenant_deletions') IS NOT NULL THEN "
+        "LOCK TABLE tenant_deletions IN ACCESS EXCLUSIVE MODE; END IF; END $$"
+    )
+    op.execute(
+        "DO $$ BEGIN IF to_regclass('public.tenant_deletions') IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM tenant_deletions) THEN "
         "RAISE EXCEPTION 'cannot downgrade: tenant_deletions has rows; keep the compliance "
         "record' USING ERRCODE = '55000'; END IF; END $$"
     )
@@ -481,11 +497,12 @@ def downgrade() -> None:
     for statement in (_OLD_LIST_FN, _OLD_GET_FN, _OLD_SET_FN, _OLD_UPSERT_FN):
         op.execute(statement)
     _grant_functions(CHANGED_FUNCTIONS)
-    op.execute("-- squawk-ignore ban-drop-table\nDROP TABLE tenant_deletions")
+    op.execute("-- squawk-ignore ban-drop-table\nDROP TABLE IF EXISTS tenant_deletions")
     # No row can be `deleted` (only a deletion writes that status, and no deletion record exists).
     op.execute(
+        f"DO $$ BEGIN IF NOT {_has_constraint('ck_wd_status_v1')} THEN "
         "ALTER TABLE webhook_deliveries ADD CONSTRAINT ck_wd_status_v1 "
-        f"CHECK ({_OLD_STATUS}) NOT VALID"
+        f"CHECK ({_OLD_STATUS}) NOT VALID; END IF; END $$"
     )
     with op.get_context().autocommit_block():
         op.execute("SET lock_timeout = '5s'")
@@ -500,6 +517,10 @@ def downgrade() -> None:
         "ALTER TABLE webhook_deliveries DROP CONSTRAINT IF EXISTS ck_wd_status, "
         "DROP COLUMN IF EXISTS tenant_id"
     )
-    op.execute("ALTER TABLE webhook_deliveries RENAME CONSTRAINT ck_wd_status_v1 TO ck_wd_status")
+    op.execute(
+        f"DO $$ BEGIN IF {_has_constraint('ck_wd_status_v1')} THEN "
+        "ALTER TABLE webhook_deliveries RENAME CONSTRAINT ck_wd_status_v1 TO ck_wd_status; "
+        "END IF; END $$"
+    )
     op.execute("RESET lock_timeout")
     op.execute("RESET statement_timeout")
