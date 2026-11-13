@@ -377,13 +377,15 @@ async def test_rows_a_concurrent_update_holds_are_not_skipped_by_the_end_of_the_
     cursor: dict[str, Any] = {}
     try:
         for _ in range(60):
+            before = cursor.get("table")
             outcome = await _step(db).run(_ctx(tenant, deletion, cursor))
             if outcome.done:
                 break
             cursor = dict(outcome.cursor or {})
             table = cursor["table"]
-            if table in writers and not outcome.counts:
-                # Nothing left but the locked rows: the step waits on the table, never leaves it.
+            if table in writers and table == before and not outcome.counts:
+                # A pass that started on the table and removed nothing: only the locked rows are
+                # left, and the step waits on the table instead of leaving it.
                 stuck.append(table)
                 if table == "scope_leases":
                     assert await _count(db, "scope_leases", tenant.id) == 2

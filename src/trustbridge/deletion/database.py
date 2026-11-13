@@ -81,24 +81,27 @@ compares them with `pg_index`). A batch is keyed on them, never on `ctid`, which
 _NOT_DELETED = "status <> 'deleted'"
 
 
-def _batch(table: str, verb: str, where: str) -> str:
+def _batch(table: str, verb: str, where: str, name: str) -> TextClause:
     """`verb` (`DELETE FROM t` or `UPDATE t SET ...`) over one locked, ordered key batch.
 
-    `FOR UPDATE SKIP LOCKED` takes the row locks first, so no concurrent writer can move a row of
-    the batch before the statement reaches it, and rows another transaction holds are passed over
-    (the pass reports them as left, see `_pending`).
+    The keys are picked in a `MATERIALIZED` CTE so the locking `SELECT ... LIMIT` runs once (the
+    planner cannot re-run it and take more than `:limit` rows). `FOR UPDATE SKIP LOCKED` takes the
+    row locks first, so no concurrent writer can move a row of the batch before the statement
+    reaches it, and rows another transaction holds are passed over (the pass reports them as left,
+    see `_pending`). The statement returns the number of rows it changed.
     """
     cols = ", ".join(PRIMARY_KEYS[table])
-    return (
-        f"{verb} WHERE ({cols}) IN (SELECT {cols} FROM {table} WHERE {where} "  # noqa: S608 -- constants only
-        f"ORDER BY {cols} LIMIT :limit FOR UPDATE SKIP LOCKED) RETURNING 1"
+    return text(
+        f"WITH picked AS MATERIALIZED (SELECT {cols} FROM {table} WHERE {where} "  # noqa: S608 -- constants only
+        f"ORDER BY {cols} LIMIT :limit FOR UPDATE SKIP LOCKED), "
+        f"{name} AS ({verb} WHERE ({cols}) IN (SELECT {cols} FROM picked) RETURNING 1) "
+        f"SELECT count(*) FROM {name}"
     )
 
 
 def _delete_batch(table: str) -> TextClause:
     """One batch delete; `table` is always one of `PLAN`'s constants."""
-    sql = _batch(table, "DELETE FROM " + table, "tenant_id = :tenant")  # noqa: S608 -- constants only
-    return text("WITH gone AS (" + sql + ") SELECT count(*) FROM gone")  # noqa: S608 -- constants only
+    return _batch(table, "DELETE FROM " + table, "tenant_id = :tenant", "gone")  # noqa: S608 -- constants only
 
 
 def _clear_bodies() -> TextClause:
@@ -107,8 +110,8 @@ def _clear_bodies() -> TextClause:
         "UPDATE webhook_deliveries SET body = NULL, headers = CAST('{}' AS jsonb), "
         "last_error = NULL, status = 'deleted'"
     )
-    sql = _batch("webhook_deliveries", verb, "tenant_id = :tenant AND " + _NOT_DELETED)
-    return text("WITH cleared AS (" + sql + ") SELECT count(*) FROM cleared")  # noqa: S608 -- constants only
+    where = "tenant_id = :tenant AND " + _NOT_DELETED
+    return _batch("webhook_deliveries", verb, where, "cleared")
 
 
 def _pending(table: str) -> TextClause:

@@ -264,13 +264,14 @@ adapter fakes.
   `5d7a2c8e1b94` bodies and paths.
 - **Database step (NG6h-4b).** `deletion/database.py`, `SqlDatabaseStep`: one bounded batch per pass in one transaction in
   the tenant's context, with a lease guard (holder, fence, unexpired, state `database`) as its first statement, then the
-  tables in the order above and the delivery bodies. A batch is keyed on the table's primary key (`WHERE pk IN (SELECT pk ... ORDER BY pk LIMIT n FOR UPDATE SKIP LOCKED)`), not on `ctid`, so a concurrent update cannot move a row out of it (NG6h-4c); a short batch that leaves a row of the tenant (one another transaction held locked) keeps the cursor on the table, so the next pass takes it, and `tb_delete_tenant`'s emptiness check is the backstop.  Inventory gaps found, none changed here: (1) the `tenant_id` of a
+  tables in the order above and the delivery bodies. Inventory gaps found, none changed here: (1) the `tenant_id` of a
   delivery is set only when the worker resolves it, so an event with no registered handler that names the tenant's
   installation keeps its body until retention and appears only as the host-wide `retention_only` count; (2) a cleared
   delivery keeps only its dedupe key (`host`, `delivery_id`, `body_sha256`), `event`, timestamps and counters: `body`,
   `headers` (NOT NULL, so `{}`) and `last_error` (handler error text, may name tenant data) are cleared, since erasure
   covers every field that can hold personal or tenant data; (3) the inventory has no tenant-keyed table beyond the six,
   and the integration test fails if one is added without a decision.
+- **Batches by primary key (NG6h-4c).** A batch is keyed on the table's primary key (`WHERE pk IN (SELECT pk ... ORDER BY pk LIMIT n FOR UPDATE SKIP LOCKED)`), not on `ctid`, so a concurrent update cannot move a row out of it (NG6h-4c); a short batch that leaves a row of the tenant (one another transaction held locked) keeps the cursor on the table, so the next pass takes it, and `tb_delete_tenant`'s emptiness check is the backstop.
 - **Wiring (NG6h-4a-3).** The reconciler runs the engine as a singleton duty (`tenant-deletion`, under a lease like
   the audit purge) through the `DeletionDriver` Protocol only: at most `DELETION_BATCH_SIZE` claims per poll of
   `DELETION_POLL_SECONDS`, a liveness beat per pass, and a store error that escapes `run_once` is logged and ends that

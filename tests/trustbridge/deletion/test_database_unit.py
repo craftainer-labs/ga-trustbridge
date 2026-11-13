@@ -230,8 +230,9 @@ async def test_a_delete_batch_is_keyed_on_the_primary_key_and_skips_locked_rows(
     await _step(log).run(_ctx({"table": table}))
     sql = log.statements[1][0]
     cols = ", ".join(PRIMARY_KEYS[table])
-    assert f"DELETE FROM {table} WHERE ({cols}) IN (SELECT {cols} FROM {table} WHERE" in sql  # noqa: S608 -- a test constant
+    assert f"WITH picked AS MATERIALIZED (SELECT {cols} FROM {table} WHERE" in sql  # noqa: S608 -- a test constant
     assert f"ORDER BY {cols} LIMIT :limit FOR UPDATE SKIP LOCKED" in sql
+    assert f"DELETE FROM {table} WHERE ({cols}) IN (SELECT {cols} FROM picked)" in sql  # noqa: S608 -- a test constant
     assert "ctid" not in sql
 
 
@@ -240,8 +241,9 @@ async def test_the_webhook_batch_is_keyed_on_its_primary_key_and_takes_only_live
     log = _Log(removed=1)
     await _step(log).run(_ctx({"table": "webhook_deliveries"}))
     sql = log.statements[1][0]
-    assert "WHERE (host, delivery_id) IN (SELECT host, delivery_id FROM webhook_deliveries" in sql
+    assert "SELECT host, delivery_id FROM webhook_deliveries WHERE" in sql
     assert "tenant_id = :tenant AND status <> 'deleted' ORDER BY host, delivery_id" in sql
+    assert "WHERE (host, delivery_id) IN (SELECT host, delivery_id FROM picked)" in sql
     assert "FOR UPDATE SKIP LOCKED" in sql
     assert "ctid" not in sql
     assert "status <> 'deleted'" in log.statements[2][0]

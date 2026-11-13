@@ -76,7 +76,7 @@ for another pass on the same table. A cursor it cannot read starts over, which i
 is left.
 
 - **Primary-key batches (NG6h-4c).** A batch is `DELETE FROM t WHERE (pk) IN (SELECT pk FROM t WHERE tenant_id = :tenant
-  ORDER BY pk LIMIT :limit FOR UPDATE SKIP LOCKED)` (the `webhook_deliveries` UPDATE adds `status <> 'deleted'`), with the
+  ORDER BY pk LIMIT :limit FOR UPDATE SKIP LOCKED)` (the `webhook_deliveries` UPDATE adds `status <> 'deleted'`; the keys are picked in a `MATERIALIZED` CTE so the limit holds), with the
   key from `database.PRIMARY_KEYS` (composite for most tables; an integration test compares it with `pg_index`). It is not
   keyed on `ctid`, which a concurrent update changes, so an updated row could be skipped. `SKIP LOCKED` passes over rows
   another transaction holds instead of waiting, so a pass can remove fewer rows than the batch while rows are left; a short
