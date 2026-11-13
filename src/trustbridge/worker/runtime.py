@@ -47,6 +47,7 @@ from trustbridge.worker.ports import (
     SqlTenants,
 )
 from trustbridge.worker.queue import StreamQueue
+from trustbridge.worker.reconcile_queue import ReconcileQueue
 from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
 from trustbridge.worker.relay import Relay
 from trustbridge.worker.schema import SchemaGate, SchemaWaitTimeout
@@ -291,6 +292,8 @@ async def run_process(
                     heartbeat=heartbeat,
                     audit_sessions=sessions,
                     deletion=chosen.deletion,
+                    reconcile_requests=ReconcileQueue(client),
+                    refusals=core.tenant_gate,
                 )
                 await Reconciler(settings, rdeps).run(stop)
         finally:

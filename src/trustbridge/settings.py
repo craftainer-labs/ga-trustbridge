@@ -170,6 +170,17 @@ class TrustbridgeSettings(Settings):
     delivery_reconcile_lookback_hours: int = Field(default=72, gt=0)
     delivery_reconcile_max_per_run: int = Field(default=100, gt=0)
     retention_interval_seconds: float = Field(default=3600.0, gt=0)
+    # Tenant reconcile requests (NG5r). The reconciler's `tenant-reconcile` duty drains the Valkey
+    # set `tb:reconcile` every `tenant_reconcile_interval_seconds`, at most
+    # `tenant_reconcile_batch_size` claims per run. A claim not acknowledged within
+    # `tenant_reconcile_claim_ttl_seconds` is reclaimed (at least `lease_ttl_seconds`, so a
+    # reconcile that holds a scope lease is not reclaimed under it). While
+    # `tenant_reconcile_enabled` is false (the default) a request for a tenant that may be
+    # reconciled stays pending; a request for a disabled, deleting or deleted tenant is dropped.
+    tenant_reconcile_enabled: bool = False
+    tenant_reconcile_interval_seconds: float = Field(default=30.0, gt=0)
+    tenant_reconcile_batch_size: int = Field(default=50, ge=1, le=1000)
+    tenant_reconcile_claim_ttl_seconds: float = Field(default=300.0, gt=0)
 
     # Retention (ADR 0028 decision 9).
     body_retention_processed_days: int = Field(default=7, gt=0)
@@ -378,6 +389,8 @@ class TrustbridgeSettings(Settings):
             problems.extend(self._production_problems())
         if self.adapter_call_timeout_seconds >= self.lease_ttl_seconds:
             problems.append("ADAPTER_CALL_TIMEOUT_SECONDS must be shorter than LEASE_TTL_SECONDS")
+        if self.tenant_reconcile_claim_ttl_seconds < self.lease_ttl_seconds:
+            problems.append("TENANT_RECONCILE_CLAIM_TTL_SECONDS must be at least LEASE_TTL_SECONDS")
         if self.retry_backoff_max_seconds < self.retry_backoff_base_seconds:
             problems.append("RETRY_BACKOFF_MAX_SECONDS must be >= RETRY_BACKOFF_BASE_SECONDS")
         problems.extend(self._retention_problems())

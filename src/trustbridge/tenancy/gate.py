@@ -41,6 +41,12 @@ _STATE_BY_ID = text(
     "AND d.tenant_id = CAST(:id AS uuid) AND d.state NOT IN ('done', 'failed', 'cancelled')) "
     "FROM tb_get_tenant(CAST(:id AS uuid)) t"
 )
+# One row always: an unknown tenant (never created, or deleted and tombstoned) is a row of nulls.
+_REFUSAL_BY_ID = text(
+    "SELECT t.id IS NULL, COALESCE(t.state = 'deleted', false), "
+    "COALESCE(t.admin_disabled_at IS NOT NULL, false), COALESCE(t.deleting, false) "
+    "FROM (SELECT 1) one LEFT JOIN LATERAL tb_get_tenant(CAST(:id AS uuid)) t ON true"
+)
 
 
 class SqlTenantGate:
@@ -85,6 +91,24 @@ class SqlTenantGate:
         if row[3]:
             return TenantStanding(refusal="tombstone")
         return TenantStanding(row[0], bool(row[1]), "deleting" if row[2] else None)
+
+    async def refusal_of(self, tenant_id: UUID) -> str | None:
+        """Why no reconcile may run for the tenant, or None when one may (ADR 0033 invariant 19).
+
+        `gone` (no tenant row, so never created or deleted and tombstoned, or the installation
+        state `deleted`), `deleting` (a non-terminal deletion, ADR 0034) or `disabled`, in that
+        order. One statement in one transaction, in no tenant context.
+        """
+        with tenant_context(None):
+            async with self._sf() as session, session.begin():
+                missing, deleted, disabled, deleting = (
+                    await session.execute(_REFUSAL_BY_ID, {"id": tenant_id})
+                ).one()
+        if missing or deleted:
+            return "gone"
+        if deleting:
+            return "deleting"
+        return "disabled" if disabled else None
 
     async def allows(
         self, tenant_id: UUID, kind: OperationKind | None, deletion_id: UUID | None = None

@@ -152,7 +152,7 @@ admin-disabled tenant except an `OperationKind.DELETE` carrying the `deletion_id
 disable flag, and a `deleting` or `tombstone` refusal) from `tb_get_tenant`, `tenant_tombstones` and `tenant_deletions` in
 one statement (`tb_get_tenant` is `STABLE`, so it reads the statement's snapshot and the three
 answers agree). The tombstone rule (a `tenant_tombstones` row, or a `database`-step deletion with no tenant row) exists in three places (`tb_upsert_tenant`, `SqlTenants._standing`
-and `gate.py`); an integration test asserts they agree for every deletion state.
+and `gate.py`); an integration test asserts they agree for every deletion state. `SqlTenantGate.refusal_of(tenant_id)` answers `gone` (no tenant row, so never created or deleted and tombstoned, or state `deleted`), `deleting` or `disabled` (or None) from one `tb_get_tenant` read; the reconciler's `tenant-reconcile` duty drops a request for such a tenant (NG5r-a).
 
 ## Grants
 

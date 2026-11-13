@@ -1,5 +1,5 @@
 """The reconciler process: relay ticks, re-relay sweep, delivery reconciliation, retention, purge,
-tenant deletion.
+tenant deletion, the tenant reconcile requests.
 
 GitHub never redelivers on its own (ADR 0028 item 4). The delivery reconciler lists failed
 hook deliveries per `ready` host with the App JWT endpoints (`GET /app/hook/deliveries`,
@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -33,6 +34,7 @@ from trustbridge.worker.health import Heartbeat, stale_after
 from trustbridge.worker.lease import LeaseBusy, LeaseManager
 from trustbridge.worker.models import NIL_TENANT
 from trustbridge.worker.queue import StreamQueue
+from trustbridge.worker.reconcile_queue import Claim, ReconcileQueue
 from trustbridge.worker.relay import Clock, Relay, utcnow
 
 logger = logging.getLogger(__name__)
@@ -110,6 +112,22 @@ class DeliveryReconciler:
         return redelivered
 
 
+class TenantRefusals(Protocol):
+    """Whether a tenant may be reconciled at all (`SqlTenantGate`, ADR 0033 invariant 19)."""
+
+    async def refusal_of(self, tenant_id: UUID) -> str | None:
+        """`gone`, `deleting` or `disabled`; None when a reconcile may run."""
+        ...
+
+
+class TenantReconciler(Protocol):
+    """The tenant reconcile body (NG5r-b). Idempotent: a request can be processed twice."""
+
+    async def reconcile(self, tenant_id: UUID) -> None:
+        """Bring the tenant's credentials to the desired state."""
+        ...
+
+
 Job = Callable[[], Awaitable[object]]
 
 
@@ -153,6 +171,9 @@ class ReconcilerDeps:
     audit_sessions: async_sessionmaker[AsyncSession] | None = None  # None: mock mode, no purge
     deletion: DeletionDriver | None = None  # None: no deletion engine composed, no duty
     record_purger: RecordPurger | None = None  # None: not composed (NG6h-7), no purge duty
+    reconcile_requests: ReconcileQueue | None = None  # None: no Valkey (mock mode), no duty
+    refusals: TenantRefusals | None = None  # None: no database, no duty
+    tenant_reconciler: TenantReconciler | None = None  # None: no body yet (NG5r-b)
 
 
 class Reconciler:
@@ -320,6 +341,71 @@ class Reconciler:
             logger.info("deletion record purge", extra={"purged_records": result.purged})
         return result.purged
 
+    async def tenant_reconcile(self) -> int:
+        """Drain the tenant reconcile requests with claim/ack (replica-safe, no lease).
+
+        First returns requests stranded inflight past `TENANT_RECONCILE_CLAIM_TTL_SECONDS` to the
+        pending set, then claims at most `TENANT_RECONCILE_BATCH_SIZE`. Per claim: a tenant that
+        is disabled, deleting or gone is acknowledged and dropped with a log line (ADR 0033
+        invariant 19, ADR 0034); otherwise, with the body composed and
+        `TENANT_RECONCILE_ENABLED` true, the body runs and the claim is acknowledged. Without the
+        body the request goes back to pending: a request already answered 202 is never consumed
+        by a duty that does nothing. A body or database failure leaves the claim inflight, so it is
+        retried after the claim TTL. Returns the number of requests acknowledged.
+        """
+        queue, refusals = self._d.reconcile_requests, self._d.refusals
+        if queue is None or refusals is None:
+            return 0
+        s = self._s
+        now = self._d.clock()
+        await queue.reclaim(now, s.tenant_reconcile_claim_ttl_seconds)
+        body = self._d.tenant_reconciler if s.tenant_reconcile_enabled else None
+        acked = kept = 0
+        for claim in await queue.claim(now, s.tenant_reconcile_batch_size):
+            self._beat("tenant-reconcile")
+            try:
+                done = await self._reconcile_claim(queue, refusals, body, claim)
+            except Exception:
+                logger.exception(
+                    "tenant reconcile failed; the claim is reclaimed after its TTL",
+                    extra={"tenant": str(claim.tenant_id)},
+                )
+                continue
+            acked += done
+            kept += not done
+        self._beat("tenant-reconcile")
+        if kept:
+            logger.info("reconcile requests left pending: no reconcile body", extra={"count": kept})
+        return acked
+
+    async def _reconcile_claim(
+        self,
+        queue: ReconcileQueue,
+        refusals: TenantRefusals,
+        body: TenantReconciler | None,
+        claim: Claim,
+    ) -> bool:
+        """Settle one claim; True when it was acknowledged, False when it was left pending."""
+        tenant = str(claim.tenant_id)
+        refusal = await refusals.refusal_of(claim.tenant_id)
+        if refusal is not None:
+            logger.info(
+                "dropped a reconcile request: tenant is %s",
+                refusal,
+                extra={"tenant": tenant, "reason": refusal},
+            )
+        elif body is None:
+            await queue.release(claim)
+            return False
+        else:
+            await body.reconcile(claim.tenant_id)
+        if not await queue.ack(claim):
+            logger.warning(
+                "reconcile claim was reclaimed while it ran; the request runs again",
+                extra={"tenant": tenant},
+            )
+        return True
+
     async def trim_streams(self) -> None:
         """Trim `tb:events` below what the group acknowledged, the dead letter by age, set lag."""
         await self._d.queue.trim_events()
@@ -341,6 +427,7 @@ class Reconciler:
             ("audit-purge", s.audit_purge_interval_seconds, self.audit_purge),
             ("tenant-deletion", s.deletion_poll_seconds, self.tenant_deletion),
             ("deletion-purge", s.deletion_purge_interval_seconds, self.deletion_record_purge),
+            ("tenant-reconcile", s.tenant_reconcile_interval_seconds, self.tenant_reconcile),
             ("trim", s.stream_trim_interval_seconds, self.trim_streams),
         ]
         for name, interval, _job in schedule:
@@ -352,6 +439,10 @@ class Reconciler:
             logger.info("audit purge disabled: no audit store")
         if self._d.deletion is None:
             logger.info("tenant deletion disabled: no deletion engine")
+        if self._d.reconcile_requests is None or self._d.refusals is None:
+            logger.info("tenant reconcile disabled: no Valkey or database")
+        elif not (s.tenant_reconcile_enabled and self._d.tenant_reconciler is not None):
+            logger.info("tenant reconcile requests stay pending: no reconcile body is enabled")
         if self._d.record_purger is None:
             logger.info("deletion record purge disabled: no record purger")
         await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop

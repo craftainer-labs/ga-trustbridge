@@ -437,7 +437,10 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
 19. `_sync` and `tb_upsert_tenant` never change the admin-disable columns, a disabled tenant
     starts no adapter operation other than a deletion's own delete and revoke operations (0034), its webhooks are stored and not handled until it is enabled,
     `enable` makes them deliverable again, and enable and disable need the `admin` role at
-    instance scope; a tenant with a non-terminal deletion cannot be enabled.
+    instance scope; a tenant with a non-terminal deletion cannot be enabled. The reconcile requests
+    follow the same rule (NG5r-a): the reconciler's `tenant-reconcile` duty checks the tenant
+    (`SqlTenantGate.refusal_of`) before it acts, and a request for a disabled, deleting or gone
+    tenant is acknowledged and dropped with a log line.
 19a. With `RBAC_ALIAS_TEMPLATE_PERSONAS` on, each persona grants exactly its aliased role at
     instance scope; with it off, a persona grants nothing in the admin API and only the
     namespaced roles count.

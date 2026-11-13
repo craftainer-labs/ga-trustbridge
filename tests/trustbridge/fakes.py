@@ -43,6 +43,7 @@ class FakeRedis:
         self.kv: dict[str, int] = {}
         self.sets: dict[str, set[str]] = {}
         self.texts: dict[str, str] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
         self.expiries: dict[str, int] = {}
         self._last = (0, -1)
         self.down = False
@@ -112,6 +113,64 @@ class FakeRedis:
         before = len(members)
         members.update(values)
         return len(members) - before
+
+    async def scard(self, name: str) -> int:
+        """The size of a set."""
+        self._check()
+        return len(self.sets.get(name, set()))
+
+    async def srandmember(self, name: str, number: int) -> list[str]:
+        """Up to `number` distinct members (sorted here, so tests are deterministic)."""
+        self._check()
+        return sorted(self.sets.get(name, set()))[:number]
+
+    async def smove(self, source: str, destination: str, member: str) -> bool:
+        """Atomically move a member between sets; False when it is not in `source`."""
+        self._check()
+        members = self.sets.get(source, set())
+        if member not in members:
+            return False
+        members.discard(member)
+        if not members:
+            self.sets.pop(source, None)
+        self.sets.setdefault(destination, set()).add(member)
+        return True
+
+    async def hset(self, name: str, key: str, value: str) -> int:
+        """Set a hash field."""
+        self._check()
+        fields = self.hashes.setdefault(name, {})
+        added = key not in fields
+        fields[key] = value
+        return int(added)
+
+    async def hsetnx(self, name: str, key: str, value: str) -> bool:
+        """Set a hash field only when it is absent."""
+        self._check()
+        fields = self.hashes.setdefault(name, {})
+        if key in fields:
+            return False
+        fields[key] = value
+        return True
+
+    async def hget(self, name: str, key: str) -> str | None:
+        """A hash field."""
+        self._check()
+        return self.hashes.get(name, {}).get(key)
+
+    async def hgetall(self, name: str) -> dict[str, str]:
+        """A hash."""
+        self._check()
+        return dict(self.hashes.get(name, {}))
+
+    async def hdel(self, name: str, *keys: str) -> int:
+        """Delete hash fields."""
+        self._check()
+        fields = self.hashes.get(name, {})
+        gone = sum(1 for k in keys if fields.pop(k, None) is not None)
+        if name in self.hashes and not fields:
+            del self.hashes[name]
+        return gone
 
     async def flushall(self) -> None:
         """Lose everything (restart without persistence)."""
