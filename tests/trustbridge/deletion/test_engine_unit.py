@@ -296,6 +296,27 @@ async def test_the_retry_after_a_step_change_uses_the_new_states_attempts() -> N
     assert store.delay == 5
 
 
+async def test_a_changed_cursor_resets_the_attempts_like_the_database() -> None:
+    """Progress within a step (a new cursor) restarts the backoff from the base delay."""
+    store = FakeStore(record(state="github", step_cursor={"after": 1}, attempts=3))
+    github = ScriptedStep(StepOutcome(cursor={"after": 2}, done=False), RuntimeError("x"))
+    engine, _ = _engine(store, github=github)
+    await engine.run_once()
+    assert store.delay == 5
+    assert store.rec is not None
+    assert store.rec.step_cursor == {"after": 2}
+
+
+async def test_an_unchanged_or_absent_cursor_keeps_the_attempts() -> None:
+    """Re-saving the same cursor, or none, is not progress: the backoff keeps growing."""
+    for cursor in ({"after": 1}, None):
+        store = FakeStore(record(state="github", step_cursor={"after": 1}, attempts=3))
+        github = ScriptedStep(StepOutcome(cursor=cursor, done=False), RuntimeError("x"))
+        engine, _ = _engine(store, github=github)
+        await engine.run_once()
+        assert store.delay == 40
+
+
 @pytest.mark.parametrize(
     "bad",
     [

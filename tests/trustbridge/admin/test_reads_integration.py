@@ -297,7 +297,7 @@ async def test_the_new_functions_are_definer_functions_granted_to_the_two_roles(
     assert {r.proname for r in rows} == {"tb_audit_get", "tb_get_tenant", "tb_set_tenant_disabled"}
     for row in rows:
         assert row.prosecdef is True
-        assert "search_path=pg_catalog, public" in row.proconfig
+        assert "search_path=pg_catalog, public, pg_temp" in row.proconfig
     probe = "SELECT has_function_privilege(:role, CAST(:fn AS regprocedure), 'EXECUTE')"
     public = (
         "SELECT proacl IS NOT NULL AND NOT EXISTS "

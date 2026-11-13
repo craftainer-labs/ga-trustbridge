@@ -223,13 +223,16 @@ class DeletionEngine:
             events=events,
         )
         changed = to_state != record.state
+        # Mirrors tb_advance_tenant_deletion: progress (a new step or a changed cursor) resets the
+        # retry state, so the next backoff starts again from `base`.
+        progressed = changed or (cursor is not None and cursor != record.step_cursor)
         run.record = replace(
             record,
             state=to_state,
             counts=counts,
             skipped=skipped,
             step_cursor=cursor if cursor is not None else ({} if changed else record.step_cursor),
-            attempts=0 if changed else record.attempts,
+            attempts=0 if progressed else record.attempts,
         )
 
     async def _release(self, lease: Lease) -> None:
