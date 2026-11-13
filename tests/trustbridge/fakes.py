@@ -47,6 +47,11 @@ class FakeRedis:
         self._last = (0, -1)
         self.down = False
 
+    async def ping(self) -> bool:
+        """Answer PING (or fail while `down`)."""
+        self._check()
+        return True
+
     def advance(self, ms: int) -> None:
         """Move the fake clock."""
         self.now_ms += ms

@@ -36,12 +36,14 @@ from trustbridge.worker.deliveries import (
     TenantGate,
     retry_at,
 )
+from trustbridge.worker.health import Heartbeat, stale_after
 from trustbridge.worker.lease import LeaseBusy
 from trustbridge.worker.queue import StreamEntry, StreamQueue
 from trustbridge.worker.relay import Clock, Relay, utcnow
 
 logger = logging.getLogger(__name__)
 MAX_ERROR_CHARS = 500
+LOOP = "consume"
 
 
 @dataclass(slots=True)
@@ -55,6 +57,7 @@ class WorkerDeps:
     registry: HandlerRegistry
     clock: Clock = utcnow
     gate: TenantGate | None = None
+    heartbeat: Heartbeat | None = None
 
 
 class TenantDisabled(Exception):  # noqa: N818 -- a control-flow signal, not a failure
@@ -77,19 +80,23 @@ class Worker:
         self._s = settings
         self._d = deps
         self.consumer = consumer
+        self._beat = deps.heartbeat or Heartbeat()
 
     async def run(self, stop: asyncio.Event) -> None:
         """Consume until `stop` is set."""
-        await self._d.queue.ensure_group()
+        self._beat.register(LOOP, stale_after(self._s, self._s.worker_block_ms / 1000))
+        await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop
         while not stop.is_set():
             try:
                 await self.run_once()
             except Exception:
                 logger.exception("stream read failed; backing off")
                 await asyncio.sleep(1.0)
+            self._beat.beat(LOOP)
 
     async def run_once(self) -> int:
         """One iteration: claim stale pending entries, read new ones, process them all."""
+        self._beat.beat(LOOP)
         idle_ms = int(self._s.stream_claim_idle_seconds * 1000)
         claimed = await self._d.queue.claim_stale(
             self.consumer, min_idle_ms=idle_ms, count=self._s.worker_batch_size
@@ -117,6 +124,8 @@ class Worker:
                 await self._d.queue.ack(entry.entry_id)
             except Exception:
                 logger.exception("could not re-add the entry; it stays pending")
+        finally:
+            self._beat.beat(LOOP)  # one entry is a unit of progress, so a long batch stays live
 
     async def _process(self, entry: StreamEntry, *, from_pending: bool) -> None:
         """The decision tree for one stream entry."""

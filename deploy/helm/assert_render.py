@@ -1,7 +1,8 @@
 """Assertions over a rendered chart (run by check.sh): `assert_render.py NAME FILE`.
 
-NAME is the ci values file (`full-values` or `minimal-values`); FILE is the `helm template`
-output. Also checks that the chart maps every setting `trustbridge.settings` reads.
+NAME is the ci values file (`full-values` or `minimal-values`) or `health-off` (the minimal
+values with both health ports set to null); FILE is the `helm template` output.
+Also checks that the chart maps every setting `trustbridge.settings` reads.
 """
 
 import json
@@ -39,6 +40,13 @@ CA_VARS = (
 CA_PATH = "/etc/trustbridge/ca/ca-bundle.crt"
 PROCESSES = ("api", "worker", "reconciler")
 PROBES = {"startupProbe", "livenessProbe", "readinessProbe"}
+HEALTH_PORTS = {"worker": 8081, "reconciler": 8081}
+FULL_HEALTH_PORTS = {"worker": 8081, "reconciler": 9091}  # ci/full-values.yaml overrides one
+PROBE_PATHS = {
+    "startupProbe": "/health/live",
+    "livenessProbe": "/health/live",
+    "readinessProbe": "/health/ready",
+}
 IMAGE = "craftainer-labs/ga-trustbridge"
 
 Doc = dict[str, Any]
@@ -83,19 +91,38 @@ def check_structure(by_kind: dict[str, list[Doc]], full: bool) -> dict[str, Doc]
     return deployments
 
 
-def check_commands(deployments: dict[str, Doc]) -> None:
-    """Commands are explicit; only the api has HTTP probes."""
+def check_commands(deployments: dict[str, Doc], ports: dict[str, int] | None) -> None:
+    """Commands are explicit; the api has HTTP probes on its port, the worker and reconciler on
+    their health port (`ports`, or none at all when the endpoint is off)."""
     api = container_of(deployments["api"])
     check(
         api["command"][:3] == ["uvicorn", "trustbridge.main:app", "--no-proxy-headers"],
         "api command",
     )
     check(api.keys() >= PROBES, "api probes")
+    check("HEALTH_PORT" not in env_of(api), "the api does not run the health endpoint")
     for process in ("worker", "reconciler"):
         container = container_of(deployments[process])
         want = ["python", "-m", "trustbridge.worker", process]
         check(container["command"] == want, f"{process} command")
-        check(not PROBES & container.keys(), f"{process} has no HTTP probe")
+        env = env_of(container)
+        if ports is None:
+            check(not PROBES & container.keys(), f"{process}: probes with the endpoint off")
+            check("HEALTH_PORT" not in env, f"{process}: HEALTH_PORT with the endpoint off")
+            check("ports" not in container, f"{process}: containerPort with the endpoint off")
+            continue
+        port = ports[process]
+        check(env["HEALTH_PORT"]["value"] == str(port), f"{process}: HEALTH_PORT")
+        check(
+            container["ports"] == [{"name": "health", "containerPort": port, "protocol": "TCP"}],
+            f"{process}: containerPort {container.get('ports')}",
+        )
+        check(container.keys() >= PROBES, f"{process}: probes")
+        for kind, path in PROBE_PATHS.items():
+            get = container[kind]["httpGet"]
+            check(get == {"path": path, "port": "health"}, f"{process} {kind}: {get}")
+            for field in ("periodSeconds", "timeoutSeconds", "failureThreshold"):
+                check(container[kind][field] > 0, f"{process} {kind}: {field}")
 
 
 def check_security(label: str, doc: Doc, *, automount: bool) -> None:
@@ -173,8 +200,9 @@ def main(name: str, path: str) -> None:
     for doc in docs:
         by_kind.setdefault(doc["kind"], []).append(doc)
     full = name == "full-values"
+    ports = None if name == "health-off" else (FULL_HEALTH_PORTS if full else HEALTH_PORTS)
     deployments = check_structure(by_kind, full)
-    check_commands(deployments)
+    check_commands(deployments, ports)
     workloads = {**deployments, "migrate": by_kind["Job"][0]}
     for label, doc in workloads.items():
         check_security(label, doc, automount=full and label != "migrate")

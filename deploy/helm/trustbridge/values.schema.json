@@ -49,6 +49,19 @@
     "worker": {
       "type": "object",
       "properties": {
+        "health": {
+          "type": "object",
+          "properties": {
+            "port": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
         "replicas": {
           "type": "integer",
           "minimum": 0
@@ -58,6 +71,19 @@
     "reconciler": {
       "type": "object",
       "properties": {
+        "health": {
+          "type": "object",
+          "properties": {
+            "port": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
         "replicas": {
           "type": "integer",
           "minimum": 0

@@ -195,6 +195,9 @@ class TrustbridgeSettings(Settings):
     schema_poll_seconds: float = Field(default=2.0, gt=0)
     host_recheck_seconds: float = Field(default=float(DEFAULT_HOST_RECHECK_SECONDS), gt=0)
     host_check_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Port of the worker's and reconciler's health endpoints (`/health/live`, `/health/ready`).
+    # Unset: no endpoint. The api serves its health routes on its own port and ignores this.
+    health_port: int | None = Field(default=None, ge=1, le=65535)
 
     # Admin API rate limits (ADR 0033 decision 5): fixed windows in Valkey, fail open. Reads,
     # mutations and exports are per principal; `anonymous` is per source address for

@@ -36,6 +36,7 @@ from trustbridge.settings import TrustbridgeSettings, load_trustbridge_settings
 from trustbridge.tenancy import RoleGate, budget_left, install_tenant_hook
 from trustbridge.tenancy.gate import SqlTenantGate
 from trustbridge.worker.deliveries import DeliveryStore, InMemoryDeliveryStore, PgDeliveryStore
+from trustbridge.worker.health import HealthServer, Heartbeat
 from trustbridge.worker.lease import InMemoryLeaseStore, LeaseManager, LeaseStore, PgLeaseStore
 from trustbridge.worker.ports import (
     ConnectionData,
@@ -223,6 +224,16 @@ async def run_process(
         )
         if core.queue is None or core.relay is None:  # pragma: no cover -- a client was given
             raise RuntimeError("the stream queue is not configured")
+        heartbeat = Heartbeat()
+        if settings.health_port is not None:
+            # up before the schema wait: liveness passes meanwhile and readiness reports false
+            server = HealthServer(
+                heartbeat,
+                {"valkey": client.ping, "schema": core.gate.refresh},
+                settings.health_port,
+            )
+            await server.start()
+            stack.push_async_callback(server.stop)
         started = time.monotonic()
         try:
             await core.gate.wait(
@@ -250,6 +261,7 @@ async def run_process(
                     hosts=monitor,
                     registry=core.runtime.registry,
                     gate=core.tenant_gate,
+                    heartbeat=heartbeat,
                 )
                 await Worker(settings, deps, consumer_name()).run(stop)
             else:
@@ -260,6 +272,7 @@ async def run_process(
                     hosts=monitor,
                     leases=core.leases,
                     deliveries=core.runtime.deliveries,
+                    heartbeat=heartbeat,
                 )
                 await Reconciler(settings, rdeps).run(stop)
         finally:

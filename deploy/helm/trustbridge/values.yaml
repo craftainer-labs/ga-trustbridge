@@ -119,6 +119,31 @@ worker:
     limits:
       cpu: "1"
       memory: 512Mi
+  ## Health endpoint of the process (HEALTH_PORT, python -m trustbridge.worker worker).
+  ## null turns the endpoint, its probes and the container port off.
+  health:
+    port: 8081
+    probes:
+      ## Covers the start of the process, before the endpoint is up (liveness
+      ## and readiness wait for it). A process waiting for the schema is
+      ## already serving, so this need not span trustbridge.schema.waitSeconds.
+      startup:
+        periodSeconds: 5
+        timeoutSeconds: 5
+        failureThreshold: 30
+      ## Fails when a loop made no progress for its interval plus
+      ## trustbridge.lease.ttlSeconds (it never touches a dependency), so the
+      ## kubelet restarts a stuck process after that plus
+      ## periodSeconds x failureThreshold
+      liveness:
+        periodSeconds: 20
+        timeoutSeconds: 5
+        failureThreshold: 3
+      ## Valkey answers and the database schema is current
+      readiness:
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
   terminationGracePeriodSeconds: 60
   strategy: {}
   nodeSelector: {}
@@ -140,6 +165,31 @@ reconciler:
     limits:
       cpu: 500m
       memory: 384Mi
+  ## Health endpoint of the process (HEALTH_PORT, python -m trustbridge.worker reconciler).
+  ## null turns the endpoint, its probes and the container port off.
+  health:
+    port: 8081
+    probes:
+      ## Covers the start of the process, before the endpoint is up (liveness
+      ## and readiness wait for it). A process waiting for the schema is
+      ## already serving, so this need not span trustbridge.schema.waitSeconds.
+      startup:
+        periodSeconds: 5
+        timeoutSeconds: 5
+        failureThreshold: 30
+      ## Fails when a loop made no progress for its interval plus
+      ## trustbridge.lease.ttlSeconds (it never touches a dependency), so the
+      ## kubelet restarts a stuck process after that plus
+      ## periodSeconds x failureThreshold
+      liveness:
+        periodSeconds: 20
+        timeoutSeconds: 5
+        failureThreshold: 3
+      ## Valkey answers and the database schema is current
+      readiness:
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
   terminationGracePeriodSeconds: 60
   strategy: {}
   nodeSelector: {}
