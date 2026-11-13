@@ -117,6 +117,11 @@ async def _admin(db: Db, sql: str, params: dict[str, Any] | None = None) -> None
         await conn.execute(text(sql), params or {})
 
 
+async def _admin_rows(db: Db, sql: str, params: dict[str, Any]) -> list[Row[Any]]:
+    async with db.admin.begin() as conn:
+        return list((await conn.execute(text(sql), params)).all())
+
+
 async def _admin_scalar(db: Db, sql: str, params: dict[str, Any] | None = None) -> Any:  # noqa: ANN401
     async with db.admin.begin() as conn:
         return (await conn.execute(text(sql), params or {})).scalar_one()
@@ -581,7 +586,7 @@ async def test_tb_upsert_tenant_refuses_a_tenant_with_a_deletion_in_progress(db:
     for state in OPEN_STATES:
         await _set_state(db, deletion, state)
         assert (await _app_rows(db, upsert, args))[0][0] is None
-        row = (await _app_rows(db, read, {"t": tenant.id}))[0]
+        row = (await _admin_rows(db, read, {"t": tenant.id}))[0]
         assert (row.org, row.org_id, row.state) == ("acme-org", 1, "active")
     other = await _tenant(db)  # a deletion of another tenant does not matter
     assert (await _app_rows(db, upsert, {"h": other.host, "i": other.installation}))[0][
@@ -589,7 +594,7 @@ async def test_tb_upsert_tenant_refuses_a_tenant_with_a_deletion_in_progress(db:
     ] == other.id
     await _set_state(db, deletion, "cancelled")
     assert (await _app_rows(db, upsert, args))[0][0] == tenant.id
-    row = (await _app_rows(db, read, {"t": tenant.id}))[0]
+    row = (await _admin_rows(db, read, {"t": tenant.id}))[0]
     assert (row.org, row.org_id, row.state) == ("renamed", 7, "suspended")
 
 
