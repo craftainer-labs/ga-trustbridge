@@ -52,8 +52,20 @@ class World:
     def __init__(self) -> None:
         """A dead delivery that gets requeued, and an enabled tenant."""
         self.requeue: queries.Requeue | None = queries.Requeue(
-            {"status": "dead", "attempts": 8, "dead_at": AT, "last_error": f"token={CANARY}"},
-            {"status": "pending", "attempts": 0, "dead_at": None, "last_error": None},
+            {
+                "status": "dead",
+                "attempts": 8,
+                "dead_at": AT,
+                "last_error": f"token={CANARY}",
+                "next_attempt_at": None,
+            },
+            {
+                "status": "pending",
+                "attempts": 0,
+                "dead_at": None,
+                "last_error": None,
+                "next_attempt_at": None,
+            },
             changed=True,
         )
         self.requeue_error: Exception | None = None
@@ -202,7 +214,14 @@ def test_requeue_resets_the_delivery_and_audits_it_with_the_scrubbed_before(
     assert event.before is not None
     assert (event.before["status"], event.before["attempts"]) == ("dead", 8)
     assert CANARY not in repr(event.before)
-    assert event.after == {"attempts": 0, "dead_at": None, "last_error": None, "status": "pending"}
+    assert event.after == {
+        "attempts": 0,
+        "dead_at": None,
+        "last_error": None,
+        "next_attempt_at": None,
+        "status": "pending",
+    }
+    assert "next_attempt_at" in event.before
     assert world.written == []
 
 

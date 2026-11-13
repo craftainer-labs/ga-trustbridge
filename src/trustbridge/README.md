@@ -66,7 +66,7 @@ holds (`admin/credentials.py`).
 Not wired yet: the worker and the reconciler instantiate no `CredentialCore`, so nothing reconciles
 or resumes credential operations in the background (NG5 follow-up). The reconcile requests
 (`ReconcileScheduler`, `POST /admin/v1/tenants/{t}/reconcile`) are recorded in the Valkey set
-`tb:reconcile`, whose consumer is NG6i; until it exists a recorded request is only recorded.
+`tb:reconcile`, whose consumer is NG5r (it needs the tenant reconcile body and a credential core in the reconciler); until it exists a recorded request is only recorded.
 
 ## Accepted behaviours
 

@@ -21,9 +21,13 @@ An operation ending `failed` (cleanup done, previous state restored) has no even
 ADR 0032 does not list it, and the rollback of a kind change shows as the inverse trust event.
 """
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from uuid import UUID
 
+from sqlalchemy import event as sa_event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from trustbridge.adapters.store import (
@@ -40,6 +44,40 @@ from trustbridge.audit.redact import project
 from trustbridge.audit.store import append
 
 _MAX_RESOURCE_ID = 255
+
+
+@dataclass(slots=True)
+class JoinedCallEvent:
+    """A caller's event that must commit with the save that finishes a rotation (invariant 9).
+
+    The admin API's `credential.rotate` call event is built from the finished operation's id by
+    `build`. While `join_call_event` is active, `CredentialAuditObserver.saved` appends it in the
+    transaction of the save that moves a `rotate` operation of this tenant and scope to
+    `finished`, so a finished rotation is never committed without its call event: if the append
+    fails, the save rolls back and the rotation stays resumable. `written` is set once appended.
+    """
+
+    tenant_id: UUID
+    scope_key: str
+    build: Callable[[UUID], AuditEvent]
+    written: bool = False
+
+    def reset(self, *_: object) -> None:
+        """Forget that the event was appended (its transaction rolled back)."""
+        self.written = False
+
+
+_JOINED: ContextVar[JoinedCallEvent | None] = ContextVar("tb_joined_call_event", default=None)
+
+
+@contextmanager
+def join_call_event(pending: JoinedCallEvent) -> Iterator[JoinedCallEvent]:
+    """Make `pending` visible to the observer for the saves made inside this block."""
+    token = _JOINED.set(pending)
+    try:
+        yield pending
+    finally:
+        _JOINED.reset(token)
 
 
 def _bounded_id(value: str) -> str:
@@ -198,6 +236,28 @@ class CredentialAuditObserver:
         ):
             event = self._event(credential.tenant_id, _bounded_id(credential.scope_key), implied)
             await append(session, with_trace(event))
+        await self._append_joined(session, credential, operation)
+
+    @staticmethod
+    async def _append_joined(
+        session: AsyncSession, credential: StoredCredential, operation: Operation | None
+    ) -> None:
+        """Append the caller's joined event in this save when it finishes the caller's rotation."""
+        pending = _JOINED.get()
+        if (
+            pending is None
+            or pending.written
+            or operation is None
+            or operation.kind is not OperationKind.ROTATE
+            or operation.status is not OperationStatus.FINISHED
+            or (credential.tenant_id, credential.scope_key)
+            != (pending.tenant_id, pending.scope_key)
+        ):
+            return
+        await append(session, with_trace(pending.build(operation.id)))
+        pending.written = True
+        # A rolled back save appended nothing: the retry must append the event again.
+        sa_event.listen(session.sync_session, "after_rollback", pending.reset, once=True)
 
     async def orphan_deleted(self, tenant_id: UUID, adapter: str, name: str) -> None:
         """Write `credential.orphan.delete`; `name` is the platform credential name."""

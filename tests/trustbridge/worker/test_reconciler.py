@@ -48,8 +48,8 @@ async def test_a_stored_row_in_any_state_blocks_redelivery() -> None:  # inv. 8
     h = await Harness({}).start()
     for guid in ("g-pending", "g-processed", "g-dead"):
         await h.add(guid)
-    await h.store.mark_processed(key("g-processed"), h.clock())
-    await h.store.mark_dead(key("g-dead"), "x", h.clock())
+    await h.store.mark_processed(key("g-processed"), h.clock(), attempts=0)
+    await h.store.mark_dead(key("g-dead"), "x", h.clock(), attempts=0)
     client = FakeHookClient(
         [_hd(i, g, 500, h) for i, g in enumerate(("g-pending", "g-processed", "g-dead"))]
     )
@@ -139,8 +139,8 @@ async def test_retention_purges_bodies_then_expired_ids_and_keeps_dead_bodies_lo
     h = await Harness({}).start()  # 7 d processed, 30 d dead, 30 d ids (the defaults)
     for delivery_id in ("processed", "dead", "pending"):
         await h.add(delivery_id)
-    await h.store.mark_processed(key("processed"), h.clock())
-    await h.store.mark_dead(key("dead"), "x", h.clock())
+    await h.store.mark_processed(key("processed"), h.clock(), attempts=0)
+    await h.store.mark_dead(key("dead"), "x", h.clock(), attempts=0)
     recon = _recon(h, None)
     h.advance(8 * 86400)
     await recon.retention()
@@ -162,7 +162,7 @@ async def test_retention_is_a_singleton_duty() -> None:
     """Retention is a singleton duty."""
     h = await Harness({}).start()
     await h.add("d1")
-    await h.store.mark_processed(key("d1"), h.clock())
+    await h.store.mark_processed(key("d1"), h.clock(), attempts=0)
     h.advance(8 * 86400)
     async with h.leases.hold(NIL_TENANT, "_core", "retention"):
         await _recon(h, None).retention()

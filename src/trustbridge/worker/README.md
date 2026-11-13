@@ -9,14 +9,14 @@ The runtime core of trustbridge, shared by the api, the worker and the reconcile
 | Module | What it is |
 | --- | --- |
 | `models.py` | Tables on the template's shared `Base`: `webhook_deliveries`, `scope_leases`, `tenants` (with `org`, `org_id`, `state`), `tenant_repositories`, `schema_compat`. The revisions `c3a5e7d91f42` and `5d1f3a7c9e24` in `alembic/versions/` are the schema of record. |
-| `deliveries.py` | `DeliveryStore` (Protocol), `PgDeliveryStore`, `InMemoryDeliveryStore` (mock mode and unit tests), the relay rules (`is_relayable`) and the retry backoff. |
+| `deliveries.py` | `DeliveryStore` (Protocol), `PgDeliveryStore`, `InMemoryDeliveryStore` (mock mode and unit tests), the relay rules (`is_relayable`) and the retry backoff. `mark_processed`, `record_failure` and `mark_dead` take the `attempts` the worker claimed and update only a row still `pending` with that counter (False or 0 on a lost claim; the worker logs it, acks, and, for `dead`, skips the dead letter). A requeue back to the same counter value (0) is a known residual: NG6g decides on a generation column and its migration. `requeue_statement` is the one reset the admin API also runs in its transaction. |
 | `queue.py` | `StreamQueue`: `tb:events` (`{id, host}` keys only), `tb:events:dead` (`{host, delivery_id, error}`), consumer group `tb-workers`, safe trimming, lag. redis-py `redis.asyncio` against Valkey (ADR 0013). |
 | `relay.py` | Adds delivery ids from the outbox to the stream (tick, re-relay sweep, host-ready). |
 | `worker.py` | The consumer; dispatches through the GitHub core's `HandlerRegistry` (`EventContext`). |
 | `reconciler.py` | The reconciler process: relay tick, sweep, delivery reconciliation (`HookDeliveryClient`), retention, trimming. |
 | `lease.py` | Fenced scope leases (`LeaseManager`, `guarded_execute`, `guarded_insert`, `bounded_call`); `LeaseManager` and `Lease.guard()` are the adapter core's `LeaseProvider` and `Lease`. |
 | `secrets.py` | `LocalSecrets` (`file:` / `env:` refs to read, `store:` refs under `SECRET_STORE_DIR` to read, write, delete and list) and its in-memory twin; the `SecretReader` / `SecretWriter` of the GitHub core. |
-| `ports.py` | The ports of the GitHub and adapter cores over these components: `SqlTenants` / `MemoryTenants` (installation store, installation resolver, tenant resolver), `ParkedValues` (value store, in the secret store), `ConnectionData` (tenant connection store, config resolver), `ReconcileRequests` (the Valkey set `tb:reconcile`; the api records admin reconcile requests in it too, and its consumer is NG6i). |
+| `ports.py` | The ports of the GitHub and adapter cores over these components: `SqlTenants` / `MemoryTenants` (installation store, installation resolver, tenant resolver), `ParkedValues` (value store, in the secret store), `ConnectionData` (tenant connection store, config resolver), `ReconcileRequests` (the Valkey set `tb:reconcile`; the api records admin reconcile requests in it too, and its consumer is NG5r). |
 | `schema.py` | The schema gate (`schema_compat` integer) and its readiness check. |
 | `runtime.py` | `build_core` (stores, ports, GitHub runtime) and the bootstrap of the worker and reconciler commands (`monitor.check_all` / `start` / `stop`). |
 | `migrate.py` | The migrate Job and the autogenerate wrapper. |

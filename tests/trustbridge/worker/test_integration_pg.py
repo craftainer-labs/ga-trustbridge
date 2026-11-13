@@ -220,12 +220,16 @@ async def test_the_sql_store_runs_the_whole_delivery_lifecycle(ids: list[str]) -
 
     await store.mark_relayed([], now)  # nothing to stamp
     await store.mark_relayed([ok.key, failing.key], now)
-    await store.mark_processed(ok.key, now)
-    assert await store.record_failure(failing.key, "boom", now, later) == 1
-    assert await store.record_failure(failing.key, "boom", now, later) == 2
-    assert await store.record_failure(ok.key, "late", now, later) == 0  # not pending
+    assert await store.mark_processed(ok.key, now, attempts=0) is True
+    assert await store.record_failure(failing.key, "boom", now, later, attempts=0) == 1
+    assert await store.record_failure(failing.key, "boom", now, later, attempts=1) == 2
+    assert await store.record_failure(ok.key, "late", now, later, attempts=0) == 0  # not pending
     await store.defer(failing.key, later)
-    await store.mark_dead(dead.key, "poison", now)
+    assert await store.mark_dead(dead.key, "poison", now, attempts=0) is True
+    # a lost claim: `failing` moved on (two counted failures), so the stale claim updates nothing
+    assert await store.mark_processed(failing.key, now, attempts=0) is False
+    assert await store.mark_dead(failing.key, "stale", now, attempts=1) is False
+    assert await store.mark_processed(ok.key, now, attempts=0) is False  # already processed
 
     row_ok, row_failing, row_dead = [await store.get(d.key) for d in (ok, failing, dead)]
     assert row_ok is not None
@@ -242,7 +246,8 @@ async def test_the_sql_store_runs_the_whole_delivery_lifecycle(ids: list[str]) -
     assert await store.requeue(dead.key) is True
     assert await store.requeue(dead.key) is False  # no longer dead
     assert await store.requeue(missing) is False
-    await store.mark_dead(dead.key, "again", now)
+    assert await store.mark_dead(dead.key, "again", now, attempts=3) is False  # wrong generation
+    assert await store.mark_dead(dead.key, "again", now, attempts=0) is True
     far = now + timedelta(days=400)
     purged = await store.purge_bodies(far, far)
     assert purged >= 2  # the processed and the dead row lost their bodies

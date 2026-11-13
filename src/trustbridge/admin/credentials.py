@@ -48,7 +48,11 @@ from trustbridge.admin import views
 from trustbridge.admin.problems import AdminProblem
 from trustbridge.audit import Action, ActorType, AuditEvent, AuditWriter, Outcome, project
 from trustbridge.audit.actions import SystemActor
-from trustbridge.audit.credentials import CredentialAuditObserver
+from trustbridge.audit.credentials import (
+    CredentialAuditObserver,
+    JoinedCallEvent,
+    join_call_event,
+)
 from trustbridge.audit.redact import FailureReason, failure_after
 from trustbridge.github.availability import HostNotReadyError
 from trustbridge.github.client import GitHubApiError
@@ -117,11 +121,16 @@ async def _record(call: Call, outcome: Outcome, after: Mapping[str, object] | No
     await call.writer.record(call.event(outcome, after))
 
 
-async def _failure(call: Call, reason: FailureReason) -> None:
+async def _failure(call: Call, joined: JoinedCallEvent, reason: FailureReason) -> None:
     """Best effort: a `failure` event in its own transaction; never hides the original error.
 
-    The event carries a `FailureReason` code, never a message.
+    The event carries a `FailureReason` code, never a message. When the finishing save already
+    committed the call's success event (an error after it, e.g. releasing the lease), no failure
+    event is added: the call leaves exactly one event, and the committed one is the truth.
     """
+    if joined.written:
+        logger.warning("rotate error after the finishing save; its success event stands")
+        return
     try:
         await _record(call, Outcome.FAILURE, failure_after(reason))
     except Exception:
@@ -144,6 +153,11 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
     tenant, a scope with nothing rotatable, a busy lease or an adapter that is not configured; 502
     (fixed text) when the platform or GitHub fails. Each outcome leaves exactly one event.
     """
+    joined = JoinedCallEvent(
+        call.tenant_id,
+        call.scope_key,
+        lambda operation_id: call.event(Outcome.SUCCESS, _success_after(call, operation_id)),
+    )
     try:
         if call.adapter not in rt.adapters:
             raise AdminProblem(404, "not-found", "Adapter not found")
@@ -151,31 +165,34 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
         if stored is None:
             raise AdminProblem(404, "not-found", "Credential not found")
         tenant = await rt.tenants.get_tenant(call.tenant_id)
-        result = await rt.core.rotate_scope(tenant, call.adapter, stored.scope)
+        # The save that finishes the rotation appends the call's success event in its own
+        # transaction (ADR 0032 invariant 9); `joined.written` says it did.
+        with join_call_event(joined):
+            result = await rt.core.rotate_scope(tenant, call.adapter, stored.scope)
     except AdminProblem:
-        await _failure(call, FailureReason.NOT_FOUND)
+        await _failure(call, joined, FailureReason.NOT_FOUND)
         raise
     except UnknownTenantError:
-        await _failure(call, FailureReason.NOT_FOUND)
+        await _failure(call, joined, FailureReason.NOT_FOUND)
         raise AdminProblem(404, "not-found", "Tenant not found") from None
     except TenantDisabledError:
-        await _failure(call, FailureReason.TENANT_DISABLED)
+        await _failure(call, joined, FailureReason.TENANT_DISABLED)
         raise AdminProblem(409, "conflict", "The tenant is disabled") from None
     except RotationNotApplicableError:
-        await _failure(call, FailureReason.NOT_ROTATABLE)
+        await _failure(call, joined, FailureReason.NOT_ROTATABLE)
         raise AdminProblem(409, "conflict", "The credential has no rotatable secret") from None
     except LeaseBusy:
-        await _failure(call, FailureReason.LEASE_BUSY)
+        await _failure(call, joined, FailureReason.LEASE_BUSY)
         raise AdminProblem(
             409, "conflict", "The credential is being changed; retry shortly"
         ) from None
     except LeaseLost, LeaseLostError:
-        await _failure(call, FailureReason.LEASE_LOST)
+        await _failure(call, joined, FailureReason.LEASE_LOST)
         raise AdminProblem(
             409, "conflict", "The credential is being changed; retry shortly"
         ) from None
     except AdapterConfigurationError:
-        await _failure(call, FailureReason.NOT_CONFIGURED)
+        await _failure(call, joined, FailureReason.NOT_CONFIGURED)
         raise AdminProblem(
             409, "conflict", "The adapter is not configured for this tenant"
         ) from None
@@ -189,21 +206,21 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
         SecretUnavailable,
     ) as exc:
         logger.warning("rotation failed for tenant %s: %s", call.tenant_id, type(exc).__name__)
-        await _failure(call, _upstream_reason(exc))
+        await _failure(call, joined, _upstream_reason(exc))
         raise AdminProblem(
             502, "bad-gateway", "The platform or GitHub failed to complete the rotation"
         ) from None
     except asyncio.CancelledError:
         # The client went away mid-rotation: the operation stays open for the reconciler, but the
         # call still leaves its event (shielded, so the cancellation cannot cut the write short).
-        await asyncio.shield(_failure(call, FailureReason.CANCELLED))
+        await asyncio.shield(_failure(call, joined, FailureReason.CANCELLED))
         raise
     except Exception as exc:
         # Unmapped: never let the chain (which may hold a secret) reach the error logger.
         logger.error("rotation crashed for tenant %s: %s", call.tenant_id, type(exc).__name__)
-        await _failure(call, FailureReason.INTERNAL)
+        await _failure(call, joined, FailureReason.INTERNAL)
         raise AdminProblem(500, "internal", "The rotation failed unexpectedly") from None
-    await _record_success(call, result.operation_id)
+    await _record_success(call, result.operation_id, joined)
     return RotationOut(
         operation_id=result.operation_id,
         status=None if result.status is None else result.status.value,
@@ -213,13 +230,9 @@ async def rotate(call: Call, rt: CredentialRuntime) -> RotationOut:
     )
 
 
-async def _record_success(call: Call, operation_id: UUID | None) -> None:
-    """The success event; if it cannot be written the call fails.
-
-    An open two-phase rotation stays resumable; a finished one is left unaudited, so the operator
-    must check the credential's audit trail before retrying.
-    """
-    after = project(
+def _success_after(call: Call, operation_id: UUID | None) -> dict[str, object]:
+    """The success event's `after`, through the `credential` allow-list."""
+    return project(
         "credential",
         {
             "adapter": call.adapter,
@@ -227,7 +240,19 @@ async def _record_success(call: Call, operation_id: UUID | None) -> None:
             **({} if operation_id is None else {"operation_id": operation_id}),
         },
     )
-    await _record(call, Outcome.SUCCESS, after)
+
+
+async def _record_success(call: Call, operation_id: UUID | None, joined: JoinedCallEvent) -> None:
+    """The success event of a call that did not finish the rotation; if it fails the call does.
+
+    A rotation this call finished never gets here: its event commits with the finishing save
+    (`JoinedCallEvent`), so a finished change is never left unaudited and never reported as a
+    success without its event. What reaches here is an open two-phase rotation or a manual step,
+    which stays resumable: the retry resumes the same operation instead of rotating again.
+    """
+    if joined.written:
+        return
+    await _record(call, Outcome.SUCCESS, _success_after(call, operation_id))
 
 
 def build_runtime(

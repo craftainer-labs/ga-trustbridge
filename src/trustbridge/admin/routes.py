@@ -689,7 +689,7 @@ async def reconcile_tenant(
     """Ask for a reconcile of the tenant soon (`operator`, instance or on the tenant).
 
     Records the request (`ReconcileRequests`, a set, so a repeat is one request) and answers 202;
-    the reconcile loop that consumes the set is NG6i. A disabled tenant is a 409. The event is
+    the reconcile loop that consumes the set is NG5r. A disabled tenant is a 409. The event is
     written first, then the request recorded, then the transaction commits: a failure to record
     leaves no `success` event.
     """

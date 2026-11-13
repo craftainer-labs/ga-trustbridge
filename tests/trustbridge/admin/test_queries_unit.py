@@ -36,6 +36,8 @@ class Rows:
         """The first row, if any."""
         return self.rows[0] if self.rows else None
 
+    rowcount = 1
+
 
 class Session:
     """Records the bound parameters and serves one scripted result."""
@@ -358,16 +360,19 @@ async def test_an_unknown_delivery_is_none() -> None:
 class Script:
     """A session that answers the lock query from one row and records every statement."""
 
-    def __init__(self, row: dict[str, Any] | None) -> None:
-        """Serve `row` for the lock query."""
+    def __init__(self, row: dict[str, Any] | None, *, updated: int = 1) -> None:
+        """Serve `row` for the lock query; the UPDATE affects `updated` rows."""
         self.row = row
+        self.updated = updated
         self.statements: list[str] = []
 
-    async def execute(self, statement: Any, params: dict[str, Any]) -> Rows:  # noqa: ANN401
+    async def execute(self, statement: Any, params: dict[str, Any] | None = None) -> Rows:  # noqa: ANN401
         """Record the statement text and answer."""
         del params
         self.statements.append(str(statement))
-        return Rows([self.row] if self.row is not None else [])
+        rows = Rows([self.row] if self.row is not None else [])
+        rows.rowcount = self.updated
+        return rows
 
 
 def _row(status: str, *, has_body: bool = True) -> dict[str, Any]:
@@ -376,6 +381,7 @@ def _row(status: str, *, has_body: bool = True) -> dict[str, Any]:
         "attempts": 8,
         "dead_at": NOW,
         "last_error": "boom",
+        "next_attempt_at": None,
         "has_body": has_body,
     }
 
@@ -387,9 +393,24 @@ async def test_requeue_resets_a_dead_delivery_with_a_body() -> None:
     assert done is not None
     assert done.changed is True
     assert (done.before["status"], done.before["attempts"]) == ("dead", 8)
-    assert done.after == {"status": "pending", "attempts": 0, "dead_at": None, "last_error": None}
+    assert done.after == {
+        "status": "pending",
+        "attempts": 0,
+        "dead_at": None,
+        "last_error": None,
+        "next_attempt_at": None,
+    }
+    assert "next_attempt_at" in done.before
     assert "FOR UPDATE" in session.statements[0]
     assert session.statements[1].startswith("UPDATE webhook_deliveries")
+
+
+async def test_requeue_that_updates_no_row_is_a_conflict() -> None:
+    """The store's conditional UPDATE found nothing to reset: a 409, never a false success."""
+    session = Script(_row("dead"), updated=0)
+    with pytest.raises(AdminProblem) as caught:
+        await queries.requeue_delivery(session, "github.com", "d1")  # type: ignore[arg-type]
+    assert caught.value.status_code == 409
 
 
 async def test_requeue_of_a_pending_delivery_changes_nothing() -> None:
