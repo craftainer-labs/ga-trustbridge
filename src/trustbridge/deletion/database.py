@@ -2,16 +2,17 @@
 
 Clears every row trustbridge holds for the tenant except the `tenants` row, which the engine
 removes last, through the fenced `tb_delete_tenant`, in the transaction that finishes the record.
-One pass is one bounded batch in one transaction, in the tenant's context (ADR 0031), as the
-app role: its `tenant_isolation` policies (`FOR ALL`) admit the context tenant for `DELETE` and for
-the `FOR UPDATE` row locks (which need `UPDATE` privilege and an `UPDATE` policy), and the app role
+One pass is one bounded batch in one transaction, in the tenant's context (ADR 0031), as the app
+role: its `tenant_isolation` policies (`FOR ALL`) admit the context tenant for `DELETE` and for the
+`FOR UPDATE` row locks (which need `UPDATE` privilege and an `UPDATE` policy), and the app role
 already holds the table grants (`SELECT, INSERT, UPDATE, DELETE`), so no `SECURITY DEFINER`
-function is added (least privilege: the app role gains nothing). The tables have no foreign keys; the order is the ADR's (in-flight
-operations first). `webhook_deliveries` is host-scoped and outside RLS: the tenant's rows keep
-their dedupe key (`host`, `delivery_id`, `body_sha256`) and the non-personal `event`, and lose
-every field that can hold personal or tenant data: `body`, `headers` (the allow-listed request
-headers, which are not read once a row is `deleted`; the column is NOT NULL, so it becomes `{}`)
-and `last_error` (handler error text). The row becomes `deleted` (never relayed or handled again).
+function is added (least privilege: the app role gains nothing). The tables have no foreign keys;
+the order is the ADR's (in-flight operations first). `webhook_deliveries` is host-scoped and
+outside RLS: the tenant's rows keep their dedupe key (`host`, `delivery_id`, `body_sha256`) and the
+non-personal `event`, and lose every field that can hold personal or tenant data: `body`, `headers`
+(the allow-listed request headers, which are not read once a row is `deleted`; the column is NOT
+NULL, so it becomes `{}`) and `last_error` (handler error text). The row becomes `deleted` (never
+relayed or handled again).
 
 A batch is keyed on the table's primary key, not on `ctid`: `DELETE ... WHERE pk IN (SELECT pk ...
 ORDER BY pk LIMIT n FOR UPDATE SKIP LOCKED)`. The row locks are taken before the statement acts, so
