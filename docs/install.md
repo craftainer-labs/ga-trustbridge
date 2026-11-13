@@ -108,6 +108,28 @@ kubectl -n trustbridge get deploy,pods
 kubectl -n trustbridge logs deploy/trustbridge-api | head
 ```
 
+## Health probes
+
+The api answers `/health/live` and `/health/ready` on its port. The worker
+and reconciler serve the same two paths on `HEALTH_PORT` (chart:
+`worker.health.port` and `reconciler.health.port`, default 8081), a plain
+HTTP responder with no authentication that returns only
+`{"status": "ok"}` or `{"status": "fail"}` (readiness adds `ok` or `fail`
+per check, `valkey` and `schema`; details go to the log).
+
+- **Liveness** touches no dependency. It fails when a loop made no progress
+  for its own interval plus `LEASE_TTL_SECONDS` (125 s for the worker's read
+  loop and the relay tick, 1020 s for the 15-minute re-relay sweep), so a slow
+  but healthy loop is not restarted; the kubelet then waits
+  `failureThreshold` x `periodSeconds` (60 s) more. A process that is waiting
+  for the schema is alive.
+- **Readiness** pings Valkey and reads the schema version from Postgres on
+  every probe, each under a 5 s timeout. A pod that is not ready receives no
+  traffic, but neither process takes any; it shows in `kubectl get pods` and
+  blocks a rolling update from continuing.
+- With `HEALTH_PORT` unset (the default outside the chart) the processes
+  serve nothing.
+
 ## Register the GitHub App
 
 With `registrationStateKey` set, use the admin API's manifest flow (ADR

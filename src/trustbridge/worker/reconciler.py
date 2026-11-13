@@ -23,6 +23,7 @@ from trustbridge.github.availability import HostMonitor
 from trustbridge.settings import GitHubHostConfig, TrustbridgeSettings
 from trustbridge.worker import metrics
 from trustbridge.worker.deliveries import DeliveryKey, DeliveryStore
+from trustbridge.worker.health import Heartbeat, stale_after
 from trustbridge.worker.lease import LeaseBusy, LeaseManager
 from trustbridge.worker.models import NIL_TENANT
 from trustbridge.worker.queue import StreamQueue
@@ -106,13 +107,27 @@ class DeliveryReconciler:
 Job = Callable[[], Awaitable[object]]
 
 
-async def periodic(name: str, interval: float, job: Job, stop: asyncio.Event) -> None:
-    """Run `job` now and then every `interval` seconds until `stop`; errors are logged."""
+async def periodic(
+    name: str,
+    interval: float,
+    job: Job,
+    stop: asyncio.Event,
+    beat: Callable[[str], None] | None = None,
+) -> None:
+    """Run `job` now and then every `interval` seconds until `stop`; errors are logged.
+
+    `beat(name)` is called when a run starts and when it ends (even if it failed): the gap
+    between two calls is what the liveness check measures.
+    """
     while not stop.is_set():
+        if beat is not None:
+            beat(name)
         try:
             await job()
         except Exception:
             logger.exception("reconciler job failed", extra={"job": name})
+        if beat is not None:
+            beat(name)
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=interval)
 
@@ -128,6 +143,7 @@ class ReconcilerDeps:
     leases: LeaseManager
     deliveries: HookDeliveryClient | None
     clock: Clock = utcnow
+    heartbeat: Heartbeat | None = None
 
 
 class Reconciler:
@@ -201,13 +217,15 @@ class Reconciler:
         """Run every job on its own interval until `stop` is set."""
         await self._d.queue.ensure_group()
         s = self._s
-        jobs = [
-            periodic("relay-tick", s.relay_interval_seconds, self.relay_tick, stop),
-            periodic("resweep", s.relay_recheck_seconds, self.resweep, stop),
-            periodic(
-                "deliveries", s.delivery_reconcile_interval_seconds, self.reconcile_deliveries, stop
-            ),
-            periodic("retention", s.retention_interval_seconds, self.retention, stop),
-            periodic("trim", s.stream_trim_interval_seconds, self.trim_streams, stop),
+        schedule: list[tuple[str, float, Job]] = [
+            ("relay-tick", s.relay_interval_seconds, self.relay_tick),
+            ("resweep", s.relay_recheck_seconds, self.resweep),
+            ("deliveries", s.delivery_reconcile_interval_seconds, self.reconcile_deliveries),
+            ("retention", s.retention_interval_seconds, self.retention),
+            ("trim", s.stream_trim_interval_seconds, self.trim_streams),
         ]
+        beat = self._d.heartbeat or Heartbeat()
+        for name, interval, _job in schedule:
+            beat.register(name, stale_after(s, interval))
+        jobs = [periodic(name, interval, job, stop, beat.beat) for name, interval, job in schedule]
         await asyncio.gather(*jobs)

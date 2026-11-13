@@ -79,3 +79,6 @@ image:
   digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 otel:
   endpoint: http://otel-collector.example.internal:4318
+reconciler:
+  health:
+    port: 9091

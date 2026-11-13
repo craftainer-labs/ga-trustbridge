@@ -19,11 +19,14 @@ The Helm chart that runs trustbridge's three processes on Kubernetes
   smallest production install.
 - `check.sh` — `helm lint --strict` and `helm template` for each `ci/` file,
   `assert_render.py` over the render, and negative renders (a missing
-  required value must fail with a message that names it). `kubeconform` runs
+  required value must fail with a message that names it; a schema failure
+  must name the key and the rule, and every refused render's output is
+  printed, so a CI log shows helm's wording). `kubeconform` runs
   too when it is installed. The `helm-chart` prek hook runs it; helm comes
   from `scripts/develop.d/25-helm.sh`.
 - `assert_render.py` — the assertions: Pod Security `restricted` settings on
-  every pod, secrets only by `secretKeyRef`, the commands, probes, the
+  every pod, secrets only by `secretKeyRef`, the commands, the api's and the
+  worker's and reconciler's probes (and none when `health.port` is null), the
   air-gap, CA and proxy values, and that `_helpers.tpl` maps every
   environment variable `trustbridge.settings` reads.
 
@@ -77,6 +80,7 @@ The Helm chart that runs trustbridge's three processes on Kubernetes
 | `LEASE_TTL_SECONDS`, `ADAPTER_CALL_TIMEOUT_SECONDS` | `trustbridge.lease.ttlSeconds`, `.adapterCallTimeoutSeconds` | the timeout must be shorter than the TTL (validated by the app) |
 | `SECRET_STORE_DIR` | `trustbridge.secretStore.existingClaim`, `.mountPath` | set only when a claim is given |
 | `SCHEMA_WAIT_SECONDS`, `SCHEMA_POLL_SECONDS`, `HOST_RECHECK_SECONDS`, `HOST_CHECK_TIMEOUT_SECONDS` | `trustbridge.schema.waitSeconds`, `.pollSeconds`; `trustbridge.hosts.recheckSeconds`, `.checkTimeoutSeconds` | |
+| `HEALTH_PORT` | `worker.health.port`, `reconciler.health.port` (default 8081; `null` turns the endpoint, probes and container port off) | worker and reconciler only; the probe timings are `<process>.health.probes.*` |
 | `ADMIN_MAX_BODY_BYTES`, `ADMIN_RATE_LIMIT_ENABLED`, `_READ_REQUESTS`, `_MUTATION_REQUESTS`, `_EXPORT_REQUESTS`, `_ANONYMOUS_REQUESTS`, `_WINDOW_SECONDS`, `_TIMEOUT_MS`, `_EXEMPT_CIDRS` | `trustbridge.admin.maxBodyBytes`; `trustbridge.admin.rateLimit.*` | |
 | `RBAC_ALIAS_TEMPLATE_PERSONAS`, `RBAC_ROLE_SEPARATOR` | `trustbridge.rbac.aliasTemplatePersonas`, `.roleSeparator` | |
 | `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `AWS_CA_BUNDLE`, `PGSSLROOTCERT` | `ca.existingConfigMap`, `.key`, `.mountPath` | all five point at the one mounted bundle |
@@ -90,10 +94,14 @@ The Helm chart that runs trustbridge's three processes on Kubernetes
   them beyond the template's example resource and health checks. The chart
   therefore requires `s3.*` and `mqtt.*` in production. Changing that is an
   application change.
-- **No probes on the worker and reconciler.** They have no HTTP endpoint, so
-  the Deployments rely on the process exiting (and Kubernetes restarting it)
-  when it cannot continue, for example after `SCHEMA_WAIT_SECONDS`. A health
-  endpoint for them is a follow-up.
+- **Worker and reconciler probes.** Both processes serve `/health/live` and
+  `/health/ready` on `HEALTH_PORT` (container port `health`); the kubelet's
+  startup, liveness and readiness probes use them. Liveness fails only when a
+  loop made no progress for its interval plus `trustbridge.lease.ttlSeconds`;
+  readiness needs Valkey and a current schema. See `docs/install.md`. The
+  NetworkPolicy needs no rule for them: traffic from a pod's own node is
+  always allowed ([Kubernetes
+  docs](https://kubernetes.io/docs/concepts/services-networking/network-policies/)).
 - **Replicas are 1 for every process.** Scaling beyond that (the worker is a
   consumer group, the reconciler runs singleton duties on one replica at a
   time, ADR 0028) has not been decided; the host state is per process (ADR 0028).

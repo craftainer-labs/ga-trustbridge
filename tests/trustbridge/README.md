@@ -8,6 +8,8 @@ Tests for the instance package `src/trustbridge/` (instance-added files under th
   hook delivery client) and need no service. `helpers.make_monitor` builds a real `HostMonitor`
   over an in-memory RSA signer; the `key_signers` fixture (`conftest.py`) swaps the signers a
   `build_host_runtime` would build from `SIGNERS` for that signer.
+- `worker/test_health.py` covers the worker and reconciler health endpoints (real sockets on
+  loopback, the heartbeat limits, the setting) and needs no service.
 - `worker/test_integration_pg.py` and `adapters/test_sql_store_integration.py` are marked
   `integration`: they need the devcontainer stack's Postgres and run in CI's stack (the 100%
   coverage gate counts the SQL stores through them).

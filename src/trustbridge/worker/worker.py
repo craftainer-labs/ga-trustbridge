@@ -36,12 +36,14 @@ from trustbridge.worker.deliveries import (
     TenantGate,
     retry_at,
 )
+from trustbridge.worker.health import Heartbeat, stale_after
 from trustbridge.worker.lease import LeaseBusy
 from trustbridge.worker.queue import StreamEntry, StreamQueue
 from trustbridge.worker.relay import Clock, Relay, utcnow
 
 logger = logging.getLogger(__name__)
 MAX_ERROR_CHARS = 500
+LOOP = "consume"
 
 
 @dataclass(slots=True)
@@ -55,6 +57,7 @@ class WorkerDeps:
     registry: HandlerRegistry
     clock: Clock = utcnow
     gate: TenantGate | None = None
+    heartbeat: Heartbeat | None = None
 
 
 class TenantDisabled(Exception):  # noqa: N818 -- a control-flow signal, not a failure
@@ -81,12 +84,15 @@ class Worker:
     async def run(self, stop: asyncio.Event) -> None:
         """Consume until `stop` is set."""
         await self._d.queue.ensure_group()
+        beat = self._d.heartbeat or Heartbeat()
+        beat.register(LOOP, stale_after(self._s, self._s.worker_block_ms / 1000))
         while not stop.is_set():
             try:
                 await self.run_once()
             except Exception:
                 logger.exception("stream read failed; backing off")
                 await asyncio.sleep(1.0)
+            beat.beat(LOOP)
 
     async def run_once(self) -> int:
         """One iteration: claim stale pending entries, read new ones, process them all."""

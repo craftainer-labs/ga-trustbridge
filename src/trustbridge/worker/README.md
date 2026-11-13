@@ -18,6 +18,7 @@ The runtime core of trustbridge, shared by the api, the worker and the reconcile
 | `secrets.py` | `LocalSecrets` (`file:` / `env:` refs to read, `store:` refs under `SECRET_STORE_DIR` to read, write, delete and list) and its in-memory twin; the `SecretReader` / `SecretWriter` of the GitHub core. |
 | `ports.py` | The ports of the GitHub and adapter cores over these components: `SqlTenants` / `MemoryTenants` (installation store, installation resolver, tenant resolver), `ParkedValues` (value store, in the secret store), `ConnectionData` (tenant connection store, config resolver), `ReconcileRequests` (the Valkey set `tb:reconcile`; the api records admin reconcile requests in it too, and its consumer is NG5r). |
 | `schema.py` | The schema gate (`schema_compat` integer) and its readiness check. |
+| `health.py` | `/health/live` and `/health/ready` for the worker and reconciler on `HEALTH_PORT` (standard-library asyncio, no dependency), and the `Heartbeat` the loops report to. See `docs/install.md`. |
 | `runtime.py` | `build_core` (stores, ports, GitHub runtime) and the bootstrap of the worker and reconciler commands (`monitor.check_all` / `start` / `stop`). |
 | `migrate.py` | The migrate Job and the autogenerate wrapper. |
 | `metrics.py` | OpenTelemetry instruments (no-ops without a MeterProvider). |
@@ -68,6 +69,7 @@ effective defaults are logged at startup.
 | `BODY_RETENTION_PROCESSED_DAYS` / `_DEAD_DAYS` / `DELIVERY_ID_RETENTION_DAYS` | 7 / 30 / 30 | Bodies are purged after these; the row stays until the id retention elapses. |
 | `RELAY_RECHECK_SECONDS` | 900 | The re-relay sweep. |
 | `SCHEMA_WAIT_SECONDS` | 300 | How long a process waits for the schema before it exits non-zero. |
+| `HEALTH_PORT` | unset (no endpoint) | Port of the worker's and reconciler's health endpoints, 1 to 65535. The api ignores it (it serves `/health/*` on its own port). A loop is stale after its interval plus `LEASE_TTL_SECONDS`. |
 | `HOST_RECHECK_SECONDS` | 60 | Recheck of `unavailable` and `unregistered` hosts. |
 | `MIGRATE_EXPECTED_ROLE` | unset | The migrate Job refuses to run as any other database role. |
 
