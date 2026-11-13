@@ -31,7 +31,7 @@ from trustbridge.audit.model import (
 _MAX_SEQ = 9223372036854775807
 DEFAULT_PURGE_BATCH = 1000
 MAX_PURGE_BATCH = 10000  # the ceiling `tb_audit_purge` enforces
-DEFAULT_PURGE_MAX_BATCHES = 1000  # per call: bounds the loop (10 million rows at the default)
+DEFAULT_PURGE_MAX_BATCHES = 1000  # per call: bounds the loop (1 million rows at the default batch size)
 DEFAULT_EXPORT_PAGE = 500
 _COLUMNS = (
     "id, seq, occurred_at, recorded_at, tenant_id, actor_type, actor_sub, actor_iss, "
