@@ -259,3 +259,14 @@ async def test_the_global_parked_sweep_runs_once_per_interval() -> None:
         now[0] = at
         await body.reconcile(w.tenant.id, Extender())
     assert core.steps.count("parked") == 2
+
+
+async def test_a_failing_parked_sweep_is_logged_retried_and_does_not_fail_the_tenant() -> None:
+    """The sweep is the instance's housekeeping: not marked done, so the next request retries."""
+    w = build_world(fake_capabilities(oidc=False))
+    core = StubCore(parked=AdapterError(True, "store down"))
+    await _stubbed(w, core)
+    body = CredentialReconciler(cast("Any", core), w.store, w.deps.tenants, ["fake"])
+    await body.reconcile(w.tenant.id, Extender())  # no ReconcileIncompleteError
+    await body.reconcile(w.tenant.id, Extender())
+    assert core.steps.count("parked") == 2  # retried at once, not throttled
