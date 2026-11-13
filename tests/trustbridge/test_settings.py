@@ -199,7 +199,7 @@ def test_adapter_timeout_must_be_shorter_than_the_lease_ttl() -> None:  # 0028 i
 def test_the_transaction_timeout_must_be_shorter_than_the_export_lag() -> None:  # ADR 0034 B8
     """The export lag guarantee needs the timeout below the lag, whatever the mode."""
     assert make_settings().transaction_timeout_seconds == 15.0  # half the default lag
-    for seconds in (30, 45):
+    for seconds in (30, 45, 29.9996):  # the last rounds up to 30000 ms
         with pytest.raises(ValidationError, match="shorter than AUDIT_EXPORT_LAG_SECONDS"):
             make_settings(audit_export_lag_seconds=30, transaction_timeout_seconds=seconds)
     with pytest.raises(ValidationError):

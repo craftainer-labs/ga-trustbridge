@@ -15,6 +15,7 @@ import difflib
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -370,7 +371,11 @@ class TrustbridgeSettings(Settings):
             problems.append("RETRY_BACKOFF_MAX_SECONDS must be >= RETRY_BACKOFF_BASE_SECONDS")
         if 0 < self.audit_retention_days < self.audit_retention_min_days:
             problems.append("AUDIT_RETENTION_DAYS must be 0 or >= AUDIT_RETENTION_MIN_DAYS")
-        if self.transaction_timeout_seconds >= self.audit_export_lag_seconds:
+        # in whole ms, as the hook applies it (rounded up), so a passing value passes the check
+        if (
+            math.ceil(self.transaction_timeout_seconds * 1000)
+            >= self.audit_export_lag_seconds * 1000
+        ):
             problems.append(
                 "TRANSACTION_TIMEOUT_SECONDS must be shorter than AUDIT_EXPORT_LAG_SECONDS"
             )
