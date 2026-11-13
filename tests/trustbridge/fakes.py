@@ -184,10 +184,10 @@ class FakeRedis:
         member, extra = args[numkeys], args[numkeys + 1]
         entry = self.hashes.get(claims, {}).get(member)
         if script == reconcile_queue._STAMP:
-            return int(
-                member in self.sets.get(inflight, set())
-                and await self.hsetnx(claims, member, extra)
-            )
+            if member not in self.sets.get(inflight, set()) or (entry or "") != args[numkeys + 2]:
+                return 0
+            await self.hset(claims, member, extra)
+            return 1
         if script == reconcile_queue._CLAIM:
             moved = await self.smove(pending, inflight, member)
             if moved:

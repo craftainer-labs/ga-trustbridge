@@ -87,3 +87,19 @@ async def test_a_stale_token_changes_nothing_and_a_non_canonical_member_is_reque
     assert await client.smembers(names["INFLIGHT_SET"]) == {str(tenant)}
     assert await queue.ack(fresh) is True
     assert await client.hlen(names["CLAIMS_HASH"]) == 0
+
+
+async def test_an_unstamped_member_is_stamped_then_reclaimed(
+    valkey: tuple[Redis, dict[str, str]],
+) -> None:
+    """An inflight member with no (or an unreadable) entry is stamped, then reclaimed a TTL on."""
+    client, names = valkey
+    queue = ReconcileQueue(client)
+    bare, garbled = str(uuid4()), str(uuid4())
+    await client.sadd(names["INFLIGHT_SET"], bare, garbled)
+    await client.hset(names["CLAIMS_HASH"], garbled, "garbage")
+    assert await queue.reclaim(NOW, TTL) == 0
+    assert await client.hlen(names["CLAIMS_HASH"]) == 2
+    assert await queue.reclaim(NOW + timedelta(seconds=TTL + 1), TTL) == 2
+    assert await client.smembers(names["RECONCILE_SET"]) == {bare, garbled}
+    assert await client.hlen(names["CLAIMS_HASH"]) == 0

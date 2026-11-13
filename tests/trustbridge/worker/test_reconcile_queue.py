@@ -111,13 +111,15 @@ async def test_a_crash_between_the_move_and_the_stamp_is_stamped_then_reclaimed(
 
 
 async def test_an_unreadable_claim_entry_is_restamped_not_trusted() -> None:
-    """A garbage entry is treated as no entry (it is never reclaimed on its own say-so)."""
+    """A garbage entry is treated as no entry: stamped, then reclaimed a TTL later."""
     valkey, queue, clock = _queue()
     tenant = uuid4()
     valkey.sets[INFLIGHT_SET] = {str(tenant)}
     valkey.hashes[CLAIMS_HASH] = {str(tenant): "garbage"}
     assert await queue.reclaim(clock(), TTL) == 0
-    assert valkey.hashes[CLAIMS_HASH][str(tenant)] == "garbage"  # hsetnx keeps the entry
+    assert valkey.hashes[CLAIMS_HASH][str(tenant)].endswith("|unclaimed")  # restamped
+    clock.advance(seconds=TTL + 1)
+    assert await queue.reclaim(clock(), TTL) == 1
 
 
 async def test_a_claim_taken_again_since_the_listing_is_not_reclaimed() -> None:

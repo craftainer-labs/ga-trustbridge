@@ -63,12 +63,14 @@ if not v or string.match(v, '^[^|]*|(.*)$') ~= ARGV[2] then return 0 end
 redis.call('HDEL', KEYS[3], ARGV[1])
 return redis.call('SMOVE', KEYS[2], KEYS[1], ARGV[1])
 """
-# ARGV: member, a stamp for a member that is inflight with no claim entry
+# ARGV: member, a stamp, the entry as listed ('' for none): stamps a member that is still inflight
+# and whose entry is still the listed one (absent, or unreadable)
 _STAMP = """
-if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then
-    return redis.call('HSETNX', KEYS[3], ARGV[1], ARGV[2])
-end
-return 0
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) ~= 1 then return 0 end
+local v = redis.call('HGET', KEYS[3], ARGV[1])
+if (v or '') ~= ARGV[3] then return 0 end
+redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
+return 1
 """
 # ARGV: member, the claim entry as listed
 _RECLAIM = """
@@ -136,6 +138,7 @@ class ReconcileQueue:
             if str(tenant_id) != member:
                 # a valid id in another spelling (upper case, braces) would key its claim wrongly:
                 # re-queue it canonically, the add first so the request is never in neither
+                logger.warning("re-queued a reconcile request under its canonical id")
                 await self._r.sadd(RECONCILE_SET, str(tenant_id))
                 await self._r.srem(RECONCILE_SET, member)
                 continue
@@ -167,8 +170,8 @@ class ReconcileQueue:
             value = entries.get(member)
             parsed = None if value is None else _parse(value)
             if parsed is None or value is None:
-                # no (or an unreadable) claim entry: stamp it once, reclaim a TTL from now
-                await self._run(_STAMP, member, _stamp(now, "unclaimed"))
+                # no (or an unreadable) claim entry: stamp it, reclaim a TTL from now
+                await self._run(_STAMP, member, _stamp(now, "unclaimed"), value or "")
                 continue
             if now.timestamp() - parsed[0] < ttl_seconds:
                 continue
