@@ -93,7 +93,7 @@ async def test_a_deletion_runs_to_done_and_completed_inserts_after_the_tenant_ro
             {"t": tenant.id},
         )
     ]
-    assert actions == ["tenant.deletion.step"] * 4 + ["tenant.deletion.completed"]
+    assert actions == ["tenant.deletion.step"] * 5 + ["tenant.deletion.completed"]
 
 
 async def test_a_non_retryable_error_writes_failed_and_its_event_together(db: Db) -> None:
