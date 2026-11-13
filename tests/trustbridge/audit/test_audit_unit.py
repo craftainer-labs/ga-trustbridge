@@ -277,9 +277,9 @@ async def test_purge_expired_stops_at_a_short_batch_and_beats_per_batch(
         retention_days=365,
         min_days=90,
         batch_size=5,
-        on_batch=lambda: beats.append(1),
+        on_batch=beats.append,
     )
-    assert (total, calls, len(beats)) == (12, [5, 5, 5], 3)
+    assert (total, calls, beats) == (12, [5, 5, 5], [5, 5, 2])
 
 
 async def test_purge_expired_is_bounded_by_max_batches(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,6 +289,23 @@ async def test_purge_expired_is_bounded_by_max_batches(monkeypatch: pytest.Monke
         _fake_factory(), retention_days=365, min_days=90, batch_size=5, max_batches=3
     )
     assert (total, len(calls)) == (15, 3)
+
+
+async def test_purge_expired_stops_starting_batches_past_the_time_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the budget has elapsed no new batch starts; the next call continues."""
+    calls = _scripted_purge(monkeypatch, [5] * 10)
+    ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])  # start, then one reading per loop pass
+    total = await purge_expired(
+        _fake_factory(),
+        retention_days=365,
+        min_days=90,
+        batch_size=5,
+        budget_seconds=2.5,
+        monotonic=lambda: next(ticks),
+    )
+    assert (total, len(calls)) == (10, 2)  # passes at t=1, 2 run; t=3 exceeds 2.5
 
 
 def test_the_purge_settings_have_defaults_and_bounds() -> None:
@@ -308,6 +325,7 @@ def test_the_purge_settings_have_defaults_and_bounds() -> None:
         {"audit_purge_batch_size": 0},
         {"audit_purge_batch_size": 10001},
         {"audit_purge_max_batches": 0},
+        {"audit_purge_max_batches": 10001},
     ):
         with pytest.raises(ValidationError):
             make_settings([host()], **bad)

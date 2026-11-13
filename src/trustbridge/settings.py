@@ -175,10 +175,11 @@ class TrustbridgeSettings(Settings):
     audit_retention_min_days: int = Field(default=90, ge=1)
     audit_export_lag_seconds: float = Field(default=30.0, gt=0)
     # The purge duty (ADR 0032 "Retention"): batch size is `tb_audit_purge`'s 1..10000; a run
-    # does at most `audit_purge_max_batches` batches, so it cannot hold its lease forever.
+    # does at most `audit_purge_max_batches` batches (1..10000) and stops starting batches after
+    # half `lease_ttl_seconds`, so it ends before its lease could lapse.
     audit_purge_interval_seconds: float = Field(default=3600.0, gt=0)
     audit_purge_batch_size: int = Field(default=1000, ge=1, le=10000)
-    audit_purge_max_batches: int = Field(default=100, ge=1)
+    audit_purge_max_batches: int = Field(default=100, ge=1, le=10000)
 
     # Adapters the api process loads for the admin API's capability summaries (ADR 0029: an
     # adapter not listed is never imported). Entry-point names, for example `ghcr,jfrog`.

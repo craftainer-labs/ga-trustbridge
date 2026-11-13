@@ -390,6 +390,8 @@ trustbridge:
     exportLagSeconds: 30
     purgeIntervalSeconds: 3600
     purgeBatchSize: 1000
+    # Batches per purge run, 1..10000. A run also stops starting batches after half the lease TTL
+    # and continues next interval.
     purgeMaxBatches: 100
     deniedWindowSeconds: 60
     deniedBurst: 5

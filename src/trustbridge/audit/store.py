@@ -10,6 +10,7 @@
 """
 
 import json
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -284,7 +285,9 @@ async def purge_expired(  # noqa: PLR0913 -- every bound is a distinct, keyword-
     min_days: int,
     batch_size: int = DEFAULT_PURGE_BATCH,
     max_batches: int = DEFAULT_PURGE_MAX_BATCHES,
-    on_batch: Callable[[], None] | None = None,
+    on_batch: Callable[[int], None] | None = None,
+    budget_seconds: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
     now: datetime | None = None,
 ) -> int:
     """Purge everything older than `retention_days` in short transactions, one per batch.
@@ -293,8 +296,11 @@ async def purge_expired(  # noqa: PLR0913 -- every bound is a distinct, keyword-
     `ValueError` before any transaction for a negative retention, a non-zero retention below
     `min_days`, a `batch_size` outside 1..`MAX_PURGE_BATCH` or a `max_batches` below 1. At most
     `max_batches` batches run per call, so one call is bounded to `max_batches * batch_size`
-    rows; the next call continues. `on_batch` is called after each committed batch (the
-    reconciler beats its heartbeat there). Returns the total deleted. The reconciler runs it as
+    rows; the next call continues. `budget_seconds` (optional) stops the loop from starting a new
+    batch once that much `monotonic` time has elapsed, so a caller holding a lease ends before
+    it could lapse. `on_batch(deleted)` is called after each committed batch with that batch's
+    count (the reconciler beats and accounts rows there, so a later failure loses none).
+    Returns the total deleted. The reconciler runs it as
     a singleton duty (EB-6).
     """
     if retention_days < 0:
@@ -309,14 +315,17 @@ async def purge_expired(  # noqa: PLR0913 -- every bound is a distinct, keyword-
         raise ValueError("max_batches must be at least 1")
     cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
     total = 0
+    started = monotonic()
     for _ in range(max_batches):
+        if budget_seconds is not None and monotonic() - started > budget_seconds:
+            break
         async with factory() as session, session.begin():
             deleted = await purge_batch(
                 session, before=cutoff, min_days=min_days, batch_size=batch_size
             )
         total += deleted
         if on_batch is not None:
-            on_batch()
+            on_batch(deleted)
         if deleted < batch_size:
             break
     return total

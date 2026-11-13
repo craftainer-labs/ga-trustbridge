@@ -229,21 +229,30 @@ class Reconciler:
         sessions = self._d.audit_sessions
         if sessions is None or s.audit_retention_days == 0:
             return 0
+        deleted = 0
         try:
             async with self._d.leases.hold(NIL_TENANT, CORE_ADAPTER, "audit-purge"):
                 self._beat("audit-purge")
-                deleted = await purge_expired(
+
+                def account(batch: int) -> None:
+                    nonlocal deleted
+                    deleted += batch
+                    self._beat("audit-purge")
+                    metrics.audit_purged.add(batch)
+                    logger.info("audit purge batch", extra={"deleted_events": batch})
+
+                await purge_expired(
                     sessions,
                     retention_days=s.audit_retention_days,
                     min_days=s.audit_retention_min_days,
                     batch_size=s.audit_purge_batch_size,
                     max_batches=s.audit_purge_max_batches,
-                    on_batch=lambda: self._beat("audit-purge"),
+                    on_batch=account,
+                    budget_seconds=s.lease_ttl_seconds / 2,
                     now=self._d.clock(),
                 )
         except LeaseBusy:
             return 0
-        metrics.audit_purged.add(deleted)
         logger.info("audit purge", extra={"deleted_events": deleted})
         return deleted
 
@@ -270,6 +279,8 @@ class Reconciler:
         ]
         for name, interval, _job in schedule:
             beat.register(name, stale_after(s, interval))
+        if self._d.audit_sessions is None:
+            logger.info("audit purge disabled: no audit store")
         await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop
         jobs = [periodic(name, interval, job, stop, beat.beat) for name, interval, job in schedule]
         await asyncio.gather(*jobs)

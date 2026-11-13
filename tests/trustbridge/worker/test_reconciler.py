@@ -218,7 +218,7 @@ def _patch_purge(monkeypatch: pytest.MonkeyPatch, batches: int, per_batch: int) 
     async def fake(factory: object, **kw: Any) -> int:  # noqa: ANN401
         calls.append(kw)
         for _ in range(batches):
-            kw["on_batch"]()
+            kw["on_batch"](per_batch)
         return batches * per_batch
 
     monkeypatch.setattr(reconciler_module, "purge_expired", fake)
@@ -246,6 +246,41 @@ async def test_audit_purge_passes_the_settings_and_beats_per_batch(
     )
     assert kw["now"] == h.clock()
     assert seen == ["audit-purge"] * 4  # one at the start, one per batch
+    assert kw["budget_seconds"] == h.settings.lease_ttl_seconds / 2
+
+
+async def test_audit_purge_accounts_each_batch_even_when_the_run_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rows deleted before a mid-run failure are already counted and logged."""
+    h = await Harness({}, audit_retention_days=200).start()
+    added: list[int] = []
+    monkeypatch.setattr(reconciler_module.metrics.audit_purged, "add", added.append)
+
+    async def failing(factory: object, **kw: Any) -> int:  # noqa: ANN401
+        kw["on_batch"](7)
+        kw["on_batch"](5)
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(reconciler_module, "purge_expired", failing)
+    recon, _ = _purger(h)
+    with caplog.at_level("INFO"), pytest.raises(RuntimeError):
+        await recon.audit_purge()
+    assert added == [7, 5]
+    assert caplog.text.count("audit purge batch") == 2
+
+
+async def test_run_logs_once_that_the_audit_purge_is_disabled_without_a_store(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No audit store: one info line at startup, and the job still skips."""
+    h = await Harness({}).start()
+    recon, _ = _purger(h, None)
+    stop = asyncio.Event()
+    stop.set()
+    with caplog.at_level("INFO"):
+        await recon.run(stop)
+    assert caplog.text.count("audit purge disabled: no audit store") == 1
 
 
 async def test_audit_purge_is_a_no_op_for_zero_retention_and_without_a_database(

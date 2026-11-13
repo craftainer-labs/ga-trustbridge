@@ -161,7 +161,7 @@ All take an `AsyncSession` (or factory) and leave the transaction to the caller,
 | `get_event(session, event_id) -> AuditRecord \| None` | One event by id, any tenant (null-tenant included), through `tb_audit_get()`. Instance scope like `list_events(instance_scope=True)`: the caller must have checked the instance-scoped `auditor` role. Imported from `trustbridge.audit.store`. |
 | `export_ndjson(session, query, *, tenant_id=None, instance_scope=False, lag_seconds, page_size) -> AsyncIterator[bytes]` | Ascending `seq`, one line per event, resumable with `AuditQuery.after_seq`. Same scope rules as `list_events`. |
 | `purge_batch(session, *, before, min_days, batch_size)` | One `tb_audit_purge` call; returns rows deleted. |
-| `purge_expired(factory, *, retention_days, min_days, batch_size, max_batches, on_batch, now)` | Loops `purge_batch`, one short transaction per batch, at most `max_batches` per call; `retention_days=0` never purges. Raises `ValueError` before any transaction for a negative retention, a non-zero retention below `min_days`, a `batch_size` outside 1..10000 or `max_batches < 1`. `on_batch()` runs after each committed batch. For the reconciler's singleton duty. |
+| `purge_expired(factory, *, retention_days, min_days, batch_size, max_batches, on_batch, budget_seconds, monotonic, now)` | Loops `purge_batch`, one short transaction per batch, at most `max_batches` per call; `retention_days=0` never purges. Raises `ValueError` before any transaction for a negative retention, a non-zero retention below `min_days`, a `batch_size` outside 1..10000 or `max_batches < 1`. `on_batch(deleted)` runs after each committed batch with its count; `budget_seconds` stops new batches once that much time has elapsed. For the reconciler's singleton duty. |
 
 **Cursor.** `AuditPage.next_seq` is the last item's `seq` when more follow, else `None`. Continue
 an ascending read with `AuditQuery(after_seq=next_seq)`, a descending one
@@ -219,8 +219,9 @@ numeric `github_sender_id` and a string `delivery_id`. No roles, no grants.
 next run continues).
 
 The reconciler's `audit-purge` job (`Reconciler.audit_purge`) holds the `audit-purge` lease (one
-replica at a time), beats its heartbeat per batch, is a no-op when retention is 0, counts rows in
-the `trustbridge.audit.purged` metric and logs the count. It writes no audit row itself:
+replica at a time), beats its heartbeat and counts rows in the `trustbridge.audit.purged` metric per batch (a
+mid-run failure loses none), logs a total at the end, stops starting batches after half the
+lease TTL, is a no-op when retention is 0, and logs once at startup when there is no audit store. It writes no audit row itself:
 `tb_audit_purge` writes the `audit.purge` summary event per batch.
 
 ## Rules
