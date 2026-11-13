@@ -7,8 +7,8 @@ hook deliveries per `ready` host with the App JWT endpoints (`GET /app/hook/deli
 implements it) and redelivers only those whose `X-GitHub-Delivery` guid has **no stored
 row** (invariant 8); a stored row is durable and owned by the relay and the worker.
 
-Singleton duties (delivery reconciliation per host, DB retention, audit purge, tenant deletion)
-run under a
+Singleton duties (delivery reconciliation per host, DB retention, audit purge, tenant deletion,
+deletion record purge) run under a
 lease row so replicas do not duplicate them (EB-6); the relay tick, the re-relay sweep and
 stream trimming are idempotent and run on every replica.
 """
@@ -24,7 +24,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.audit.store import purge_expired
-from trustbridge.deletion.ports import DeletionDriver
+from trustbridge.deletion.ports import DeletionDriver, RecordPurger
 from trustbridge.github.availability import HostMonitor
 from trustbridge.settings import GitHubHostConfig, TrustbridgeSettings
 from trustbridge.worker import metrics
@@ -152,6 +152,7 @@ class ReconcilerDeps:
     heartbeat: Heartbeat | None = None
     audit_sessions: async_sessionmaker[AsyncSession] | None = None  # None: mock mode, no purge
     deletion: DeletionDriver | None = None  # None: no deletion engine composed, no duty
+    record_purger: RecordPurger | None = None  # None: not composed (NG6h-7), no purge duty
 
 
 class Reconciler:
@@ -292,6 +293,38 @@ class Reconciler:
             logger.info("tenant deletion", extra={"deletions_run": ran})
         return ran
 
+    async def deletion_record_purge(self) -> int:
+        """Purge finished deletion records past `DELETION_RETENTION_DAYS` (singleton, leased).
+
+        Retention 0 (the default) never purges, and with no `RecordPurger` composed the duty does
+        nothing. Bounded by the purger (batches, and half the lease TTL), with a beat per batch.
+        The database function deletes only `done` records whose tombstone exists; an eligible
+        record without one is never deleted and is logged here at WARNING (ADR 0034, B4).
+        """
+        purger = self._d.record_purger
+        if purger is None or self._s.deletion_retention_days == 0:
+            return 0
+        purged = 0
+        try:
+            async with self._d.leases.hold(NIL_TENANT, CORE_ADAPTER, "deletion-purge"):
+                self._beat("deletion-purge")
+
+                def account(batch: int) -> None:
+                    nonlocal purged
+                    purged += batch
+                    self._beat("deletion-purge")
+
+                result = await purger.purge(account)
+        except LeaseBusy:
+            return 0
+        if result.unprotected:
+            logger.warning(
+                "finished tenant deletion records without a tombstone were left in place",
+                extra={"unprotected_records": result.unprotected},
+            )
+        logger.info("deletion record purge", extra={"purged_records": purged})
+        return purged
+
     async def trim_streams(self) -> None:
         """Trim `tb:events` below what the group acknowledged, the dead letter by age, set lag."""
         await self._d.queue.trim_events()
@@ -312,6 +345,7 @@ class Reconciler:
             ("retention", s.retention_interval_seconds, self.retention),
             ("audit-purge", s.audit_purge_interval_seconds, self.audit_purge),
             ("tenant-deletion", s.deletion_poll_seconds, self.tenant_deletion),
+            ("deletion-purge", s.deletion_purge_interval_seconds, self.deletion_record_purge),
             ("trim", s.stream_trim_interval_seconds, self.trim_streams),
         ]
         for name, interval, _job in schedule:
@@ -323,6 +357,8 @@ class Reconciler:
             logger.info("audit purge disabled: no audit store")
         if self._d.deletion is None:
             logger.info("tenant deletion disabled: no deletion engine")
+        if self._d.record_purger is None:
+            logger.info("deletion record purge disabled: no record purger")
         await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop
         jobs = [periodic(name, interval, job, stop, beat.beat) for name, interval, job in schedule]
         await asyncio.gather(*jobs)

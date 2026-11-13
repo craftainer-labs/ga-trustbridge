@@ -36,6 +36,7 @@ EXPECTED = {
     "tb_cancel_tenant_deletion",
     "tb_finish_tenant_deletion",
     "tb_delete_tenant",
+    "tb_purge_tenant_deletions",
 }
 
 

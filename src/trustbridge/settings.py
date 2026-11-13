@@ -211,6 +211,17 @@ class TrustbridgeSettings(Settings):
     deletion_drain_max_passes: int = Field(default=30, ge=2, le=10000)
     deletion_drain_poll_seconds: float = Field(default=2.0, ge=0)
     deletion_step_pass_seconds: float = Field(default=30.0, gt=0)
+    # Retention of finished deletion records (ADR 0034, user decision B4, NG6h-3c-2). `0` (the
+    # default) keeps them for ever; a non-zero value is at least `deletion_retention_min_days`, as
+    # for the audit log. The purge runs every `deletion_purge_interval_seconds`, at most
+    # `deletion_purge_max_batches` batches of `deletion_purge_batch_size` (1..10000) per run, and
+    # stops starting batches after half `lease_ttl_seconds`. The tombstones are never purged. The
+    # previous release reads the records: leave this at 0 until it has been fully replaced.
+    deletion_retention_days: int = Field(default=0, ge=0)
+    deletion_retention_min_days: int = Field(default=90, ge=1)
+    deletion_purge_interval_seconds: float = Field(default=3600.0, gt=0)
+    deletion_purge_batch_size: int = Field(default=1000, ge=1, le=10000)
+    deletion_purge_max_batches: int = Field(default=100, ge=1, le=10000)
 
     # Adapters the api process loads for the admin API's capability summaries (ADR 0029: an
     # adapter not listed is never imported). Entry-point names, for example `ghcr,jfrog`.
@@ -369,8 +380,7 @@ class TrustbridgeSettings(Settings):
             problems.append("ADAPTER_CALL_TIMEOUT_SECONDS must be shorter than LEASE_TTL_SECONDS")
         if self.retry_backoff_max_seconds < self.retry_backoff_base_seconds:
             problems.append("RETRY_BACKOFF_MAX_SECONDS must be >= RETRY_BACKOFF_BASE_SECONDS")
-        if 0 < self.audit_retention_days < self.audit_retention_min_days:
-            problems.append("AUDIT_RETENTION_DAYS must be 0 or >= AUDIT_RETENTION_MIN_DAYS")
+        problems.extend(self._retention_problems())
         # in whole ms, as the hook applies it (rounded up), so a passing value passes the check
         if (
             math.ceil(self.transaction_timeout_seconds * 1000)
@@ -391,6 +401,15 @@ class TrustbridgeSettings(Settings):
         for warning in warnings:
             logger.warning(warning)
         return self
+
+    def _retention_problems(self) -> list[str]:
+        """A non-zero retention below its floor (0 means keep for ever) guards a typo."""
+        found: list[str] = []
+        if 0 < self.audit_retention_days < self.audit_retention_min_days:
+            found.append("AUDIT_RETENTION_DAYS must be 0 or >= AUDIT_RETENTION_MIN_DAYS")
+        if 0 < self.deletion_retention_days < self.deletion_retention_min_days:
+            found.append("DELETION_RETENTION_DAYS must be 0 or >= DELETION_RETENTION_MIN_DAYS")
+        return found
 
     def _deletion_timing_problems(self) -> list[str]:
         """Whether the drain poll plus one step pass fit inside the deletion lease TTL.

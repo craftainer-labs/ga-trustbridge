@@ -420,6 +420,18 @@ trustbridge:
     drainPollSeconds: 2
     # The longest one step pass may take between two lease renewals.
     stepPassSeconds: 30
+    # Retention of FINISHED deletion records (the requester's sub and iss), in days (ADR 0034,
+    # B4). 0 keeps them for ever; otherwise at least retentionMinDays. The tombstones that stop a
+    # still-installed App from re-creating a deleted tenant are never purged. Upgrade order: the
+    # previous release reads these records, so leave 0 until it has been fully replaced. After a
+    # purge the migration 4e9a1c7b5d23 can no longer be downgraded. The deletion audit events
+    # (tenant.deletion.*) have their own retention (audit.retentionDays; 0 keeps them for ever).
+    retentionDays: 0
+    retentionMinDays: 90
+    purgeIntervalSeconds: 3600
+    purgeBatchSize: 1000
+    # Batches per purge run, 1..10000; a run also stops after half the lease TTL.
+    purgeMaxBatches: 100
   lease:
     ttlSeconds: 120
     adapterCallTimeoutSeconds: 30

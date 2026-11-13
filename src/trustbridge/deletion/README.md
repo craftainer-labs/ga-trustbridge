@@ -14,7 +14,7 @@ The duty is inert in production until the steps exist: no deletion can run with 
 root that builds the `DeletionEngine` with the real steps and hands it to the reconciler lives outside the worker
 package and comes in NG6h-7, once 4b, 5 and 6 have landed.
 
-- `ports.py`: `DeletionDriver` (`run_once() -> bool`). The only module the worker and reconciler
+- `ports.py`: `DeletionDriver` (`run_once() -> bool`), `RecordPurger` and `PurgeResult` (NG6h-3c-2). The only module the worker and reconciler
   may import (import-linter contract 3, which fails if that import ever disappears); it imports
   nothing from the package, and `__init__` re-exports nothing, so depending on it loads no engine
   code.
@@ -26,7 +26,8 @@ package and comes in NG6h-7, once 4b, 5 and 6 have landed.
 - `drain.py`: `DrainStep`.
 - `database.py`: `SqlDatabaseStep`, the `DatabaseStep` (NG6h-4b). See "The database step" below.
 - `store.py` / `sql.py`: `DeletionStore` and `SqlDeletionStore` over the definer functions.
-- `audit.py`: the event builders. `metrics.py`: `trustbridge.deletion.attempts` and `.failed`.
+- `purge.py`: `SqlRecordPurger`, the `RecordPurger` over `tb_purge_tenant_deletions` (NG6h-3c-2). See "Record retention" below.
+- `audit.py`: the event builders. `metrics.py`: `trustbridge.deletion.attempts`, `.failed` and `.records_purged`.
 
 ## One run
 
@@ -152,3 +153,28 @@ step (checked at startup).
 - Write `tenant_deletions` other than through the definer functions.
 - Import `worker`, `github`, `adapters`, `webhooks`, `admin`, `rbac`, `signer` or `main` (a
   contract). The adapter and GitHub work of the steps reaches this package as step objects.
+
+## Record retention (B4, NG6h-3c-2)
+
+`DELETION_RETENTION_DAYS` (default **0 = keep for ever**; otherwise at least
+`DELETION_RETENTION_MIN_DAYS`, default 90; negative is refused) lets the reconciler's `deletion-purge`
+duty (`worker/reconciler.py`, `deletion_record_purge`, every `DELETION_PURGE_INTERVAL_SECONDS`) remove
+finished records through the definer `tb_purge_tenant_deletions` (migration `7b2d4f8a1c36`), in at
+most `DELETION_PURGE_MAX_BATCHES` batches of `DELETION_PURGE_BATCH_SIZE` per run, stopping after half
+the lease TTL. `SqlRecordPurger` (`purge.py`) is the `RecordPurger`; the composition root (NG6h-7)
+hands it to `ReconcilerDeps.record_purger`, and with none the duty does nothing.
+
+- Only `done` records past the cut-off **whose tombstone exists** go. A `done` record without one is
+  never deleted: it is counted as `unprotected` and logged at WARNING. Open, `failed` and
+  `cancelled` records are never purged.
+- The tombstones (`tenant_tombstones`) are never purged, so a still-installed App stays refused (B2).
+- **Upgrade order.** The previous release reads `done` records and no schema mechanism can say "no
+  previous-release pod exists" (`schema_compat` only guards new code on an old schema), so leave the
+  retention at 0 until the release is fully rolled out.
+- **One-way door.** After a purge the downgrade of `4e9a1c7b5d23` (the tombstone table) refuses,
+  because its tombstones have no `done` record behind them. Rolling back past it means restoring from
+  a backup.
+- **`AUDIT_RETENTION_DAYS=0`.** The two retentions are independent. The `tenant.deletion.*` audit
+  events (tenant id, host, installation id; no login) are removed only by the audit purge, so with
+  `AUDIT_RETENTION_DAYS=0` they are kept for ever whatever this setting is. See ADR 0034, "Deletion
+  records' retention".

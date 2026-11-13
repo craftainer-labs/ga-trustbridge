@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tests.trustbridge.fakes import FakeHookClient
 from tests.trustbridge.helpers import host
 from tests.trustbridge.worker.harness import Harness, key
+from trustbridge.deletion.ports import PurgeResult
 from trustbridge.worker import metrics
 from trustbridge.worker import reconciler as reconciler_module
 from trustbridge.worker.deliveries import DeliveryKey
@@ -437,3 +438,102 @@ async def test_run_logs_nothing_about_deletion_when_a_driver_is_present(
     assert beat._limits["tenant-deletion"] == h.settings.deletion_poll_seconds + max(
         h.settings.lease_ttl_seconds, h.settings.deletion_lease_ttl_seconds
     )
+
+
+class FakePurger:
+    """A `RecordPurger` that reports scripted batches and an unprotected count."""
+
+    def __init__(self, batches: tuple[int, ...] = (), unprotected: int = 0) -> None:
+        """`batches` are the per-batch counts handed to `on_batch`."""
+        self.batches, self.unprotected, self.calls = batches, unprotected, 0
+
+    async def purge(self, on_batch: Any = None) -> PurgeResult:  # noqa: ANN401
+        """Report each batch, then the total."""
+        self.calls += 1
+        for batch in self.batches:
+            if on_batch is not None:
+                on_batch(batch)
+        return PurgeResult(sum(self.batches), self.unprotected)
+
+
+def _record_purger(h: Harness, purger: FakePurger | None) -> tuple[Reconciler, Heartbeat]:
+    beat = Heartbeat()
+    beat.register("deletion-purge", 60)
+    recon = Reconciler(
+        h.settings,
+        ReconcilerDeps(
+            store=h.store,
+            queue=h.queue,
+            relay=h.relay,
+            hosts=h.hosts,
+            leases=h.leases,
+            deliveries=None,
+            clock=h.clock,
+            heartbeat=beat,
+            record_purger=purger,
+        ),
+    )
+    return recon, beat
+
+
+async def test_deletion_record_purge_beats_per_batch_and_warns_about_unprotected_records(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A beat at the start and one per batch; an unprotected record is logged at WARNING."""
+    h = await Harness({}, deletion_retention_days=120).start()
+    purger = FakePurger((4, 2), unprotected=3)
+    recon, beat = _record_purger(h, purger)
+    seen: list[str] = []
+    monkeypatch.setattr(beat, "beat", seen.append)
+    with caplog.at_level("INFO"):
+        assert await recon.deletion_record_purge() == 6
+    assert seen == ["deletion-purge"] * 3
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert warnings[0].unprotected_records == 3  # type: ignore[attr-defined]
+
+
+async def test_deletion_record_purge_does_not_warn_when_every_record_is_protected(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No unprotected record, no warning."""
+    h = await Harness({}, deletion_retention_days=120).start()
+    with caplog.at_level("INFO"):
+        assert await _record_purger(h, FakePurger((1,)))[0].deletion_record_purge() == 1
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+async def test_deletion_record_purge_is_a_no_op_for_zero_retention_and_without_a_purger() -> None:
+    """The default (0) never purges, and an uncomposed hook does nothing."""
+    purger = FakePurger((1,))
+    zero = await Harness({}).start()
+    assert await _record_purger(zero, purger)[0].deletion_record_purge() == 0
+    assert purger.calls == 0
+    on = await Harness({}, deletion_retention_days=120).start()
+    assert await _record_purger(on, None)[0].deletion_record_purge() == 0
+
+
+async def test_deletion_record_purge_is_a_singleton_duty() -> None:
+    """While another replica holds the `deletion-purge` lease, the duty does nothing."""
+    h = await Harness({}, deletion_retention_days=120).start()
+    purger = FakePurger((1,))
+    async with h.leases.hold(NIL_TENANT, "_core", "deletion-purge"):
+        assert await _record_purger(h, purger)[0].deletion_record_purge() == 0
+    assert purger.calls == 0
+    assert await _record_purger(h, purger)[0].deletion_record_purge() == 1
+
+
+async def test_run_schedules_the_deletion_record_purge_and_logs_when_it_is_not_composed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The duty has its own interval and limit; no purger composed is one info line."""
+    h = await Harness({}).start()
+    recon, beat = _record_purger(h, None)
+    stop = asyncio.Event()
+    stop.set()
+    with caplog.at_level("INFO"):
+        await recon.run(stop)
+    assert beat._limits["deletion-purge"] == (
+        h.settings.deletion_purge_interval_seconds + h.settings.lease_ttl_seconds
+    )
+    assert caplog.text.count("deletion record purge disabled: no record purger") == 1

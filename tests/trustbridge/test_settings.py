@@ -441,3 +441,26 @@ def test_a_deletion_timing_at_exactly_half_the_ttl_is_accepted() -> None:
         deletion_lease_ttl_seconds=60, deletion_drain_poll_seconds=5, deletion_step_pass_seconds=25
     )
     assert s.production
+
+
+def test_deletion_record_retention_defaults_off_and_is_bounded() -> None:
+    """B4: 0 keeps the records; a non-zero value is at least the floor; the knobs are bounded."""
+    s = make_settings()
+    assert (s.deletion_retention_days, s.deletion_retention_min_days) == (0, 90)
+    assert (s.deletion_purge_interval_seconds, s.deletion_purge_batch_size) == (3600, 1000)
+    assert s.deletion_purge_max_batches == 100
+    assert make_settings(deletion_retention_days=90).deletion_retention_days == 90
+    assert make_settings(deletion_retention_days=0).deletion_retention_days == 0
+    with pytest.raises(ValidationError, match="DELETION_RETENTION_DAYS"):
+        make_settings(deletion_retention_days=30)
+    for bad in (
+        {"deletion_retention_days": -1},
+        {"deletion_retention_min_days": 0},
+        {"deletion_purge_interval_seconds": 0},
+        {"deletion_purge_batch_size": 0},
+        {"deletion_purge_batch_size": 10001},
+        {"deletion_purge_max_batches": 0},
+        {"deletion_purge_max_batches": 10001},
+    ):
+        with pytest.raises(ValidationError):
+            make_settings([host()], **bad)
