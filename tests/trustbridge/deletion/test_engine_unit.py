@@ -116,6 +116,21 @@ async def test_a_partial_pass_saves_the_cursor_and_runs_the_step_again() -> None
     assert github.contexts[1].record.counts == {"secrets": 5}
 
 
+async def test_a_skip_reported_on_a_partial_pass_is_audited_when_it_is_saved() -> None:
+    """The skipped event is written in the transaction that saves the skip, not at step end."""
+    store = FakeStore(record(state="github"))
+    skip = {"category": "environments", "reason": "not_found", "count": 1}
+    github = ScriptedStep(
+        StepOutcome(skipped=[skip], cursor={"after": 1}, done=False), StepOutcome()
+    )
+    engine, _ = _engine(store, github=github)
+    await engine.run_once()
+    first = next(c for c in store.calls if c[0] == "advance")
+    assert first[1][0] == "github"
+    skipped = [e for e in store.events if e.action is Action.TENANT_DELETION_SKIPPED]
+    assert len(skipped) == 1
+
+
 async def test_a_pass_without_a_cursor_keeps_the_saved_one() -> None:
     """A same-state save with no cursor leaves the cursor, as the function does."""
     store = FakeStore(record(state="github", step_cursor={"after": 1}))

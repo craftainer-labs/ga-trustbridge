@@ -208,11 +208,12 @@ def deletion_counts(counts: Mapping[str, Any]) -> dict[str, int]:
     in sorted order. Anything else raises `ValueError`, so nothing unreviewed is stored.
     """
     out: dict[str, int] = {}
+    if not all(isinstance(key, str) for key in counts):
+        raise ValueError("deletion counts must map a short category name to a count")
     for key in sorted(counts):
         value = counts[key]
         if (
-            not isinstance(key, str)
-            or not key
+            not key
             or len(key) > MAX_COUNT_KEY
             or printable(key) != key
             or isinstance(value, bool)

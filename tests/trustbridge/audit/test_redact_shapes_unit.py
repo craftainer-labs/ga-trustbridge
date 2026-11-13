@@ -167,6 +167,15 @@ def test_deletion_counts_are_category_to_count_and_nothing_else() -> None:
     """The one non-scalar value: short printable names and non-negative integers."""
     assert deletion_counts({"b": 2, "a": 0}) == {"a": 0, "b": 2}
     assert list(deletion_counts({"b": 2, "a": 0})) == ["a", "b"]
-    for bad in ({"": 1}, {"x" * 65: 1}, {"a\nb": 1}, {"a": -1}, {"a": True}, {"a": "1"}, {1: 1}):
+    for bad in (
+        {"": 1},
+        {"x" * 65: 1},
+        {"a\nb": 1},
+        {"a": -1},
+        {"a": True},
+        {"a": "1"},
+        {1: 1},
+        {1: 1, "a": 2},
+    ):
         with pytest.raises(ValueError, match="deletion counts"):
             deletion_counts(bad)  # type: ignore[arg-type]

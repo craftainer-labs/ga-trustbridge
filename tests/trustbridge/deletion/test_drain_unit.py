@@ -58,9 +58,15 @@ async def test_two_consecutive_quiet_passes_end_the_drain() -> None:
 async def test_a_tenant_that_never_quiesces_raises_a_transient_error() -> None:
     """Bounded passes: the engine retries the step with backoff, never advances."""
     writers = Writers(1)
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
     with pytest.raises(DrainNotQuiescent, match="3 passes"):
-        await DrainStep(writers, poll_seconds=0, max_passes=3, sleep=_no_sleep).run(_ctx([]))
+        await DrainStep(writers, poll_seconds=7, max_passes=3, sleep=sleep).run(_ctx([]))
     assert len(writers.seen) == 3
+    assert slept == [7, 7]  # no wasted sleep after the last pass
 
 
 @pytest.mark.parametrize(("poll", "passes"), [(-1, 5), (1, 1)])

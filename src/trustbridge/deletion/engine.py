@@ -159,10 +159,12 @@ class DeletionEngine:
             )
             counts = _merge_counts(record.counts, outcome.counts)
             skipped = [*record.skipped, *outcome.skipped]
-            if not outcome.done:
-                await self._advance(run, record.state, counts, skipped, [], cursor=outcome.cursor)
-                continue
             events = audit.skipped_events(record, outcome.skipped)
+            if not outcome.done:
+                await self._advance(
+                    run, record.state, counts, skipped, events, cursor=outcome.cursor
+                )
+                continue
             if record.state == "database":
                 events += [
                     audit.step_event(record, "done", counts),

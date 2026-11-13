@@ -41,11 +41,12 @@ class DrainStep:
     async def run(self, ctx: StepContext) -> StepOutcome:
         """Scan until `QUIET_PASSES` consecutive passes find nothing, renewing between passes."""
         quiet = 0
-        for _ in range(self._max_passes):
+        for passes in range(1, self._max_passes + 1):
             await ctx.renew()
             active = await self._writers.quiesce(ctx.record.tenant_id)
             quiet = quiet + 1 if active == 0 else 0
             if quiet >= QUIET_PASSES:
                 return StepOutcome()
-            await self._sleep(self._poll)
+            if passes < self._max_passes:
+                await self._sleep(self._poll)
         raise DrainNotQuiescent(f"writers still active after {self._max_passes} passes")
