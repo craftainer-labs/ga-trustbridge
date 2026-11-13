@@ -503,6 +503,18 @@ async def test_deletion_record_purge_does_not_warn_when_every_record_is_protecte
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
+async def test_deletion_record_purge_is_quiet_when_nothing_was_purged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A run that finds nothing returns 0 and writes no summary line."""
+    h = await Harness({}, deletion_retention_days=120).start()
+    purger = FakePurger((0,))
+    with caplog.at_level("INFO"):
+        assert await _record_purger(h, purger)[0].deletion_record_purge() == 0
+    assert purger.calls == 1
+    assert "deletion record purge" not in caplog.text
+
+
 async def test_deletion_record_purge_is_a_no_op_for_zero_retention_and_without_a_purger() -> None:
     """The default (0) never purges, and an uncomposed hook does nothing."""
     purger = FakePurger((1,))
