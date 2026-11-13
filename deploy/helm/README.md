@@ -102,6 +102,9 @@ The Helm chart that runs trustbridge's three processes on Kubernetes
   NetworkPolicy needs no rule for them: traffic from a pod's own node is
   always allowed ([Kubernetes
   docs](https://kubernetes.io/docs/concepts/services-networking/network-policies/)).
+  An omitted or null `health` block turns the endpoint off like a null port.
+  Setting `health.probes` to null while a port is set is not guarded against
+  and fails to render.
 - **Replicas are 1 for every process.** Scaling beyond that (the worker is a
   consumer group, the reconciler runs singleton duties on one replica at a
   time, ADR 0028) has not been decided; the host state is per process (ADR 0028).

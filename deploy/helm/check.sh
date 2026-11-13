@@ -35,6 +35,12 @@ helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yam
     --set worker.health.port=null --set reconciler.health.port=null >"$work/health-off.yaml"
 (cd "$repo" && uv run python -I deploy/helm/assert_render.py health-off "$work/health-off.yaml")
 
+# An omitted health block (null deletes the key) is the same as null ports, not a template error.
+echo "==> render health-omitted"
+helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
+    --set worker.health=null --set reconciler.health=null >"$work/health-omitted.yaml"
+(cd "$repo" && uv run python -I deploy/helm/assert_render.py health-off "$work/health-omitted.yaml")
+
 # Each of these must fail, and its output must match an extended regex that names the
 # problem (a message of the chart's own `required`/`fail`, or the values.schema.json error).
 # The output of every refused render is printed, so a CI log shows the wording.

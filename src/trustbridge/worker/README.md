@@ -69,7 +69,7 @@ effective defaults are logged at startup.
 | `BODY_RETENTION_PROCESSED_DAYS` / `_DEAD_DAYS` / `DELIVERY_ID_RETENTION_DAYS` | 7 / 30 / 30 | Bodies are purged after these; the row stays until the id retention elapses. |
 | `RELAY_RECHECK_SECONDS` | 900 | The re-relay sweep. |
 | `SCHEMA_WAIT_SECONDS` | 300 | How long a process waits for the schema before it exits non-zero. |
-| `HEALTH_PORT` | unset (no endpoint) | Port of the worker's and reconciler's health endpoints, 1 to 65535. The api ignores it (it serves `/health/*` on its own port). A loop is stale after its interval plus `LEASE_TTL_SECONDS`. |
+| `HEALTH_PORT` | unset (no endpoint) | Port of the worker's and reconciler's health endpoints, 1 to 65535. The api ignores it (it serves `/health/*` on its own port). A loop is stale after its interval plus `LEASE_TTL_SECONDS` without progress (each finished entry or job step counts). Readiness is evaluated one at a time and cached for 2 s. |
 | `HOST_RECHECK_SECONDS` | 60 | Recheck of `unavailable` and `unregistered` hosts. |
 | `MIGRATE_EXPECTED_ROLE` | unset | The migrate Job refuses to run as any other database role. |
 

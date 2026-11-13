@@ -9,9 +9,10 @@ import pytest
 
 from tests.trustbridge.fakes import FakeHostChecker, FakeRedis
 from tests.trustbridge.helpers import as_redis, make_settings
-from tests.trustbridge.worker.harness import Harness
+from tests.trustbridge.worker.harness import Harness, key
 from trustbridge.worker import health, runtime
 from trustbridge.worker.health import HealthServer, Heartbeat, stale_after
+from trustbridge.worker.queue import StreamEntry
 from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps, periodic
 from trustbridge.worker.runtime import ProcessOverrides
 
@@ -26,6 +27,12 @@ class Ticker:
     def __call__(self) -> float:
         """The current time."""
         return self.now
+
+
+@pytest.fixture(autouse=True)
+def _no_ready_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Readiness answers are fresh unless a test asks for the cache."""
+    monkeypatch.setattr(health, "READY_CACHE_SECONDS", 0.0)
 
 
 async def _get(port: int, request: bytes) -> tuple[int, dict[str, object]]:
@@ -186,7 +193,7 @@ async def test_the_worker_and_reconciler_register_their_loops_with_derived_limit
     """Each loop registers a limit from its own interval; the worker beats per iteration."""
     h = await Harness({}).start()
     beat = Heartbeat()
-    h.worker._d.heartbeat = beat
+    h.worker._beat = beat
     stop = asyncio.Event()
 
     async def one_iteration() -> int:
@@ -225,6 +232,100 @@ class BlockingRedis(FakeRedis):
         """Sleep, then read."""
         await asyncio.sleep(0.01)
         return await super().xreadgroup(*args, **kwargs)
+
+
+async def test_a_long_batch_of_fast_entries_stays_live_and_a_stuck_entry_goes_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Progress, not iteration time: each finished entry beats; one that never ends is stale."""
+    h = await Harness({}).start()
+    clock = Ticker()
+    beat = Heartbeat(clock)
+    beat.register("consume", stale_after(h.settings, 5))  # 125 s
+    h.worker._beat = beat
+    seen: list[list[str]] = []
+
+    async def fast(entry: StreamEntry, *, from_pending: bool) -> None:
+        clock.now += 100  # 5 entries: 500 s in all, far beyond one limit
+        seen.append(beat.stale())
+
+    monkeypatch.setattr(h.worker, "_process", fast)
+    entries = [StreamEntry(str(i), key(f"d{i}")) for i in range(5)]
+    for entry in entries:
+        await h.worker.process(entry, from_pending=False)
+    assert seen == [[]] * 5
+    assert beat.stale() == []
+
+    async def stuck(entry: StreamEntry, *, from_pending: bool) -> None:
+        clock.now += 126  # no entry finished for longer than one unit's bound
+        seen.append(beat.stale())
+
+    monkeypatch.setattr(h.worker, "_process", stuck)
+    await h.worker.process(entries[0], from_pending=False)
+    assert seen[-1] == ["consume"]
+
+
+class RecordingHeartbeat(Heartbeat):
+    """Remembers which loops beat."""
+
+    def __init__(self) -> None:
+        """Start empty."""
+        super().__init__()
+        self.calls: list[str] = []
+
+    def beat(self, name: str) -> None:
+        """Record, then beat."""
+        self.calls.append(name)
+        super().beat(name)
+
+
+async def test_reconciler_jobs_beat_between_their_steps() -> None:
+    """retention and trim beat inside the job, so a long run is progress."""
+    h = await Harness({}).start()
+    beat = RecordingHeartbeat()
+    recon = Reconciler(
+        h.settings,
+        ReconcilerDeps(
+            store=h.store,
+            queue=h.queue,
+            relay=h.relay,
+            hosts=h.hosts,
+            leases=h.leases,
+            deliveries=None,
+            heartbeat=beat,
+        ),
+    )
+    await recon.retention()
+    await recon.trim_streams()
+    assert beat.calls == ["retention", "retention", "trim", "trim"]
+
+
+async def test_readiness_is_single_flight_and_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent and rapid probes share one evaluation per cache window."""
+    monkeypatch.setattr(health, "READY_CACHE_SECONDS", 2.0)
+    clock = Ticker()
+    calls = 0
+
+    async def slow() -> bool:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return True
+
+    server = HealthServer(Heartbeat(), {"valkey": slow}, 0, host="127.0.0.1", clock=clock)
+    port = await server.start()
+    try:
+        answers = await asyncio.gather(*(_get(port, _req("/health/ready")) for _ in range(10)))
+        assert {a[0] for a in answers} == {200}
+        assert calls == 1
+        clock.now += 1.9
+        await _get(port, _req("/health/ready"))
+        assert calls == 1
+        clock.now += 0.2
+        await _get(port, _req("/health/ready"))
+        assert calls == 2
+    finally:
+        await server.stop()
 
 
 def _free_port() -> int:

@@ -154,6 +154,11 @@ class Reconciler:
         self._s = settings
         self._d = deps
 
+    def _beat(self, job: str) -> None:
+        """Record progress inside a job that works through several steps."""
+        if self._d.heartbeat is not None:
+            self._d.heartbeat.beat(job)
+
     async def relay_tick(self) -> int:
         """Relay rows never relayed and due retries."""
         return await self._d.relay.tick()
@@ -179,6 +184,7 @@ class Reconciler:
             if not self._d.hosts.is_ready(name):
                 continue
             host = self._d.hosts.config(name)
+            self._beat("deliveries")  # one host is a unit of progress
             try:
                 async with self._d.leases.hold(
                     NIL_TENANT, CORE_ADAPTER, f"reconcile-deliveries:{name}"
@@ -195,10 +201,12 @@ class Reconciler:
         now = self._d.clock()
         try:
             async with self._d.leases.hold(NIL_TENANT, CORE_ADAPTER, "retention"):
+                self._beat("retention")
                 purged = await self._d.store.purge_bodies(
                     now - timedelta(days=self._s.body_retention_processed_days),
                     now - timedelta(days=self._s.body_retention_dead_days),
                 )
+                self._beat("retention")
                 deleted = await self._d.store.delete_expired(
                     now - timedelta(days=self._s.delivery_id_retention_days)
                 )
@@ -209,8 +217,10 @@ class Reconciler:
     async def trim_streams(self) -> None:
         """Trim `tb:events` below what the group acknowledged, the dead letter by age, set lag."""
         await self._d.queue.trim_events()
+        self._beat("trim")
         cutoff = self._d.clock() - timedelta(days=self._s.dead_stream_retention_days)
         await self._d.queue.trim_dead(int(cutoff.timestamp() * 1000))
+        self._beat("trim")
         metrics.set_stream_lag(await self._d.queue.lag())
 
     async def run(self, stop: asyncio.Event) -> None:

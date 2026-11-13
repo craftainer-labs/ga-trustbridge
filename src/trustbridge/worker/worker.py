@@ -80,11 +80,11 @@ class Worker:
         self._s = settings
         self._d = deps
         self.consumer = consumer
+        self._beat = deps.heartbeat or Heartbeat()
 
     async def run(self, stop: asyncio.Event) -> None:
         """Consume until `stop` is set."""
-        beat = self._d.heartbeat or Heartbeat()
-        beat.register(LOOP, stale_after(self._s, self._s.worker_block_ms / 1000))
+        self._beat.register(LOOP, stale_after(self._s, self._s.worker_block_ms / 1000))
         await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop
         while not stop.is_set():
             try:
@@ -92,10 +92,11 @@ class Worker:
             except Exception:
                 logger.exception("stream read failed; backing off")
                 await asyncio.sleep(1.0)
-            beat.beat(LOOP)
+            self._beat.beat(LOOP)
 
     async def run_once(self) -> int:
         """One iteration: claim stale pending entries, read new ones, process them all."""
+        self._beat.beat(LOOP)
         idle_ms = int(self._s.stream_claim_idle_seconds * 1000)
         claimed = await self._d.queue.claim_stale(
             self.consumer, min_idle_ms=idle_ms, count=self._s.worker_batch_size
@@ -123,6 +124,8 @@ class Worker:
                 await self._d.queue.ack(entry.entry_id)
             except Exception:
                 logger.exception("could not re-add the entry; it stays pending")
+        finally:
+            self._beat.beat(LOOP)  # one entry is a unit of progress, so a long batch stays live
 
     async def _process(self, entry: StreamEntry, *, from_pending: bool) -> None:
         """The decision tree for one stream entry."""

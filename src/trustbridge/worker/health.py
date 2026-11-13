@@ -12,7 +12,9 @@ fixed JSON status, never a detail, a name or an exception text (those go to the 
   that is waiting for the schema has registered no loop yet, so it stays alive.
 - `GET /health/ready`: 200 when every readiness check passes (Valkey answers PING; the database
   answers and the schema is current, which one read of `schema_compat` shows), else 503. The
-  checks run per probe under a timeout, as the api's do.
+  checks run under a timeout, as the api's do, but single-flight and cached for
+  `READY_CACHE_SECONDS`: concurrent or rapid probes share one PING and one schema read, so a
+  flood of requests cannot multiply the load on Valkey and the database.
 
 A loop's limit is derived from its own interval plus `LEASE_TTL_SECONDS`, the settings' bound
 on one unit of work (`stale_after`), so a slow but healthy loop is not killed.
@@ -36,6 +38,7 @@ REQUEST_TIMEOUT_SECONDS = 5.0
 CHECK_TIMEOUT_SECONDS = 5.0
 MAX_LINE_BYTES = 8192
 MAX_HEADER_LINES = 100
+READY_CACHE_SECONDS = 2.0
 
 Check = Callable[[], Awaitable[object]]
 """A readiness check: truthy when healthy, falsy or raising when not."""
@@ -86,7 +89,12 @@ class HealthServer:
     """Serves `/health/live` and `/health/ready` for one process."""
 
     def __init__(
-        self, heartbeat: Heartbeat, ready_checks: Mapping[str, Check], port: int, host: str = ""
+        self,
+        heartbeat: Heartbeat,
+        ready_checks: Mapping[str, Check],
+        port: int,
+        host: str = "",
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """`host` is empty (all interfaces) by default; tests pass `127.0.0.1` and port 0."""
         self._heartbeat = heartbeat
@@ -94,6 +102,10 @@ class HealthServer:
         self._port = port
         self._host = host
         self._server: asyncio.Server | None = None
+        self._clock = clock
+        self._ready_lock = asyncio.Lock()
+        self._ready_result: tuple[int, dict[str, object]] | None = None
+        self._ready_at = 0.0
 
     async def start(self) -> int:
         """Start listening; returns the bound port."""
@@ -144,9 +156,24 @@ class HealthServer:
                 logger.error("liveness failing; loops made no progress", extra={"loops": stale})
             return (503, {"status": "fail"}) if stale else (200, {"status": "ok"})
         if path == READY_PATH:
+            return await self._ready()
+        return 404, {"status": "error"}
+
+    async def _ready(self) -> tuple[int, dict[str, object]]:
+        """The readiness answer: one evaluation at a time, reused for `READY_CACHE_SECONDS`."""
+        async with self._ready_lock:
+            if (
+                self._ready_result is not None
+                and self._clock() - self._ready_at < READY_CACHE_SECONDS
+            ):
+                return self._ready_result
             names = list(self._checks)
             results = await asyncio.gather(*(_run_check(n, self._checks[n]) for n in names))
             checks = {n: ("ok" if ok else "fail") for n, ok in zip(names, results, strict=True)}
             ok = all(results)
-            return (200 if ok else 503), {"status": "ok" if ok else "fail", "checks": checks}
-        return 404, {"status": "error"}
+            self._ready_result = (
+                (200 if ok else 503),
+                {"status": "ok" if ok else "fail", "checks": checks},
+            )
+            self._ready_at = self._clock()
+            return self._ready_result
