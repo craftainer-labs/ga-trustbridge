@@ -44,6 +44,7 @@ RETRY = "SELECT tb_retry_tenant_deletion(:d, :h, :f, :e, :delay)"
 RENEW = "SELECT tb_renew_tenant_deletion(:d, :h, :f, :ttl)"
 RELEASE = "SELECT tb_release_tenant_deletion(:d, :h, :f)"
 FAIL = "SELECT tb_fail_tenant_deletion(:d, :h, :f, :r)"
+OPERATOR_FAIL = "SELECT tb_operator_fail_tenant_deletion(:d, :a, :r)"
 CANCEL = "SELECT tb_cancel_tenant_deletion(:d)"
 FINISH = "SELECT tb_finish_tenant_deletion(:d, :h, :f, CAST(:counts AS jsonb), NULL)"
 DELETE = "SELECT tb_delete_tenant(:t, :h, :f)"
@@ -368,6 +369,67 @@ async def test_leaving_requested_needs_the_grace_window_over_and_a_disabled_tena
     assert (await _record(db, deletion)).state == "requested"
 
 
+async def test_leaving_requested_is_refused_when_the_tenant_row_is_missing(db: Db) -> None:
+    """The admin-disabled guard fails closed when the tenants row is gone."""
+    await _drain(db)
+    tenant, deletion = await _open(db)
+    row = await _claim(db)
+    assert row is not None
+    await _admin(db, "DELETE FROM tenants WHERE id = :t", {"t": tenant.id})
+    with pytest.raises(DBAPIError, match="the tenant row is gone"):
+        await _advance(db, deletion, row, "draining")
+    assert (await _record(db, deletion)).state == "requested"
+
+
+async def test_a_same_state_advance_keeps_the_retry_state_and_a_step_change_resets_it(
+    db: Db,
+) -> None:
+    """A cursor save leaves attempts, retry_at and last_error alone; a real step change clears."""
+    await _drain(db)
+    _, deletion = await _open(db)
+    row = await _claim(db)
+    assert row is not None
+    await _advance(db, deletion, row, "draining")
+    await _app_rows(db, RETRY, {**_lease(deletion, row), "e": "boom", "delay": 0})
+    again = await _claim(db)
+    assert again is not None
+    await _advance(db, deletion, again, "draining", cursor='{"page": 2}', counts='{"n": 1}')
+    record = await _record(db, deletion)
+    assert (record.attempts, record.last_error, record.state) == (1, "boom", "draining")
+    assert record.retry_at is not None
+    assert record.step_cursor == {"page": 2}
+    await _advance(db, deletion, again, "platform")
+    record = await _record(db, deletion)
+    assert (record.attempts, record.last_error, record.retry_at) == (0, None, None)
+
+
+async def test_attempts_are_bigint_everywhere(db: Db) -> None:
+    """The column and the retry function's result are bigint."""
+    column = (
+        "SELECT data_type FROM information_schema.columns "
+        "WHERE table_name = 'tenant_deletions' AND column_name = 'attempts'"
+    )
+    assert await _admin_scalar(db, column) == "bigint"
+    result = (
+        "SELECT pg_get_function_result("
+        "'tb_retry_tenant_deletion(uuid, text, bigint, text, integer)'::regprocedure)"
+    )
+    assert await _admin_scalar(db, result) == "bigint"
+
+
+async def test_the_lease_is_judged_by_the_wall_clock_not_the_transaction_start(db: Db) -> None:
+    """A transaction that outlives the lease cannot use it (clock_timestamp, not now())."""
+    await _drain(db)
+    _, deletion = await _open(db)
+    row = await _claim(db, ttl=1)
+    assert row is not None
+    with pytest.raises(DBAPIError, match=LOST):
+        async with db.app() as session, session.begin():
+            await session.execute(text("SELECT now()"))  # fixes the transaction's now()
+            await session.execute(text("SELECT pg_sleep(1.5)"))
+            await session.execute(text(RENEW), {**_lease(deletion, row), "ttl": 10})
+
+
 # --- retry and release ---------------------------------------------------------------------
 
 
@@ -415,10 +477,8 @@ async def test_release_frees_the_lease_for_the_next_claim(db: Db) -> None:
 # --- fail and cancel -----------------------------------------------------------------------
 
 
-async def test_fail_is_terminal_for_a_holder_and_for_an_operator_and_a_new_request_starts_over(
-    db: Db,
-) -> None:
-    """Fail is terminal for a holder and for an operator and a new request starts over."""
+async def test_fail_is_terminal_and_a_new_request_starts_over(db: Db) -> None:
+    """Fail is terminal and a new request starts over."""
     await _drain(db)
     tenant, deletion = await _open(db)
     row = await _claim(db)
@@ -427,7 +487,7 @@ async def test_fail_is_terminal_for_a_holder_and_for_an_operator_and_a_new_reque
     record = await _record(db, deletion)
     assert (record.state, record.last_error, record.holder) == ("failed", "non-retryable", None)
     with pytest.raises(DBAPIError, match="deletion is terminal"):
-        await _app_rows(db, FAIL, {"d": deletion, "h": None, "f": None, "r": "again"})
+        await _app_rows(db, FAIL, {**_lease(deletion, row), "r": "again"})
     # a failed deletion leaves the tenant disabled and a new request creates a new record
     again = await _request(db, tenant)
     assert again.outcome == "created"
@@ -435,17 +495,50 @@ async def test_fail_is_terminal_for_a_holder_and_for_an_operator_and_a_new_reque
     assert await _admin_scalar(
         db, "SELECT admin_disabled_at IS NOT NULL FROM tenants WHERE id = :t", {"t": tenant.id}
     )
-    # the operator path needs no lease, even while a live one exists
-    claimed = await _claim(db)
-    assert claimed is not None
-    await _app_rows(db, FAIL, {"d": again.deletion_id, "h": None, "f": None, "r": "operator"})
-    with pytest.raises(DBAPIError, match="deletion is terminal"):
-        await _advance(db, again.deletion_id, claimed, "draining")
-    for bad in ({"h": "w", "f": None}, {"h": None, "f": 1}):
+    # there is no lease-free path: a NULL holder or fence is an invalid argument
+    for bad in ({"h": "w", "f": None}, {"h": None, "f": 1}, {"h": None, "f": None}):
         with pytest.raises(DBAPIError, match="invalid lease arguments"):
-            await _app_rows(db, FAIL, {"d": deletion, "r": "x", **bad})
+            await _app_rows(db, FAIL, {"d": again.deletion_id, "r": "x", **bad})
     with pytest.raises(DBAPIError, match="a reason is required"):
-        await _app_rows(db, FAIL, {"d": deletion, "h": None, "f": None, "r": ""})
+        await _app_rows(db, FAIL, {**_lease(again.deletion_id, row), "r": ""})
+
+
+async def test_operator_fail_needs_no_lease_but_refuses_a_live_one(db: Db) -> None:
+    """The operator function refuses a live lease, a terminal or missing record and bad input."""
+    await _drain(db)
+    _, deletion = await _open(db)
+    row = await _claim(db)
+    assert row is not None
+    args = {"d": deletion, "a": "admin-7", "r": "stuck"}
+    with pytest.raises(DBAPIError, match="deletion lease is held"):
+        await _app_rows(db, OPERATOR_FAIL, args)
+    assert (await _record(db, deletion)).state == "requested"
+    await _admin(db, "UPDATE tenant_deletions SET expires_at = now() - interval '1 second'")
+    await _app_rows(db, OPERATOR_FAIL, args)
+    record = await _record(db, deletion)
+    assert (record.state, record.holder, record.last_error) == (
+        "failed",
+        None,
+        "operator admin-7: stuck",
+    )
+    with pytest.raises(DBAPIError, match=LOST):  # the former holder
+        await _app_rows(db, RENEW, {**_lease(deletion, row), "ttl": 10})
+    with pytest.raises(DBAPIError, match="deletion is terminal"):
+        await _app_rows(db, OPERATOR_FAIL, args)
+    with pytest.raises(DBAPIError, match="deletion not found"):
+        await _app_rows(db, OPERATOR_FAIL, {**args, "d": UUID(int=0)})
+    for bad in ({"a": ""}, {"a": None}, {"r": ""}, {"r": None}):
+        with pytest.raises(DBAPIError, match="an actor and a reason are required"):
+            await _app_rows(db, OPERATOR_FAIL, {**args, **bad})
+
+
+async def test_operator_fail_fails_a_released_or_unclaimed_deletion(db: Db) -> None:
+    """A deletion nobody holds can be failed by the operator at once."""
+    await _drain(db)
+    _, deletion = await _open(db)
+    await _app_rows(db, OPERATOR_FAIL, {"d": deletion, "a": "admin-7", "r": "x" * 2000})
+    record = await _record(db, deletion)
+    assert (record.state, len(record.last_error)) == ("failed", 1000)
 
 
 async def test_fail_is_refused_once_the_tenant_row_is_gone(db: Db) -> None:
@@ -454,8 +547,9 @@ async def test_fail_is_refused_once_the_tenant_row_is_gone(db: Db) -> None:
     await _app_rows(db, DELETE, {"t": tenant.id, "h": row.holder, "f": row.fence})
     with pytest.raises(DBAPIError, match="can only finish"):
         await _app_rows(db, FAIL, {**_lease(deletion, row), "r": "x"})
+    await _admin(db, "UPDATE tenant_deletions SET expires_at = now() - interval '1 second'")
     with pytest.raises(DBAPIError, match="can only finish"):
-        await _app_rows(db, FAIL, {"d": deletion, "h": None, "f": None, "r": "x"})
+        await _app_rows(db, OPERATOR_FAIL, {"d": deletion, "a": "admin-7", "r": "x"})
     assert (await _record(db, deletion)).state == "database"
 
 
@@ -507,6 +601,25 @@ async def test_a_cancel_and_the_first_step_never_both_win(db: Db) -> None:
 
 
 # --- migration -----------------------------------------------------------------------------
+
+
+async def test_downgrade_refuses_while_a_non_terminal_deletion_exists() -> None:
+    """Downgrade refuses while a non-terminal deletion exists and works once it is cancelled."""
+    async for scratch in _provision(enforce=False):
+        deletion = (await _request(scratch, await _tenant(scratch))).deletion_id
+        refused = await _alembic(scratch.name, "downgrade", BEFORE)
+        assert refused.returncode != 0
+        assert "non-terminal tenant deletions exist" in refused.stderr
+        assert await _admin_scalar(
+            scratch, "SELECT to_regprocedure('tb_claim_tenant_deletion(text, integer)') IS NOT NULL"
+        )
+        await _admin(
+            scratch,
+            "UPDATE tenant_deletions SET state = 'cancelled' WHERE id = :d",
+            {"d": deletion},
+        )
+        stepped = await _alembic(scratch.name, "downgrade", BEFORE)
+        assert stepped.returncode == 0, stepped.stderr[-2000:]
 
 
 async def test_downgrade_restores_the_previous_delete_function_and_drops_the_rest() -> None:

@@ -87,12 +87,14 @@ delivery exists. N-1 safe: only additions and same-signature function bodies; th
 never reads or writes the new column, status or table.
 
 The engine's writes to `tenant_deletions` are `SECURITY DEFINER` functions of `5d7a2c8e1b94` (the
-app role keeps `SELECT` only, pinned `search_path`): `tb_claim_tenant_deletion` (lease, fence bump,
+app role keeps `SELECT` only, `search_path` pinned to `pg_catalog, public, pg_temp`): `tb_claim_tenant_deletion` (lease, fence bump,
 skips terminal, future `not_before` and backed-off rows, `SKIP LOCKED`), `tb_renew_`, `tb_release_`,
 `tb_retry_` (records `last_error`, counts `attempts`, sets `retry_at`), `tb_advance_` (one step along
-`requested`, `draining`, `platform`, `github`, `database`), `tb_fail_` (`failed`, with a lease or as
-an operator with `NULL` holder and fence), `tb_cancel_` (`requested` only) and `tb_finish_` (`done`,
-the tombstone, only after the tenant row is gone). Every guarded call needs the live lease (`TB003`);
+`requested`, `draining`, `platform`, `github`, `database`), `tb_fail_` (`failed`, always with the lease),
+`tb_operator_fail_` (`failed` by an operator: no lease of its own, refused with `TB003` while a live
+one is held; the actor lands in `last_error`; granted to `trustbridge_app`, the only runtime role
+(ADR 0031), which also serves the admin API), `tb_cancel_` (`requested` only) and `tb_finish_` (`done`,
+the tombstone, only after the tenant row is gone). Every guarded call needs the live lease, judged by `clock_timestamp()` (`TB003`);
 a terminal or invalid move is `TB004`. None writes `audit_events`: the engine does, in the same
 session transaction.
 

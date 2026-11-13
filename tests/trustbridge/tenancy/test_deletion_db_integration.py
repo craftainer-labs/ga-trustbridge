@@ -50,6 +50,7 @@ NEW_FUNCTIONS = (
     "tb_retry_tenant_deletion(uuid, text, bigint, text, integer)",
     "tb_release_tenant_deletion(uuid, text, bigint)",
     "tb_fail_tenant_deletion(uuid, text, bigint, text)",
+    "tb_operator_fail_tenant_deletion(uuid, text, text)",
     "tb_cancel_tenant_deletion(uuid)",
     "tb_finish_tenant_deletion(uuid, text, bigint, jsonb, jsonb)",
 )
