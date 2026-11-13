@@ -96,7 +96,9 @@ effective defaults are logged at startup.
   Before that decision the worker stores the tenant's id on the delivery row
   (`DeliveryStore.set_tenant`, `webhook_deliveries.tenant_id`; ADR 0034: a deletion must find every
   delivery of its tenant), using `TenantGate.standing` (`TenantStanding`, defined in `tenancy.standing`: id, disabled flag, and a
-  `deleting` or `tombstone` refusal). A tenant with a deletion in progress is deferred the same way;
+  `deleting` or `tombstone` refusal). A tenant with a deletion in progress is deferred without a counted failure too (`TenantDeleting`, distinct
+  from `TenantDisabled`) but four times as long as a disabled one (`DELETING_RETRY_FACTOR`), since `enable` does not end
+  it; it is logged at info the first time a delivery is deferred for it and at debug after that;
   a tombstoned installation (a finished deletion, the App still installed) has its delivery
   acknowledged and marked processed with no handler run and no tenant created, and a log line.
 - Migrations: bump the schema-compatibility integer in every revision with

@@ -1,8 +1,11 @@
 """A disabled tenant's webhooks are stored, acknowledged and not handled (ADR 0033 invariant 19)."""
 
 import json
+import logging
 from datetime import timedelta
 from uuid import UUID, uuid4
+
+import pytest
 
 from tests.trustbridge.worker.harness import Harness, key
 from trustbridge.github.handlers import EventContext
@@ -139,8 +142,27 @@ async def test_a_delivery_for_a_tenant_being_deleted_is_deferred_not_handled_nor
     row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts, row.tenant_id) == ("pending", 0, gate.ids[("ok", 7)])
-    assert row.next_attempt_at == h.clock() + timedelta(seconds=20)
+    # four times the disabled-tenant delay: `enable` does not end a deletion
+    assert row.next_attempt_at == h.clock() + timedelta(seconds=80)
     assert seen == []
+
+
+async def test_the_deletion_deferral_logs_at_info_once_then_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The first deferral of a delivery is at info, the later passes at debug."""
+    gate = SetGate()
+    gate.deleting.add(("ok", 7))
+    h = await Harness({"push": _noop}, gate=gate, disabled_tenant_retry_seconds=20).start()
+    await h.add("d1")
+    message = "deferring push delivery: tenant deletion in progress"
+    with caplog.at_level(logging.DEBUG, logger="trustbridge.worker.worker"):
+        await h.worker.run_once()
+        h.advance(81)
+        await h.relay.resweep(0)
+        await h.worker.run_once()
+    levels = [r.levelno for r in caplog.records if r.getMessage() == message]
+    assert levels == [logging.INFO, logging.DEBUG]
 
 
 async def test_a_tombstoned_installations_delivery_is_acknowledged_and_dropped() -> None:

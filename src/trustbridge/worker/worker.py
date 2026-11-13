@@ -60,8 +60,27 @@ class WorkerDeps:
     heartbeat: Heartbeat | None = None
 
 
+# A delivery of a tenant being deleted is checked this many times less often than one of a
+# disabled tenant: a deletion is not undone by `enable`, so only its end (the tenant row gone or the
+# deletion cancelled) changes the answer, and a drain can take a long while.
+DELETING_RETRY_FACTOR = 4
+
+
 class TenantDisabled(Exception):  # noqa: N818 -- a control-flow signal, not a failure
     """The delivery's tenant is admin-disabled: it is deferred and no failure is counted."""
+
+
+class TenantDeleting(Exception):  # noqa: N818 -- a control-flow signal, not a failure
+    """The delivery's tenant has a deletion in progress: deferred, no failure counted.
+
+    Unlike `TenantDisabled`, `enable` does not make it deliverable: the deletion is either
+    cancelled (then the tenant is handled again) or ends by removing the delivery or the tenant.
+    """
+
+    def __init__(self, *, first: bool) -> None:
+        """`first` is True the first time this delivery is deferred for the deletion."""
+        super().__init__("tenant deletion in progress")
+        self.first = first
 
 
 def _lost_claim(row: DeliveryRecord, outcome: str) -> None:
@@ -159,6 +178,19 @@ class Worker:
             retry = now + timedelta(seconds=self._s.disabled_tenant_retry_seconds)
             await store.defer(row.key, retry)
             await queue.ack(entry.entry_id)
+        except TenantDeleting as deleting:
+            level = logging.INFO if deleting.first else logging.DEBUG
+            logger.log(
+                level,
+                "deferring %s delivery: tenant deletion in progress",
+                row.event,
+                extra={"host": row.host, "delivery_id": row.delivery_id},
+            )
+            retry = now + timedelta(
+                seconds=self._s.disabled_tenant_retry_seconds * DELETING_RETRY_FACTOR
+            )
+            await store.defer(row.key, retry)
+            await queue.ack(entry.entry_id)
         except Exception as exc:
             log_failure(logger, "delivery handler failed", exc)
             error = f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
@@ -241,14 +273,15 @@ class Worker:
         its tenant, including the ones deferred below). Returns False for a tombstoned
         installation: the event is acknowledged and dropped (no handler runs, no tenant is
         created) and the caller marks it processed. Raises `TenantDisabled` for an admin-disabled
-        tenant and for one being deleted (a deletion needs a disabled tenant, so this is a
-        no-op until the deletion removes the delivery or the tenant is enabled).
+        tenant, and `TenantDeleting` for one being deleted: logged at info the first time the
+        delivery is deferred for it (its tenant was not recorded yet) and at debug after that.
         """
         installation = payload.get("installation")
         installation_id = installation.get("id") if isinstance(installation, dict) else None
         if self._d.gate is None or type(installation_id) is not int:
             return True
         standing = await self._d.gate.standing(row.host, installation_id)
+        first_sight = row.tenant_id is None
         if standing.tenant_id is not None:
             await self._d.store.set_tenant(row.key, standing.tenant_id)
         if standing.refusal == "tombstone":
@@ -260,12 +293,7 @@ class Worker:
             )
             return False
         if standing.refusal == "deleting":
-            logger.info(
-                "deferring %s delivery: tenant deletion in progress",
-                row.event,
-                extra={"host": row.host, "delivery_id": row.delivery_id},
-            )
-            raise TenantDisabled
+            raise TenantDeleting(first=first_sight)
         if standing.disabled:
             raise TenantDisabled
         return True

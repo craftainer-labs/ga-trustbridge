@@ -230,7 +230,7 @@ async def test_repository_events_for_a_refused_tenant_change_and_schedule_nothin
     await handlers.on_installation(_ctx("new_permissions_accepted"))
     assert tenants.repositories[tenant] == known
     assert scheduler.scheduled == []
-    assert dropped == [("github.com", 4242)] * 6  # new_permissions_accepted notifies first too
+    assert dropped == [("github.com", 4242)] * 5  # one per event, the permissions one included
 
 
 @pytest.mark.parametrize("reason", ["tombstone", "deleting"])

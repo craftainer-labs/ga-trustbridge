@@ -125,12 +125,12 @@ class InstallationHandlers:
             await self._sync(ctx, installation_id, login, account_id)
             return
         if action == "new_permissions_accepted":
-            self._notify(ctx.host, installation_id)
             try:
                 found = await self._store.active_tenant_id_for(ctx.host, installation_id)
             except TenantDeletedError as refused:
-                self._drop(ctx, installation_id, refused)
+                self._drop(ctx, installation_id, refused)  # also drops the cached tokens
                 return
+            self._notify(ctx.host, installation_id)
             if found is not None:
                 await self._scheduler.schedule(found)
             return

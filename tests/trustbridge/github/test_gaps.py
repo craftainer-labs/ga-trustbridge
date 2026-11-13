@@ -383,3 +383,15 @@ async def test_an_unready_host_raises_for_gateway_users() -> None:
     with pytest.raises(HostNotReadyError):
         mon.require_ready("github.com")
     assert mon.status("github.com").state is HostState.UNAVAILABLE
+
+
+async def test_a_dropped_permissions_event_drops_the_cached_tokens_once() -> None:
+    """A deleting tenant's `new_permissions_accepted` is dropped, with one cache invalidation."""
+    handlers, tenants, scheduler, changed, _ = _handlers(with_callback=True)
+    await tenants.upsert_installation("github.com", 7, "acme", 1)
+    tenants.deleting.add(("github.com", 7))
+    await handlers.on_installation(
+        _ctx("installation", "new_permissions_accepted", {"installation": INSTALLATION})
+    )
+    assert changed == [("github.com", 7)]
+    assert scheduler.local == set()

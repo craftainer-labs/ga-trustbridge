@@ -27,6 +27,7 @@ from pydantic import SecretStr
 from redis.asyncio import Redis
 from sqlalchemy import Row, and_, case, delete, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters.interface import AdapterConfig, GitHubHost, IssuedSecret, Tenant
@@ -39,6 +40,8 @@ PARKED_PREFIX = "parked/"
 PRIVILEGED_KEY = "privileged_credential"
 RECONCILE_SET = "tb:reconcile"
 HostLookup = Callable[[str], GitHubHost]
+# The SQLSTATEs `tb_upsert_tenant` raises (migration 3b8d6f2a4c17) and the reason each maps to.
+_UPSERT_REFUSALS = {"TB001": "tombstone", "TB002": "deleting"}
 
 
 class UnknownTenantError(LookupError):
@@ -109,6 +112,18 @@ class SqlTenants:
                 raise TenantDeletedError(host, installation_id, "deleted")
             tenant_id: UUID = (await session.execute(upsert)).scalar_one()
         return tenant_id
+
+    @staticmethod
+    def deleted_error(
+        host: str, installation_id: int, error: DBAPIError
+    ) -> TenantDeletedError | None:
+        """The `TenantDeletedError` for a `tb_upsert_tenant` refusal, or None for any other error.
+
+        The function raises SQLSTATE `TB001` for a tombstone and `TB002` for a tenant with a
+        deletion in progress (migration `3b8d6f2a4c17`).
+        """
+        reason = _UPSERT_REFUSALS.get(getattr(error.orig, "sqlstate", None) or "")
+        return None if reason is None else TenantDeletedError(host, installation_id, reason)
 
     @staticmethod
     async def _standing(session: AsyncSession, host: str, installation_id: int) -> Row[Any] | None:
@@ -317,7 +332,7 @@ class MemoryTenants:
         Mirrors `SqlTenants`: a tombstoned or deleting key, and a `deleted` tenant given another
         state, raise `TenantDeletedError`; `deleted` on a `deleted` tenant is a no-op.
         """
-        tenant_id = await self.active_tenant_id_for(host, installation_id, allow_deleted=True)
+        tenant_id = self._standing(host, installation_id)
         if tenant_id is None:
             return None
         if self._rows[tenant_id].get("state") == "deleted" and state != "deleted":
@@ -325,20 +340,19 @@ class MemoryTenants:
         self._rows[tenant_id]["state"] = state
         return tenant_id
 
-    async def active_tenant_id_for(
-        self, host: str, installation_id: int, *, allow_deleted: bool = False
-    ) -> UUID | None:
-        """The tenant of the key if known; raises `TenantDeletedError` as `SqlTenants` does.
-
-        `allow_deleted` (for the state setter only) lets a `deleted` tenant through.
-        """
+    def _standing(self, host: str, installation_id: int) -> UUID | None:
+        """The tenant of the key if known; a tombstoned or deleting key raises."""
         key = (host, installation_id)
         if key in self.tombstones:
             raise TenantDeletedError(host, installation_id, "tombstone")
         if key in self.deleting:
             raise TenantDeletedError(host, installation_id, "deleting")
-        known = self._by_key.get(key)
-        if known is not None and not allow_deleted and self._rows[known].get("state") == "deleted":
+        return self._by_key.get(key)
+
+    async def active_tenant_id_for(self, host: str, installation_id: int) -> UUID | None:
+        """The tenant of the key if known; raises `TenantDeletedError` as `SqlTenants` does."""
+        known = self._standing(host, installation_id)
+        if known is not None and self._rows[known].get("state") == "deleted":
             raise TenantDeletedError(host, installation_id, "deleted")
         return known
 

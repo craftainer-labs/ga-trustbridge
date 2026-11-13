@@ -304,8 +304,10 @@ class InMemoryDeliveryStore:
         self._set(key, next_attempt_at=until)
 
     async def set_tenant(self, key: DeliveryKey, tenant_id: UUID) -> None:
-        """Record the delivery's tenant."""
-        self._set(key, tenant_id=tenant_id)
+        """Record the delivery's tenant on a pending row (as `SqlDeliveries` does)."""
+        row = self.rows.get(key)
+        if row is not None and row.status == PENDING:
+            self._set(key, tenant_id=tenant_id)
 
     async def mark_dead(
         self, key: DeliveryKey, error: str, now: datetime, *, attempts: int

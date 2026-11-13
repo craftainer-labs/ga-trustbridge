@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import SecretStr
+from sqlalchemy.exc import DBAPIError
 
 from tests.trustbridge.fakes import FakeRedis
 from tests.trustbridge.helpers import as_redis, host
@@ -17,6 +18,7 @@ from trustbridge.worker.ports import (
     MemoryTenants,
     ParkedValues,
     ReconcileRequests,
+    SqlTenants,
     UnknownTenantError,
 )
 from trustbridge.worker.secrets import MemorySecrets, SecretUnavailable
@@ -215,3 +217,26 @@ async def test_connection_data_concurrent_puts_do_not_lose_updates() -> None:
     config = await connections.config_for(tenant, "jfrog")
     assert sorted(config.connection) == [f"k{i}" for i in range(5)]
     assert len(connections._locks) == 0
+
+
+class _OrigError(Exception):
+    def __init__(self, sqlstate: str | None) -> None:
+        super().__init__("db error")
+        self.sqlstate = sqlstate
+
+
+@pytest.mark.parametrize(
+    ("sqlstate", "reason"),
+    [("TB001", "tombstone"), ("TB002", "deleting"), ("22023", None), (None, None)],
+)
+def test_the_upsert_refusals_map_to_tenant_deleted_errors(
+    sqlstate: str | None, reason: str | None
+) -> None:
+    """`tb_upsert_tenant` raises TB001 (tombstone) and TB002 (deleting); others are not ours."""
+    error = DBAPIError("SELECT tb_upsert_tenant(...)", None, _OrigError(sqlstate))
+    mapped = SqlTenants.deleted_error("github.com", 7, error)
+    if reason is None:
+        assert mapped is None
+    else:
+        assert mapped is not None
+        assert (mapped.host, mapped.installation_id, mapped.reason) == ("github.com", 7, reason)

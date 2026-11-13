@@ -1,16 +1,26 @@
-"""refuse a tenant with a deletion in progress in tb_upsert_tenant (NG6h-2, ADR 0034)
+"""tb_upsert_tenant raises distinct errors for a tombstone and a deleting tenant (NG6h-2, ADR 0034)
 
 Revision ID: 3b8d6f2a4c17
 Revises: 9c2e5a7f1d84
 Create Date: 2026-11-13 18:00:00.000000
 
-Defence in depth for the tenant deletion engine (NG6h-4a): ``tb_upsert_tenant`` already returns
-``NULL`` for a tombstoned key (``9c2e5a7f1d84``). It now also returns ``NULL``, and writes
-nothing, while the tenant has a non-terminal ``tenant_deletions`` row (``requested``,
-``draining``, ``platform``, ``github`` or ``database``), the same condition as the ``deleting``
-flag of ``tb_get_tenant`` and the ``deleting`` reason of ``TenantDeletedError``. Without it an
-installation event that passed an application check just before the deletion was requested could
-still rewrite the tenant row (``org``, ``org_id``, ``state``) while its data is being removed.
+Defence in depth for the tenant deletion engine (NG6h-4a). ``9c2e5a7f1d84`` made
+``tb_upsert_tenant`` return ``NULL`` for a tombstoned key. A ``NULL`` that means two different
+things (and that an unaware caller reads as "no id", or as a success) is a trap, so this revision
+replaces it with an error the caller cannot miss, and adds the second case:
+
+* ``TB001`` (message ``tenant tombstoned``): the key has a ``done`` deletion, or a ``database``-step
+  one whose tenant row ``tb_delete_tenant`` already removed. Nothing is created or revived.
+* ``TB002`` (message ``tenant deletion in progress``): the tenant has a non-terminal
+  ``tenant_deletions`` row (``requested``, ``draining``, ``platform``, ``github`` or ``database``),
+  the same condition as the ``deleting`` flag of ``tb_get_tenant``. Nothing is written, so an
+  installation event that passed an application check just before the deletion was requested
+  cannot rewrite ``org``, ``org_id`` or ``state`` while the data is removed.
+
+The SQLSTATEs are in the user-defined class ``TB`` (a class PostgreSQL does not use). The
+application maps them in ``SqlTenants.deleted_error``: ``TB001`` is ``TenantDeletedError`` with
+reason ``tombstone``, ``TB002`` with reason ``deleting``. A ``deleted`` tenant row still returns its
+id, unchanged (B7). The function never returns ``NULL`` any more.
 The request function and this one take the same per-installation advisory lock before they
 look, so the two serialise.
 
@@ -21,10 +31,11 @@ deletion's partial unique index on ``tenant_id``, so a hot upsert reads one or t
 refused while one is open (``9c2e5a7f1d84``), and a repeated ``disable`` keeps the first actor,
 time and reason, so it cannot alter a deleting tenant.
 
-Expand-only (NFR-0027): the same signature and return type, a body replaced. No release creates a
-deletion before the engine (NG6h-4a) exists, so the new outcome is not reachable by the previous
-release. The upgrade fails loudly if the ``9c2e5a7f1d84`` body is not the one it patches; the
-downgrade restores it. ``schema_compat`` is not touched.
+Expand-only (NFR-0027): the same signature and return type, a body replaced. The previous release
+never reaches either outcome: no release creates a deletion before the engine (NG6h-4a) exists, and
+the application's own upsert (``SqlTenants.upsert_installation``) does not call this function.
+The upgrade fails loudly if the ``9c2e5a7f1d84`` body is not the one it patches; the downgrade
+restores it (the ``NULL`` tombstone). ``schema_compat`` is not touched.
 """
 
 from collections.abc import Sequence
@@ -86,20 +97,26 @@ END
 $$
 """
 
-_ANCHOR = """        RETURN NULL;
+_TOMBSTONE_ANCHOR = """        RETURN NULL;
+    END IF;
+"""
+_TOMBSTONE_RAISE = """        RAISE EXCEPTION 'tenant tombstoned' USING ERRCODE = 'TB001';
     END IF;
 """
 _DELETING_GUARD = """    -- A deletion is in progress (any non-terminal state): leave the row alone.
-    -- Same NULL outcome; the application ports tell the two apart (`deleting` or `tombstone`).
     IF EXISTS (
         SELECT 1 FROM public.tenants t
           JOIN public.tenant_deletions d ON d.tenant_id = t.id
            AND d.state NOT IN ('done', 'failed', 'cancelled')
          WHERE t.host = p_host AND t.installation_id = p_installation_id
     ) THEN
-        RETURN NULL;
+        RAISE EXCEPTION 'tenant deletion in progress' USING ERRCODE = 'TB002';
     END IF;
 """
+_NULL_COMMENT = (
+    "    -- NULL is returned (a distinct outcome: the other paths always return an id).\n"
+)
+_RAISE_COMMENT = "    -- TB001 is raised (never NULL: the other paths always return an id).\n"
 
 
 def _replaced(body: str, old: str, new: str) -> str:
@@ -109,7 +126,11 @@ def _replaced(body: str, old: str, new: str) -> str:
     return body.replace(old, new)
 
 
-_UPSERT_FN = _replaced(_PREVIOUS_UPSERT_FN, _ANCHOR, _ANCHOR + _DELETING_GUARD)
+_UPSERT_FN = _replaced(
+    _replaced(_PREVIOUS_UPSERT_FN, _NULL_COMMENT, _RAISE_COMMENT),
+    _TOMBSTONE_ANCHOR,
+    _TOMBSTONE_RAISE + _DELETING_GUARD,
+)
 
 
 def _if_role(role: str, body: str) -> str:
