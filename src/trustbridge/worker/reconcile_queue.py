@@ -41,7 +41,7 @@ CLAIMS_HASH = "tb:reconcile:claims"
 _SEP = "|"
 
 # KEYS: pending set, inflight set, claims hash. ARGV: see each script. The token is the text after
-# the last `|` of a claim entry (`<epoch>|<token>`).
+# the first `|` of a claim entry (`<epoch>|<token>`).
 _CLAIM = """
 if redis.call('SMOVE', KEYS[1], KEYS[2], ARGV[1]) == 1 then
     redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
@@ -52,16 +52,23 @@ return 0
 # ARGV: member, token
 _ACK = """
 local v = redis.call('HGET', KEYS[3], ARGV[1])
-if not v or string.match(v, '|(.*)$') ~= ARGV[2] then return 0 end
+if not v or string.match(v, '^[^|]*|(.*)$') ~= ARGV[2] then return 0 end
 redis.call('HDEL', KEYS[3], ARGV[1])
 return redis.call('SREM', KEYS[2], ARGV[1])
 """
 # ARGV: member, token
 _RELEASE = """
 local v = redis.call('HGET', KEYS[3], ARGV[1])
-if not v or string.match(v, '|(.*)$') ~= ARGV[2] then return 0 end
+if not v or string.match(v, '^[^|]*|(.*)$') ~= ARGV[2] then return 0 end
 redis.call('HDEL', KEYS[3], ARGV[1])
 return redis.call('SMOVE', KEYS[2], KEYS[1], ARGV[1])
+"""
+# ARGV: member, a stamp for a member that is inflight with no claim entry
+_STAMP = """
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then
+    return redis.call('HSETNX', KEYS[3], ARGV[1], ARGV[2])
+end
+return 0
 """
 # ARGV: member, the claim entry as listed
 _RECLAIM = """
@@ -114,17 +121,22 @@ class ReconcileQueue:
     async def claim(self, now: datetime, limit: int) -> list[Claim]:
         """Move up to `limit` requests to the inflight set and stamp each claim.
 
-        A member that is not a UUID is removed from the set and logged (nothing the api writes).
+        A member that is not a UUID is removed from the set and logged; one in a non-canonical
+        spelling is re-queued as the canonical text (the api writes only that).
         """
         claimed: list[Claim] = []
         for raw in await self._r.srandmember(RECONCILE_SET, limit) or []:
             member = _text(raw)
             try:
                 tenant_id = UUID(member)
-                if str(tenant_id) != member:
-                    raise ValueError(member)  # a non-canonical spelling would key the claim wrongly
             except ValueError:
                 logger.warning("dropped a malformed reconcile request")
+                await self._r.srem(RECONCILE_SET, member)
+                continue
+            if str(tenant_id) != member:
+                # a valid id in another spelling (upper case, braces) would key its claim wrongly:
+                # re-queue it canonically, the add first so the request is never in neither
+                await self._r.sadd(RECONCILE_SET, str(tenant_id))
                 await self._r.srem(RECONCILE_SET, member)
                 continue
             token = uuid4().hex
@@ -156,7 +168,7 @@ class ReconcileQueue:
             parsed = None if value is None else _parse(value)
             if parsed is None or value is None:
                 # no (or an unreadable) claim entry: stamp it once, reclaim a TTL from now
-                await self._r.hsetnx(CLAIMS_HASH, member, _stamp(now, "unclaimed"))
+                await self._run(_STAMP, member, _stamp(now, "unclaimed"))
                 continue
             if now.timestamp() - parsed[0] < ttl_seconds:
                 continue

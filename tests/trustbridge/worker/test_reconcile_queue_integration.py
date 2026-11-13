@@ -66,3 +66,24 @@ async def test_claim_ack_release_and_reclaim_run_as_scripts(
     assert await queue.reclaim(NOW + timedelta(seconds=TTL + 1), TTL) == 1
     assert await queue.ack(again) is False  # the slow holder finds out
     assert (await queue.pending(), await queue.inflight()) == (1, 0)
+
+
+async def test_a_stale_token_changes_nothing_and_a_non_canonical_member_is_requeued(
+    valkey: tuple[Redis, dict[str, str]],
+) -> None:
+    """The token compare of ack and release, and canonical re-queueing."""
+    client, names = valkey
+    queue = ReconcileQueue(client)
+    tenant = uuid4()
+    await client.sadd(names["RECONCILE_SET"], str(tenant).upper())
+    assert await queue.claim(NOW, 10) == []  # re-queued under its canonical text
+    assert await client.smembers(names["RECONCILE_SET"]) == {str(tenant)}
+    (stale,) = await queue.claim(NOW, 10)
+    later = NOW + timedelta(seconds=TTL + 1)
+    assert await queue.reclaim(later, TTL) == 1
+    (fresh,) = await queue.claim(later, 10)
+    assert await queue.ack(stale) is False
+    assert await queue.release(stale) is False
+    assert await client.smembers(names["INFLIGHT_SET"]) == {str(tenant)}
+    assert await queue.ack(fresh) is True
+    assert await client.hlen(names["CLAIMS_HASH"]) == 0

@@ -413,16 +413,32 @@ async def test_a_stale_holder_cannot_undo_a_newer_claim() -> None:
     assert fresh.token in valkey.hashes[CLAIMS_HASH][str(tenant)]
 
 
-async def test_a_non_canonical_member_is_dropped_not_keyed_wrongly(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_a_non_canonical_member_is_requeued_canonically() -> None:
     """`UUID()` accepts upper case; a claim stored under it could never be acknowledged."""
     valkey, queue, clock = _queue()
-    valkey.sets[RECONCILE_SET] = {str(uuid4()).upper()}
-    with caplog.at_level(logging.WARNING):
-        assert await queue.claim(clock(), 5) == []
-    assert valkey.sets == {}
-    assert "malformed reconcile request" in caplog.text
+    tenant = uuid4()
+    valkey.sets[RECONCILE_SET] = {str(tenant).upper()}
+    assert await queue.claim(clock(), 5) == []
+    assert valkey.sets == {RECONCILE_SET: {str(tenant)}}
+    (claim,) = await queue.claim(clock(), 5)
+    assert await queue.ack(claim) is True
+
+
+async def test_a_member_acked_before_it_is_stamped_leaves_no_entry() -> None:
+    """The stamp of an unstamped member is made only while the member is still inflight."""
+    valkey, queue, clock = _queue()
+    tenant = uuid4()
+    valkey.sets[INFLIGHT_SET] = {str(tenant)}
+    real_smembers = valkey.smembers
+
+    async def acked_after_listing(name: str) -> set[str]:
+        listed = await real_smembers(name)
+        valkey.sets.pop(INFLIGHT_SET, None)
+        return listed
+
+    valkey.smembers = acked_after_listing  # type: ignore[method-assign]
+    assert await queue.reclaim(clock(), TTL) == 0
+    assert valkey.hashes == {}
 
 
 async def test_claims_not_started_within_half_the_ttl_go_back_to_pending() -> None:
