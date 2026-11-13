@@ -12,10 +12,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters.store import OperationKind
 from trustbridge.tenancy.context import tenant_context
+from trustbridge.tenancy.standing import TenantStanding
 
 _DISABLED_BY_INSTALLATION = text(
     "SELECT admin_disabled_at IS NOT NULL "
     "FROM tb_get_tenant(tb_resolve_tenant(CAST(:host AS text), CAST(:installation AS bigint)))"
+)
+# One statement, so the tenant row and the deletions are read from one snapshot (`tb_get_tenant` is
+# STABLE). A `done` deletion of the key, or a `database`-step one whose tenant row is already gone
+# (the same rule as `tb_upsert_tenant` and `SqlTenants`), is a tombstone. The outer `one` row makes
+# an unknown tenant come back as a row of nulls, so there is always exactly one row.
+_STANDING = text(
+    "SELECT t.id, COALESCE(t.admin_disabled_at IS NOT NULL, false), COALESCE(t.deleting, false), "
+    "EXISTS (SELECT 1 FROM tenant_deletions d "
+    "WHERE d.host = CAST(:host AS text) AND d.installation_id = CAST(:installation AS bigint) "
+    "AND (d.state = 'done' OR (d.state = 'database' AND t.id IS NULL))) "
+    "FROM (SELECT 1) one LEFT JOIN LATERAL "
+    "tb_get_tenant(tb_resolve_tenant(CAST(:host AS text), CAST(:installation AS bigint))) t ON true"
 )
 _DISABLED_BY_ID = text("SELECT admin_disabled_at IS NOT NULL FROM tb_get_tenant(CAST(:id AS uuid))")
 
@@ -43,6 +56,21 @@ class SqlTenantGate:
         return await self._flag(
             _DISABLED_BY_INSTALLATION, {"host": host, "installation": installation_id}
         )
+
+    async def standing(self, host: str, installation_id: int) -> TenantStanding:
+        """The tenant of `(host, installation_id)`: its id, disable flag and deletion refusal.
+
+        One statement in one transaction, in no tenant context. A key with a finished deletion
+        has no tenant row, so its refusal is `tombstone`; a tenant with a non-terminal deletion
+        is `deleting`. A tombstone is checked first, as `SqlTenants` does, and carries no id.
+        """
+        params = {"host": host, "installation": installation_id}
+        with tenant_context(None):
+            async with self._sf() as session, session.begin():
+                row = (await session.execute(_STANDING, params)).one()
+        if row[3]:
+            return TenantStanding(refusal="tombstone")
+        return TenantStanding(row[0], bool(row[1]), "deleting" if row[2] else None)
 
     async def allows(self, tenant_id: UUID, kind: OperationKind | None) -> bool:
         """True when a new adapter operation of `kind` may start for the tenant."""

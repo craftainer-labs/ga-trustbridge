@@ -68,7 +68,7 @@ same signatures, `tb_list_tenants` and `tb_get_tenant` (`deleting` is now real),
 `tb_set_tenant_disabled` (`enable` is refused with SQLSTATE 55000 while a non-terminal deletion
 exists; the state is read after the tenant row lock) and `tb_upsert_tenant` (a `deleted` tenant is
 returned unchanged; a `done` deletion of `(host, installation_id)`, or a `database`-step deletion
-whose tenant row is already gone, is a tombstone, so the function returns NULL and creates nothing).
+whose tenant row is already gone, is a tombstone, so the function creates nothing; it returned NULL here, and `3b8d6f2a4c17` raises instead).
 `SqlTenants` and `MemoryTenants` raise `TenantDeletedError` (reason `tombstone`, `deleting` or
 `deleted`) instead, and the installation handler drops the event; a new installation id is
 unaffected. `tb_upsert_tenant`, `tb_delete_tenant` and `SqlTenants.upsert_installation` first take
@@ -83,6 +83,26 @@ delete and rolls it back if a row committed in between, and the engine must stop
 deleting tenant first. The downgrade is refused while any `tenant_deletions` row or `deleted`
 delivery exists. N-1 safe: only additions and same-signature function bodies; the previous release
 never reads or writes the new column, status or table.
+
+Migration `3b8d6f2a4c17` (NG6h-2) replaces `tb_upsert_tenant` once more (same signature, expand-only):
+it never returns NULL any more. A tombstone raises SQLSTATE `TB001` (`tenant tombstoned`) and a
+tenant with a non-terminal deletion raises `TB002` (`tenant deletion in progress`), writing nothing:
+the DB-level twins of the `tombstone` and `deleting` reasons. `TB` is a user-defined SQLSTATE class,
+so the codes cannot collide with PostgreSQL's; a `deleted` tenant row still returns its id
+unchanged. `SqlTenants.deleted_error(host, installation_id, error)` maps a `DBAPIError` carrying one
+of them to `TenantDeletedError` (otherwise None). `tb_upsert_tenant` has no application caller yet
+(`SqlTenants.upsert_installation` does the same upsert under the same advisory lock in SQLAlchemy);
+its callers are the integration tests (`test_deletion_db_integration.py`, `test_rls_integration.py`,
+`test_reads_integration.py`) and any operator running it by hand, and each of them handles the
+errors. `tb_set_tenant_disabled` needs no change (a deletion needs a disabled tenant, enable is
+refused while one is open, and a repeated disable keeps the first values). The downgrade restores the
+`9c2e5a7f1d84` body (NULL for a tombstone).
+
+`gate.py`'s `SqlTenantGate.standing(host, installation_id)` returns `TenantStanding` (`standing.py`, kept here so `tenancy` never imports the worker: tenant id,
+disable flag, and a `deleting` or `tombstone` refusal) from `tb_get_tenant` and `tenant_deletions` in
+one statement (`tb_get_tenant` is `STABLE`, so it reads the statement's snapshot and the three
+answers agree). The tombstone rule exists in three places (`tb_upsert_tenant`, `SqlTenants._standing`
+and `gate.py`); an integration test asserts they agree for every deletion state.
 
 ## Grants
 

@@ -25,8 +25,9 @@ from uuid import UUID, uuid4
 
 from pydantic import SecretStr
 from redis.asyncio import Redis
-from sqlalchemy import and_, case, delete, or_, select, text, update
+from sqlalchemy import Row, and_, case, delete, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters.interface import AdapterConfig, GitHubHost, IssuedSecret, Tenant
@@ -39,6 +40,8 @@ PARKED_PREFIX = "parked/"
 PRIVILEGED_KEY = "privileged_credential"
 RECONCILE_SET = "tb:reconcile"
 HostLookup = Callable[[str], GitHubHost]
+# The SQLSTATEs `tb_upsert_tenant` raises (migration 3b8d6f2a4c17) and the reason each maps to.
+_UPSERT_REFUSALS = {"TB001": "tombstone", "TB002": "deleting"}
 
 
 class UnknownTenantError(LookupError):
@@ -103,6 +106,33 @@ class SqlTenants:
                 )
             },
         ).returning(TenantRow.id)
+        async with self._sf() as session, session.begin():
+            current = await self._locked_standing(session, host, installation_id)
+            if current is not None and current.state == "deleted":
+                raise TenantDeletedError(host, installation_id, "deleted")
+            tenant_id: UUID = (await session.execute(upsert)).scalar_one()
+        return tenant_id
+
+    @staticmethod
+    def deleted_error(
+        host: str, installation_id: int, error: DBAPIError
+    ) -> TenantDeletedError | None:
+        """The `TenantDeletedError` for a `tb_upsert_tenant` refusal, or None for any other error.
+
+        The function raises SQLSTATE `TB001` for a tombstone and `TB002` for a tenant with a
+        deletion in progress (migration `3b8d6f2a4c17`).
+        """
+        reason = _UPSERT_REFUSALS.get(getattr(error.orig, "sqlstate", None) or "")
+        return None if reason is None else TenantDeletedError(host, installation_id, reason)
+
+    @staticmethod
+    async def _standing(session: AsyncSession, host: str, installation_id: int) -> Row[Any] | None:
+        """The tenant row's `(id, state)`, or None; a tombstoned or deleting key is refused.
+
+        Raises `TenantDeletedError` (`tombstone`: a `done` deletion of the key, or a
+        `database`-step one whose tenant row is gone; `deleting`: a non-terminal deletion). A
+        tenant whose state is `deleted` is returned, and each caller decides what to do with it.
+        """
         tombstone = select(TenantDeletion.id).where(
             TenantDeletion.host == host,
             TenantDeletion.installation_id == installation_id,
@@ -117,6 +147,7 @@ class SqlTenants:
             ),
         )
         existing = select(
+            TenantRow.id,
             TenantRow.state,
             select(TenantDeletion.id)
             .where(
@@ -126,20 +157,27 @@ class SqlTenants:
             .exists()
             .label("deleting"),
         ).where(TenantRow.host == host, TenantRow.installation_id == installation_id)
-        async with self._sf() as session, session.begin():
-            await session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                {"key": f"tb_tenant:{host}:{installation_id}"},
-            )
-            if (await session.execute(tombstone.limit(1))).first() is not None:
-                raise TenantDeletedError(host, installation_id, "tombstone")
-            current = (await session.execute(existing)).first()
-            if current is not None and current.deleting:
-                raise TenantDeletedError(host, installation_id, "deleting")
-            if current is not None and current.state == "deleted":
-                raise TenantDeletedError(host, installation_id, "deleted")
-            tenant_id: UUID = (await session.execute(upsert)).scalar_one()
-        return tenant_id
+        if (await session.execute(tombstone.limit(1))).first() is not None:
+            raise TenantDeletedError(host, installation_id, "tombstone")
+        current = (await session.execute(existing)).first()
+        if current is not None and current.deleting:
+            raise TenantDeletedError(host, installation_id, "deleting")
+        return current
+
+    async def _locked_standing(
+        self, session: AsyncSession, host: str, installation_id: int
+    ) -> Row[Any] | None:
+        """Take the installation's advisory lock, then `_standing`.
+
+        The lock is the one `tb_upsert_tenant`, `tb_delete_tenant` and `tb_request_tenant_deletion`
+        take first (`tb_tenant:<host>:<installation_id>`, hashed with `hashtextextended`, held to
+        the end of the transaction), so a concurrent delete cannot slip between check and write.
+        """
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"tb_tenant:{host}:{installation_id}"},
+        )
+        return await self._standing(session, host, installation_id)
 
     async def tenant_id_for(self, host: str, installation_id: int) -> UUID | None:
         """The tenant of `(host, installation_id)`, if known."""
@@ -149,18 +187,44 @@ class SqlTenants:
         async with self._sf() as session:
             return (await session.execute(stmt)).scalar_one_or_none()
 
+    async def active_tenant_id_for(self, host: str, installation_id: int) -> UUID | None:
+        """The tenant of `(host, installation_id)`, if known and not refused.
+
+        Raises `TenantDeletedError` for a tenant that is deleted, being deleted or tombstoned
+        (the reasons of `upsert_installation`), so a caller never writes for or schedules it.
+        """
+        async with self._sf() as session:
+            current = await self._standing(session, host, installation_id)
+        if current is None:
+            return None
+        if current.state == "deleted":
+            raise TenantDeletedError(host, installation_id, "deleted")
+        tenant_id: UUID = current.id
+        return tenant_id
+
     async def set_installation_state(
         self, host: str, installation_id: int, state: str
     ) -> UUID | None:
-        """Set the installation state; the tenant id, or None if unknown."""
-        stmt = (
-            update(TenantRow)
-            .where(TenantRow.host == host, TenantRow.installation_id == installation_id)
-            .values(state=state)
-            .returning(TenantRow.id)
-        )
+        """Set the installation state; the tenant id, or None if unknown.
+
+        Under the installation's advisory lock (as `upsert_installation`), and refused with
+        `TenantDeletedError` for a tombstoned or deleting key and for a `deleted` tenant, which
+        stays as it is. Setting `deleted` on a tenant that is already `deleted` changes nothing
+        and returns its id, so a retried delivery whose audit write failed is not refused.
+        """
         async with self._sf() as session, session.begin():
-            return (await session.execute(stmt)).scalar_one_or_none()
+            current = await self._locked_standing(session, host, installation_id)
+            if current is None:
+                return None
+            tenant_id: UUID = current.id
+            if current.state == "deleted":
+                if state != "deleted":
+                    raise TenantDeletedError(host, installation_id, "deleted")
+                return tenant_id
+            await session.execute(
+                update(TenantRow).where(TenantRow.id == tenant_id).values(state=state)
+            )
+        return tenant_id
 
     async def apply_repository_changes(
         self, tenant_id: UUID, added: Sequence[tuple[int, str]], removed: Sequence[int]
@@ -263,11 +327,34 @@ class MemoryTenants:
     async def set_installation_state(
         self, host: str, installation_id: int, state: str
     ) -> UUID | None:
-        """Set the installation state; the tenant id, or None if unknown."""
-        tenant_id = self._by_key.get((host, installation_id))
-        if tenant_id is not None:
-            self._rows[tenant_id]["state"] = state
+        """Set the installation state; the tenant id, or None if unknown.
+
+        Mirrors `SqlTenants`: a tombstoned or deleting key, and a `deleted` tenant given another
+        state, raise `TenantDeletedError`; `deleted` on a `deleted` tenant is a no-op.
+        """
+        tenant_id = self._standing(host, installation_id)
+        if tenant_id is None:
+            return None
+        if self._rows[tenant_id].get("state") == "deleted" and state != "deleted":
+            raise TenantDeletedError(host, installation_id, "deleted")
+        self._rows[tenant_id]["state"] = state
         return tenant_id
+
+    def _standing(self, host: str, installation_id: int) -> UUID | None:
+        """The tenant of the key if known; a tombstoned or deleting key raises."""
+        key = (host, installation_id)
+        if key in self.tombstones:
+            raise TenantDeletedError(host, installation_id, "tombstone")
+        if key in self.deleting:
+            raise TenantDeletedError(host, installation_id, "deleting")
+        return self._by_key.get(key)
+
+    async def active_tenant_id_for(self, host: str, installation_id: int) -> UUID | None:
+        """The tenant of the key if known; raises `TenantDeletedError` as `SqlTenants` does."""
+        known = self._standing(host, installation_id)
+        if known is not None and self._rows[known].get("state") == "deleted":
+            raise TenantDeletedError(host, installation_id, "deleted")
+        return known
 
     async def apply_repository_changes(
         self, tenant_id: UUID, added: Sequence[tuple[int, str]], removed: Sequence[int]

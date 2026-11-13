@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from redis.exceptions import ResponseError
@@ -271,3 +272,19 @@ async def test_run_process_opens_and_closes_its_own_valkey_client(
     )
     assert code == 0
     assert closed == [True]
+
+
+async def test_the_memory_store_records_a_tenant_on_a_pending_row_only() -> None:
+    """Mirrors `PgDeliveryStore.set_tenant`: an unknown or settled row is left alone."""
+    store = InMemoryDeliveryStore()
+    now = datetime.now(UTC)
+    new = NewDelivery("d1", "h", "push", {}, b"a", now)
+    first, second = uuid4(), uuid4()
+    await store.set_tenant(new.key, first)  # unknown: nothing happens
+    assert new.key not in store.rows
+    assert await store.insert(new)
+    await store.set_tenant(new.key, first)
+    assert store.rows[new.key].tenant_id == first
+    assert await store.mark_processed(new.key, now, attempts=0)
+    await store.set_tenant(new.key, second)
+    assert store.rows[new.key].tenant_id == first

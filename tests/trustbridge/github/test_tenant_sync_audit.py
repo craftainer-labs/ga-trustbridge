@@ -1,6 +1,7 @@
 """Installation syncs report the state they applied to the audit hook (ADR 0032 `tenant.sync`)."""
 
 from collections.abc import Sequence
+from typing import NamedTuple
 from uuid import UUID
 
 import pytest
@@ -153,3 +154,104 @@ async def test_a_sender_id_outside_the_audit_range_records_no_sender() -> None:
         await handlers.on_installation(_ctx("created", {"sender": {"id": bad}}))
     await handlers.on_installation(_ctx("created", {"sender": {"id": 2**63 - 1}}))
     assert [c["sender"] for c in audit.calls] == [None, None, None, 2**63 - 1]
+
+
+class Counting(Scheduler):
+    """A scheduler that remembers what it was asked to schedule."""
+
+    def __init__(self) -> None:
+        """Start empty."""
+        self.scheduled: list[UUID] = []
+
+    async def schedule(self, tenant_id: UUID) -> None:
+        """Remember the request."""
+        self.scheduled.append(tenant_id)
+
+
+class Refused(NamedTuple):
+    """A tenant that was active and then became deleted, deleting or tombstoned."""
+
+    tenants: MemoryTenants
+    audit: Audit
+    scheduler: Counting
+    lookup: ScriptedLookup
+    handlers: InstallationHandlers
+    dropped: list[tuple[str, int]]
+
+
+async def _refused(reason: str) -> Refused:
+    """An active tenant with one repository that then becomes `reason`."""
+    tenants, lookup, scheduler = MemoryTenants(_projection), ScriptedLookup(), Counting()
+    audit = Audit(tenants)
+    dropped: list[tuple[str, int]] = []
+    handlers = InstallationHandlers(
+        tenants,
+        scheduler,
+        lookup,
+        on_installation_changed=lambda host, inst: dropped.append((host, inst)),
+        audit=audit,
+    )
+    repos: Sequence[dict[str, object]] = [{"id": 11, "full_name": "acme/api"}]
+    await handlers.on_installation(_ctx("created", {"repositories": repos}))
+    if reason == "deleted":
+        await tenants.set_installation_state("github.com", 4242, "deleted")
+    else:
+        getattr(tenants, "tombstones" if reason == "tombstone" else "deleting").add(
+            ("github.com", 4242)
+        )
+    audit.calls.clear()
+    scheduler.scheduled.clear()
+    dropped.clear()
+    return Refused(tenants, audit, scheduler, lookup, handlers, dropped)
+
+
+@pytest.mark.parametrize("reason", ["tombstone", "deleting", "deleted"])
+async def test_repository_events_for_a_refused_tenant_change_and_schedule_nothing(
+    reason: str,
+) -> None:
+    """ADR 0034: no repository write and no reconcile for a deleted, deleting or tombstoned one."""
+    tenants, _audit, scheduler, _lookup, handlers, dropped = await _refused(reason)
+    tenant = await tenants.tenant_id_for("github.com", 4242)
+    assert tenant is not None
+    known = dict(tenants.repositories[tenant])
+    payload: dict[str, object] = {
+        "installation": INSTALLATION,
+        "repositories_added": [{"id": 12, "full_name": "acme/new"}],
+        "repositories_removed": [{"id": 11}],
+        "repository": {"id": 11, "full_name": "acme/renamed"},
+    }
+    await handlers.on_installation_repositories(
+        EventContext("github.com", "d2", "installation_repositories", "added", payload)
+    )
+    for action in ("renamed", "deleted", "archived"):
+        await handlers.on_repository(
+            EventContext("github.com", "d3", "repository", action, payload)
+        )
+    await handlers.on_installation(_ctx("new_permissions_accepted"))
+    assert tenants.repositories[tenant] == known
+    assert scheduler.scheduled == []
+    assert dropped == [("github.com", 4242)] * 5  # one per event, the permissions one included
+
+
+@pytest.mark.parametrize("reason", ["tombstone", "deleting"])
+async def test_a_gone_installation_of_a_refused_tenant_is_dropped_without_an_event(
+    reason: str,
+) -> None:
+    """The state setter refuses it: no error to retry, no audit event, the tokens are dropped."""
+    tenants, audit, _scheduler, lookup, handlers, dropped = await _refused(reason)
+    lookup.gone = True
+    await handlers.on_installation(_ctx("deleted"))
+    assert audit.calls == []
+    assert dropped == [("github.com", 4242)]
+    tenant = await tenants.tenant_id_for("github.com", 4242)
+    assert tenant is not None
+    assert tenants._rows[tenant]["state"] == "active"
+
+
+async def test_a_repeated_gone_event_for_a_deleted_installation_is_recorded_again() -> None:
+    """`deleted` on `deleted` is not refused, so a retry after a failed audit write still ends."""
+    tenants, audit, _scheduler, lookup, handlers, _dropped = await _refused("deleted")
+    lookup.gone = True
+    await handlers.on_installation(_ctx("deleted"))
+    tenant = await tenants.tenant_id_for("github.com", 4242)
+    assert [(c["tenant"], c["state"]) for c in audit.calls] == [(tenant, "deleted")]

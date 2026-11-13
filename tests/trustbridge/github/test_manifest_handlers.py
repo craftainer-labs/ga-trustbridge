@@ -342,6 +342,10 @@ class Store:
         """Look the tenant up."""
         return self.tenants.get((host, installation_id))
 
+    async def active_tenant_id_for(self, host: str, installation_id: int) -> UUID | None:
+        """Look the tenant up."""
+        return self.tenants.get((host, installation_id))
+
     async def set_installation_state(
         self, host: str, installation_id: int, state: str
     ) -> UUID | None:

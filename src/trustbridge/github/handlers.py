@@ -125,8 +125,12 @@ class InstallationHandlers:
             await self._sync(ctx, installation_id, login, account_id)
             return
         if action == "new_permissions_accepted":
+            try:
+                found = await self._store.active_tenant_id_for(ctx.host, installation_id)
+            except TenantDeletedError as refused:
+                self._drop(ctx, installation_id, refused)  # also drops the cached tokens
+                return
             self._notify(ctx.host, installation_id)
-            found = await self._store.tenant_id_for(ctx.host, installation_id)
             if found is not None:
                 await self._scheduler.schedule(found)
             return
@@ -136,7 +140,13 @@ class InstallationHandlers:
         """Apply the installation's state as GitHub reports it now, whatever the event was."""
         info = await self._lookup.fetch(ctx.host, installation_id)
         if info is None:  # gone: never create or re-activate a tenant for it
-            gone = await self._store.set_installation_state(ctx.host, installation_id, "deleted")
+            try:
+                gone = await self._store.set_installation_state(
+                    ctx.host, installation_id, "deleted"
+                )
+            except TenantDeletedError as refused:
+                self._drop(ctx, installation_id, refused)
+                return
             self._notify(ctx.host, installation_id)  # before the audit write: never gated on it
             if gone is not None:
                 await self._record(ctx, gone, "deleted")
@@ -150,14 +160,7 @@ class InstallationHandlers:
                 suspended=info.suspended,
             )
         except TenantDeletedError as refused:
-            # Deleted, being deleted or tombstoned (ADR 0034): acknowledge the event, no retry.
-            _log.info(
-                "dropping installation event for %s installation %s (%s)",
-                ctx.host,
-                installation_id,
-                refused.reason,
-            )
-            self._notify(ctx.host, installation_id)  # cached tokens must not outlive a suspend
+            self._drop(ctx, installation_id, refused)
             return
         if ctx.action == "created":
             await self._store.apply_repository_changes(
@@ -190,6 +193,24 @@ class InstallationHandlers:
             sender_id=sender_id,
         )
 
+    def _drop(self, ctx: EventContext, installation_id: int, refused: TenantDeletedError) -> None:
+        """Acknowledge an event for a deleted, deleting or tombstoned tenant without a retry.
+
+        ADR 0034: nothing is created, written or scheduled for it. For a tombstone the only
+        message to the installation's admins is the deletion response and record, which say the
+        App must be uninstalled (a reinstall gets a new installation id and works); the worker
+        has no tenant to answer through, so it logs the outcome. The cached installation tokens
+        are dropped, as a suspend or removal would.
+        """
+        _log.info(
+            "dropping %s event for %s installation %s (%s)",
+            ctx.event,
+            ctx.host,
+            installation_id,
+            refused.reason,
+        )
+        self._notify(ctx.host, installation_id)
+
     def _notify(self, host: str, installation_id: int) -> None:
         if self._changed is not None:
             self._changed(host, installation_id)
@@ -197,7 +218,11 @@ class InstallationHandlers:
     async def on_installation_repositories(self, ctx: EventContext) -> None:
         """Handle `installation_repositories`: repositories added to or removed from the install."""
         installation_id, _login, _account = self._installation(ctx.payload)
-        tenant_id = await self._store.tenant_id_for(ctx.host, installation_id)
+        try:
+            tenant_id = await self._store.active_tenant_id_for(ctx.host, installation_id)
+        except TenantDeletedError as refused:
+            self._drop(ctx, installation_id, refused)
+            return
         if tenant_id is None:
             return
         added = self._repos(ctx.payload.get("repositories_added"))
@@ -210,7 +235,12 @@ class InstallationHandlers:
         installation = ctx.payload.get("installation")
         if not installation:
             return
-        tenant_id = await self._store.tenant_id_for(ctx.host, int(installation["id"]))
+        installation_id = int(installation["id"])
+        try:
+            tenant_id = await self._store.active_tenant_id_for(ctx.host, installation_id)
+        except TenantDeletedError as refused:
+            self._drop(ctx, installation_id, refused)
+            return
         if tenant_id is None:
             return
         repo = ctx.payload["repository"]

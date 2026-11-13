@@ -27,7 +27,9 @@ The GitHub core ([ADR 0028](../../../docs/adrs/0028-trustbridge-architecture-and
   lifecycle handlers. GitHub does not order deliveries, so `created`/`deleted`/`suspend`/
   `unsuspend` are triggers: `installations.py` (`AppInstallationLookup`) re-reads the
   installation with the App JWT (404 = gone) and that state is applied. `webhook_secrets.py` caches webhook secrets (0030 invariant 11) and
-  re-reads one after a signature mismatch (rotation).
+  re-reads one after a signature mismatch (rotation). An event for a tenant that is deleted,
+  being deleted or tombstoned (ADR 0034; `TenantDeletedError` from the store) is acknowledged and
+  dropped with an info log: no repository write, no reconcile, no audit event, cached tokens dropped.
 - `hook_deliveries.py` — `GET /app/hook/deliveries` (cursor pagination) and redelivery, for the
   reconciler.
 - `runtime.py` — `build_host_runtime(settings, deps)`: signers, `HostMonitor`, tokens, gateway,

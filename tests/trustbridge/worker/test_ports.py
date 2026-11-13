@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import SecretStr
+from sqlalchemy.exc import DBAPIError
 
 from tests.trustbridge.fakes import FakeRedis
 from tests.trustbridge.helpers import as_redis, host
@@ -17,6 +18,7 @@ from trustbridge.worker.ports import (
     MemoryTenants,
     ParkedValues,
     ReconcileRequests,
+    SqlTenants,
     UnknownTenantError,
 )
 from trustbridge.worker.secrets import MemorySecrets, SecretUnavailable
@@ -78,6 +80,38 @@ async def test_an_installation_being_deleted_is_refused_and_others_are_not_in_me
     assert (await tenants.get_tenant(tenant_id)).org == "acme"
     assert tenants._rows[tenant_id]["state"] == "active"
     assert await tenants.upsert_installation("github.com", 8, "acme", 1) is not None
+
+
+async def test_the_state_setter_and_the_active_lookup_refuse_the_same_keys_in_memory() -> None:
+    """Mirrors `SqlTenants`: tombstoned, deleting and `deleted` keys raise, others do not."""
+    tenants = _tenants()
+    tenant_id = await tenants.upsert_installation("github.com", 7, "acme", 1)
+    assert await tenants.active_tenant_id_for("github.com", 7) == tenant_id
+    assert await tenants.active_tenant_id_for("github.com", 8) is None
+    tenants.deleting.add(("github.com", 7))
+    for call in (
+        tenants.active_tenant_id_for("github.com", 7),
+        tenants.set_installation_state("github.com", 7, "suspended"),
+    ):
+        with pytest.raises(TenantDeletedError) as deleting:
+            await call
+        assert deleting.value.reason == "deleting"
+    tenants.deleting.clear()
+    tenants.tombstones.add(("github.com", 7))
+    with pytest.raises(TenantDeletedError) as tombstone:
+        await tenants.set_installation_state("github.com", 7, "deleted")
+    assert tombstone.value.reason == "tombstone"
+    assert tenants._rows[tenant_id]["state"] == "active"
+    tenants.tombstones.clear()
+    assert await tenants.set_installation_state("github.com", 7, "deleted") == tenant_id
+    # `deleted` on `deleted` is a no-op that still answers; any other state is refused
+    assert await tenants.set_installation_state("github.com", 7, "deleted") == tenant_id
+    with pytest.raises(TenantDeletedError) as gone:
+        await tenants.set_installation_state("github.com", 7, "active")
+    assert gone.value.reason == "deleted"
+    with pytest.raises(TenantDeletedError):
+        await tenants.active_tenant_id_for("github.com", 7)
+    assert tenants._rows[tenant_id]["state"] == "deleted"
 
 
 async def test_repository_changes_are_applied_renamed_and_removed_in_memory() -> None:
@@ -183,3 +217,26 @@ async def test_connection_data_concurrent_puts_do_not_lose_updates() -> None:
     config = await connections.config_for(tenant, "jfrog")
     assert sorted(config.connection) == [f"k{i}" for i in range(5)]
     assert len(connections._locks) == 0
+
+
+class _OrigError(Exception):
+    def __init__(self, sqlstate: str | None) -> None:
+        super().__init__("db error")
+        self.sqlstate = sqlstate
+
+
+@pytest.mark.parametrize(
+    ("sqlstate", "reason"),
+    [("TB001", "tombstone"), ("TB002", "deleting"), ("22023", None), (None, None)],
+)
+def test_the_upsert_refusals_map_to_tenant_deleted_errors(
+    sqlstate: str | None, reason: str | None
+) -> None:
+    """`tb_upsert_tenant` raises TB001 (tombstone) and TB002 (deleting); others are not ours."""
+    error = DBAPIError("SELECT tb_upsert_tenant(...)", None, _OrigError(sqlstate))
+    mapped = SqlTenants.deleted_error("github.com", 7, error)
+    if reason is None:
+        assert mapped is None
+    else:
+        assert mapped is not None
+        assert (mapped.host, mapped.installation_id, mapped.reason) == ("github.com", 7, reason)

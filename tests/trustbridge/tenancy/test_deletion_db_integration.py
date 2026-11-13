@@ -28,10 +28,16 @@ from tests.trustbridge.tenancy.test_rls_integration import (
     Db,
     _provision,
 )
+from trustbridge.adapters.interface import GitHubHost
+from trustbridge.github.ports import TenantDeletedError
+from trustbridge.tenancy.gate import SqlTenantGate
+from trustbridge.tenancy.standing import TenantStanding
+from trustbridge.worker.ports import SqlTenants
 
 pytestmark = pytest.mark.integration
 
 MIGRATION = "9c2e5a7f1d84"
+DELETING_GUARD = "3b8d6f2a4c17"  # NG6h-2: tb_upsert_tenant refuses a deleting tenant
 PREVIOUS = "b7d3f5a19c68"
 NEW_FUNCTIONS = (
     "tb_get_tenant(uuid)",
@@ -111,9 +117,23 @@ async def _admin(db: Db, sql: str, params: dict[str, Any] | None = None) -> None
         await conn.execute(text(sql), params or {})
 
 
+async def _admin_rows(db: Db, sql: str, params: dict[str, Any]) -> list[Row[Any]]:
+    async with db.admin.begin() as conn:
+        return list((await conn.execute(text(sql), params)).all())
+
+
 async def _admin_scalar(db: Db, sql: str, params: dict[str, Any] | None = None) -> Any:  # noqa: ANN401
     async with db.admin.begin() as conn:
         return (await conn.execute(text(sql), params or {})).scalar_one()
+
+
+async def _upsert_refusal(db: Db, sql: str, params: dict[str, Any]) -> str:
+    """Run a `tb_upsert_tenant` call that must be refused; the `TenantDeletedError` reason."""
+    with pytest.raises(DBAPIError) as caught:
+        await _app_rows(db, sql, params)
+    mapped = SqlTenants.deleted_error(params["h"], params["i"], caught.value)
+    assert mapped is not None
+    return mapped.reason
 
 
 async def _request(db: Db, tenant: Tenant, **kwargs: Any) -> Row[Any]:  # noqa: ANN401
@@ -420,15 +440,22 @@ async def test_a_delete_and_an_upsert_never_recreate_the_tenant(db: Db) -> None:
         racing = asyncio.create_task(_app_rows(db, upsert, args))
         await asyncio.sleep(0.5)
         assert not racing.done()  # without the lock it would have found the row and returned
-    assert (await racing)[0][0] is None
+    with pytest.raises(DBAPIError) as refused:
+        await racing
+    tombstone = SqlTenants.deleted_error(tenant.host, tenant.installation, refused.value)
+    assert tombstone is not None
+    assert tombstone.reason == "tombstone"
     count = "SELECT count(*) FROM tenants WHERE host = :h AND installation_id = :i"
     assert await _admin_scalar(db, count, args) == 0
-    # the reverse order: an upsert holding the lock makes the delete wait, then it still deletes
+    # the reverse order: a holder of the installation lock makes the delete wait, then it deletes
     other = await _tenant(db)
     other_deletion = (await _request(db, other)).deletion_id
     await _set_state(db, other_deletion, "database")
     async with db.app() as upserter, upserter.begin():
-        await upserter.execute(text(upsert), {"h": other.host, "i": other.installation})
+        await upserter.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": f"tb_tenant:{other.host}:{other.installation}"},
+        )
         waiting = asyncio.create_task(_app_rows(db, DELETE, {"t": other.id}))
         await asyncio.sleep(0.5)
         assert not waiting.done()
@@ -550,19 +577,124 @@ async def test_tb_upsert_tenant_treats_a_done_deletion_as_a_tombstone(db: Db) ->
 
     tenant = await _tenant(db)
     deletion = (await _request(db, tenant)).deletion_id
-    for state in (*OPEN_STATES, "failed", "cancelled"):  # none of these is a tombstone
+    for state in ("failed", "cancelled"):  # neither is a tombstone, nor a deletion in progress
         await _set_state(db, deletion, state)
         assert (await _app_rows(db, upsert, args(tenant)))[0][0] == tenant.id
     await _set_state(db, deletion, "database")
     await _admin(db, "DELETE FROM tenants WHERE id = :t", {"t": tenant.id})
     # the window after tb_delete_tenant and before `done`: the row is gone, so it counts
-    assert (await _app_rows(db, upsert, args(tenant)))[0][0] is None
+    assert await _upsert_refusal(db, upsert, args(tenant)) == "tombstone"
     await _set_state(db, deletion, "done")
-    assert (await _app_rows(db, upsert, args(tenant)))[0][0] is None
+    assert await _upsert_refusal(db, upsert, args(tenant)) == "tombstone"
     count = "SELECT count(*) FROM tenants WHERE host = :h AND installation_id = :i"
     assert await _admin_scalar(db, count, {"h": tenant.host, "i": tenant.installation}) == 0
     fresh = (await _app_rows(db, upsert, args(tenant, tenant.installation + 1)))[0][0]
     assert fresh is not None  # a new installation id of the same host is a new tenant
+
+
+async def test_tb_upsert_tenant_refuses_a_tenant_with_a_deletion_in_progress(db: Db) -> None:
+    """NG6h-2: every non-terminal state raises TB002 and writes nothing; terminal ones do not."""
+    upsert = "SELECT tb_upsert_tenant(:h, :i, 'renamed', 7, 'suspended')"
+    tenant = await _tenant(db)
+    args = {"h": tenant.host, "i": tenant.installation}
+    deletion = (await _request(db, tenant)).deletion_id
+    read = "SELECT org, org_id, state FROM tenants WHERE id = :t"
+    for state in OPEN_STATES:
+        await _set_state(db, deletion, state)
+        assert await _upsert_refusal(db, upsert, args) == "deleting"
+        row = (await _admin_rows(db, read, {"t": tenant.id}))[0]
+        assert (row.org, row.org_id, row.state) == ("acme-org", 1, "active")
+    other = await _tenant(db)  # a deletion of another tenant does not matter
+    assert (await _app_rows(db, upsert, {"h": other.host, "i": other.installation}))[0][
+        0
+    ] == other.id
+    await _set_state(db, deletion, "cancelled")
+    assert (await _app_rows(db, upsert, args))[0][0] == tenant.id
+    row = (await _admin_rows(db, read, {"t": tenant.id}))[0]
+    assert (row.org, row.org_id, row.state) == ("renamed", 7, "suspended")
+
+
+async def test_the_gate_reports_the_standing_of_an_installation(db: Db) -> None:
+    """Unknown, disabled, deleting, tombstoned (row gone, `database` or `done`) and cancelled."""
+    gate = SqlTenantGate(db.app)
+    tenant = await _tenant(db)
+    assert await gate.standing(tenant.host, tenant.installation + 1) == TenantStanding()
+    assert await gate.standing(tenant.host, tenant.installation) == TenantStanding(
+        tenant.id, disabled=True
+    )
+    deletion = (await _request(db, tenant)).deletion_id
+    deleting = TenantStanding(tenant.id, disabled=True, refusal="deleting")
+    assert await gate.standing(tenant.host, tenant.installation) == deleting
+    await _set_state(db, deletion, "database")
+    assert await gate.standing(tenant.host, tenant.installation) == deleting
+    await _admin(db, "DELETE FROM tenants WHERE id = :t", {"t": tenant.id})
+    tombstone = TenantStanding(refusal="tombstone")
+    assert await gate.standing(tenant.host, tenant.installation) == tombstone  # row gone
+    await _set_state(db, deletion, "done")
+    assert await gate.standing(tenant.host, tenant.installation) == tombstone
+    assert await gate.standing(tenant.host, tenant.installation + 1) == TenantStanding()
+    again = await _tenant(db)
+    second = (await _request(db, again)).deletion_id
+    await _set_state(db, second, "cancelled")
+    assert await gate.standing(again.host, again.installation) == TenantStanding(
+        again.id, disabled=True
+    )
+
+
+@pytest.fixture(scope="module")
+async def plain() -> AsyncIterator[Db]:
+    """The shipped schema without RLS: `SqlTenants` reads `tenants` directly, as at release N."""
+    async for provisioned in _provision(enforce=False):
+        yield provisioned
+
+
+async def test_a_state_change_and_a_delete_never_both_apply(plain: Db) -> None:
+    """SqlTenants.set_installation_state queues behind a delete's lock and sees the tombstone."""
+    tenants = SqlTenants(plain.app, _no_hosts)
+    tenant = await _tenant(plain)
+    deletion = (await _request(plain, tenant)).deletion_id
+    await _set_state(plain, deletion, "database")
+    async with plain.app() as deleter, deleter.begin():
+        await deleter.execute(text(DELETE), {"t": tenant.id})  # uncommitted: lock held
+        racing = asyncio.create_task(
+            tenants.set_installation_state(tenant.host, tenant.installation, "suspended")
+        )
+        await asyncio.sleep(0.5)
+        assert not racing.done()
+    # without the advisory lock the update would match nothing and answer None; with it the
+    # setter looks after the commit, finds the deletion at its database step with no tenant row
+    with pytest.raises(TenantDeletedError) as refused:
+        await racing
+    assert refused.value.reason == "tombstone"
+    assert not await _exists(plain, tenant)
+
+
+async def test_a_state_change_waits_for_the_lock_and_then_sees_a_new_deletion(plain: Db) -> None:
+    """The reverse order: the setter queues behind the lock and checks only after it."""
+    tenants = SqlTenants(plain.app, _no_hosts)
+    tenant = await _tenant(plain)
+    deletion = (await _request(plain, tenant)).deletion_id
+    key = f"tb_tenant:{tenant.host}:{tenant.installation}"
+    async with plain.app() as holder, holder.begin():
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": key}
+        )
+        waiting = asyncio.create_task(
+            tenants.set_installation_state(tenant.host, tenant.installation, "suspended")
+        )
+        await asyncio.sleep(0.5)
+        assert not waiting.done()
+        # a deletion has been requested meanwhile: the setter must see it after the lock
+        await _set_state(plain, deletion, "draining")
+    with pytest.raises(TenantDeletedError) as refused:
+        await waiting
+    assert refused.value.reason == "deleting"
+    state = "SELECT state FROM tenants WHERE id = :t"
+    assert await _admin_scalar(plain, state, {"t": tenant.id}) == "active"
+
+
+def _no_hosts(name: str) -> GitHubHost:
+    raise AssertionError(name)
 
 
 # --- webhook_deliveries --------------------------------------------------------------------
@@ -621,6 +753,19 @@ async def _alembic(database: str, *args: str) -> subprocess.CompletedProcess[str
 async def test_downgrade_is_refused_while_a_deletion_record_exists_and_round_trips() -> None:
     """The compliance record blocks it; without one the previous bodies come back."""
     async for scratch in _provision(enforce=False):
+        guard = (
+            "SELECT pg_get_functiondef("
+            "'tb_upsert_tenant(text,bigint,text,bigint,text)'::regprocedure"
+            ") LIKE '%leave the row alone%'"
+        )
+        assert await _admin_scalar(scratch, guard)
+        stepped = await _alembic(scratch.name, "downgrade", MIGRATION)
+        assert stepped.returncode == 0, stepped.stderr[-2000:]
+        assert not await _admin_scalar(scratch, guard)  # the NG6h-1 body is back
+        assert await _admin_scalar(scratch, "SELECT to_regclass('tenant_deletions') IS NOT NULL")
+        restored = await _alembic(scratch.name, "upgrade", "head")
+        assert restored.returncode == 0, restored.stderr[-2000:]
+        assert await _admin_scalar(scratch, guard)
         tenant = await _tenant(scratch)
         deletion = (await _request(scratch, tenant)).deletion_id
         refused = await _alembic(scratch.name, "downgrade", PREVIOUS)
@@ -654,3 +799,47 @@ async def test_downgrade_is_refused_while_a_deletion_record_exists_and_round_tri
         again = await _alembic(scratch.name, "upgrade", "head")
         assert again.returncode == 0, again.stderr[-2000:]
         assert await _admin_scalar(scratch, "SELECT to_regclass('tenant_deletions') IS NOT NULL")
+
+
+def _rule(state: str, row_present: bool) -> str | None:
+    """The refusal ADR 0034 prescribes for a key whose latest deletion is in `state`."""
+    if state == "done" or (state == "database" and not row_present):
+        return "tombstone"
+    return "deleting" if row_present and state in OPEN_STATES else None
+
+
+async def test_the_sql_function_the_store_and_the_gate_agree_on_every_deletion_state(
+    plain: Db,
+) -> None:
+    """NG6h-2: `tb_upsert_tenant`, `SqlTenants._standing` and `SqlTenantGate.standing` match.
+
+    The tombstone rule is written in all three places; for every state, with the tenant row
+    present or already gone, they refuse the same way as the rule above.
+    """
+    gate, tenants = SqlTenantGate(plain.app), SqlTenants(plain.app, _no_hosts)
+    for state in (*OPEN_STATES, *TERMINAL_STATES):
+        for present in (True, False):
+            tenant = await _tenant(plain)
+            args = {"h": tenant.host, "i": tenant.installation}
+            deletion = (await _request(plain, tenant)).deletion_id
+            await _set_state(plain, deletion, state)
+            if not present:
+                await _admin(plain, "DELETE FROM tenants WHERE id = :t", {"t": tenant.id})
+            store: str | None = None
+            try:
+                async with tenants._sf() as session, session.begin():
+                    await tenants._standing(session, tenant.host, tenant.installation)
+            except TenantDeletedError as refused:
+                store = refused.reason
+            standing = await gate.standing(tenant.host, tenant.installation)
+            function: str | None = None  # last: it may create a missing tenant
+            try:
+                await _app_rows(plain, "SELECT tb_upsert_tenant(:h, :i, 'o', 1, 'active')", args)
+            except DBAPIError as error:
+                mapped = SqlTenants.deleted_error(tenant.host, tenant.installation, error)
+                assert mapped is not None
+                function = mapped.reason
+            expected = _rule(state, present)
+            assert (state, present, store) == (state, present, expected)
+            assert (state, present, function) == (state, present, expected)
+            assert (state, present, standing.refusal) == (state, present, expected)

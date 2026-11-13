@@ -16,7 +16,7 @@ The runtime core of trustbridge, shared by the api, the worker and the reconcile
 | `reconciler.py` | The reconciler process: relay tick, sweep, delivery reconciliation (`HookDeliveryClient`), retention, the audit purge (`audit-purge`, a singleton under a lease, bounded per run, a heartbeat per batch), trimming. |
 | `lease.py` | Fenced scope leases (`LeaseManager`, `guarded_execute`, `guarded_insert`, `bounded_call`); `LeaseManager` and `Lease.guard()` are the adapter core's `LeaseProvider` and `Lease`. |
 | `secrets.py` | `LocalSecrets` (`file:` / `env:` refs to read, `store:` refs under `SECRET_STORE_DIR` to read, write, delete and list) and its in-memory twin; the `SecretReader` / `SecretWriter` of the GitHub core. |
-| `ports.py` | The ports of the GitHub and adapter cores over these components: `SqlTenants` / `MemoryTenants` (installation store, installation resolver, tenant resolver), `ParkedValues` (value store, in the secret store), `ConnectionData` (tenant connection store, config resolver), `ReconcileRequests` (the Valkey set `tb:reconcile`; the api records admin reconcile requests in it too, and its consumer is NG5r). |
+| `ports.py` | The ports of the GitHub and adapter cores over these components: `SqlTenants` / `MemoryTenants` (installation store, installation resolver, tenant resolver; `set_installation_state` and `active_tenant_id_for` refuse a deleting, `deleted` or tombstoned tenant with `TenantDeletedError`, the former under the same per-installation advisory lock as `upsert_installation`), `ParkedValues` (value store, in the secret store), `ConnectionData` (tenant connection store, config resolver), `ReconcileRequests` (the Valkey set `tb:reconcile`; the api records admin reconcile requests in it too, and its consumer is NG5r). |
 | `schema.py` | The schema gate (`schema_compat` integer) and its readiness check. |
 | `health.py` | `/health/live` and `/health/ready` for the worker and reconciler on `HEALTH_PORT` (standard-library asyncio, no dependency), and the `Heartbeat` the loops report to. See `docs/install.md`. |
 | `runtime.py` | `build_core` (stores, ports, GitHub runtime) and the bootstrap of the worker and reconciler commands (`monitor.check_all` / `start` / `stop`). |
@@ -93,6 +93,14 @@ effective defaults are logged at startup.
   counted), any other exception is a counted failure. A delivery whose payload names an installation
   of an admin-disabled tenant is deferred by `DISABLED_TENANT_RETRY_SECONDS` (default 15) and
   acknowledged, without a counted failure (`TenantDisabled`, and `SqlTenantGate` in `tenancy/gate.py`; ADR 0033).
+  Before that decision the worker stores the tenant's id on the delivery row
+  (`DeliveryStore.set_tenant`, `webhook_deliveries.tenant_id`; ADR 0034: a deletion must find every
+  delivery of its tenant), using `TenantGate.standing` (`TenantStanding`, defined in `tenancy.standing`: id, disabled flag, and a
+  `deleting` or `tombstone` refusal). A tenant with a deletion in progress is deferred without a counted failure too (`TenantDeleting`, distinct
+  from `TenantDisabled`) but four times as long as a disabled one (`DELETING_RETRY_FACTOR`), since `enable` does not end
+  it; it is logged at info the first time a delivery is deferred for it and at debug after that;
+  a tombstoned installation (a finished deletion, the App still installed) has its delivery
+  acknowledged and marked processed with no handler run and no tenant created, and a log line.
 - Migrations: bump the schema-compatibility integer in every revision with
   `INSERT INTO schema_compat (id, version) VALUES (1, N) ON CONFLICT (id) DO UPDATE SET version =
   GREATEST(schema_compat.version, N)` and raise `REQUIRED_SCHEMA_VERSION` in `schema.py` when the
