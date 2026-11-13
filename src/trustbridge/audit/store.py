@@ -40,17 +40,23 @@ _COLUMNS = (
     'resource_id, outcome, "before"::text AS "before", "after"::text AS "after", request_id, '
     "trace_id, schema_version"
 )
-_INSERT = text(
+_INSERT_SQL = (
     "INSERT INTO audit_events (id, tenant_id, actor_type, actor_sub, actor_iss, on_behalf_of, "
     'source_ip, action, resource_type, resource_id, outcome, "before", "after", request_id, '
     "trace_id, schema_version) VALUES (CAST(:id AS uuid), CAST(:tenant_id AS uuid), :actor_type, "
     ":actor_sub, :actor_iss, CAST(CAST(:on_behalf_of AS text) AS jsonb), "
     "CAST(CAST(:source_ip AS text) AS inet), :action, "
     ":resource_type, :resource_id, :outcome, CAST(CAST(:before AS text) AS jsonb), "
-    "CAST(CAST(:after AS text) AS jsonb), :request_id, :trace_id, :schema_version) "
-    # The idempotency key of a webhook-driven event (NG6h-2b): the target repeats the partial
-    # unique index `ux_audit_events_webhook_delivery` exactly, so PostgreSQL infers it.
-    "ON CONFLICT (tenant_id, action, (on_behalf_of->>'delivery_id')) "
+    "CAST(CAST(:after AS text) AS jsonb), :request_id, :trace_id, :schema_version)"
+)
+_INSERT = text(_INSERT_SQL)
+# The idempotency key of a webhook-driven event (NG6h-2b): the target repeats the partial unique
+# index `ux_audit_events_webhook_delivery` exactly, so PostgreSQL infers it. Used only for an
+# event that has the key (`on_behalf_of` and `tenant_id` set): a conflict target needs SELECT on
+# its columns, so the SELECT policy would also apply to the new row, and a null-tenant row
+# (a denial, no tenant context) is not selectable by the app role.
+_INSERT_ONCE = text(
+    _INSERT_SQL + " ON CONFLICT (tenant_id, action, (on_behalf_of->>'delivery_id')) "
     "WHERE on_behalf_of IS NOT NULL DO NOTHING"
 )
 _LIST_ALL = text(
@@ -87,10 +93,11 @@ async def append(session: AsyncSession, event: AuditEvent) -> UUID | None:
     A webhook-driven event (`on_behalf_of` set) is idempotent on `(tenant_id, action,
     delivery_id)`: a redelivery finds the row and inserts nothing, and this returns `None`
     (the count of inserted rows, not `RETURNING`, which a null-tenant row could not read back).
-    Every other event always inserts and returns its id.
+    Every other event always inserts (with a plain `INSERT`) and returns its id.
     """
+    keyed = event.on_behalf_of is not None and event.tenant_id is not None
     result = await session.execute(
-        _INSERT,
+        _INSERT_ONCE if keyed else _INSERT,
         {
             "id": event.id,
             "tenant_id": event.tenant_id,

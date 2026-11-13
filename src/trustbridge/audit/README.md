@@ -221,7 +221,9 @@ or a worker retry after the audit write committed, therefore adds no second row;
 `AuditWriter.record` return `None` for it. Any other unique violation (the primary key) still
 raises. Events with a null `on_behalf_of` (admin, worker, denials, purge, and a webhook event with
 no numeric sender) are never deduplicated, and neither is a webhook event with a null `tenant_id`
-(NULLs are distinct; no emitter writes one).
+(NULLs are distinct; no emitter writes one). `append` sends `ON CONFLICT` only for a keyed event
+(`on_behalf_of` and `tenant_id` set): a conflict target needs `SELECT` on its columns, so the
+SELECT policy would also be applied to the new row, which a null-tenant row (a denial) fails.
 
 The migration is an index only, built `CONCURRENTLY` (no table rewrite, writes continue), so it is
 N-1 compatible: the previous release's inserts keep working. It refuses to run, changing nothing, if
