@@ -35,8 +35,8 @@ function body replaced under the same signature and return type.
   ``NULL`` and creates nothing (an open, ``failed`` or ``cancelled`` deletion is not a tombstone,
   and another installation id of the host is unaffected). The lookup uses a partial index on
   ``state = 'done'``. The function and ``tb_delete_tenant`` first take a transaction-level
-  advisory lock on the installation (see ``_lock``; ``tb_request_tenant_deletion`` takes it too), so a concurrent delete and upsert are
-  serialised and a deleted tenant cannot be recreated by an upsert that checked just before the
+  advisory lock on the installation (see ``_lock``; ``tb_request_tenant_deletion`` takes it too),
+  so a concurrent delete and upsert are serialised and a deleted tenant cannot be recreated by an upsert that checked just before the
   delete committed.
 * ``tb_request_tenant_deletion(...)``: a ``SECURITY DEFINER`` function that, under the tenant row
   lock, returns the open deletion, or checks that the tenant is admin-disabled and that the typed
