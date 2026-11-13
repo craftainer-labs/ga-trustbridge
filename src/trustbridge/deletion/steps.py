@@ -29,7 +29,7 @@ class GithubStep(Step, Protocol):
 
 
 class DatabaseStep(Step, Protocol):
-    """Step 5, the batches: clear the tenant's rows (NG6h-4b).
+    """Step 5, the batches: clear the tenant's rows (`SqlDatabaseStep`, NG6h-4b).
 
     It deletes every tenant-keyed row and the webhook bodies but NOT the `tenants` row: the
     engine removes that last, through the fenced `tb_delete_tenant`, in the transaction that also

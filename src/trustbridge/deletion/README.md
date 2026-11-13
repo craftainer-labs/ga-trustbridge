@@ -24,6 +24,7 @@ package and comes in NG6h-7, once 4b, 5 and 6 have landed.
 - `steps.py`: the `Step` Protocol and the slots `PlatformStep`, `GithubStep`, `DatabaseStep`, plus
   `WritersPort` for the drain.
 - `drain.py`: `DrainStep`.
+- `database.py`: `SqlDatabaseStep`, the `DatabaseStep` (NG6h-4b). See "The database step" below.
 - `store.py` / `sql.py`: `DeletionStore` and `SqlDeletionStore` over the definer functions.
 - `audit.py`: the event builders. `metrics.py`: `trustbridge.deletion.attempts` and `.failed`.
 
@@ -62,6 +63,33 @@ and `done=False` with a `cursor` saves progress in the same state and runs the s
   transaction `tb_delete_tenant(tenant, holder, fence)` (the `tenants` row, last), then
   `tb_finish_tenant_deletion` (`done`, the tombstone) and the audit events. The `DatabaseStep`
   therefore clears everything except the `tenants` row.
+
+## The database step
+
+`SqlDatabaseStep(factory, batch_size=500)` deletes the tenant's rows in `PLAN` order (`credential_operations`,
+`adapter_credentials`, `adapter_resources`, `scope_leases`, `tenant_repositories`, then clears `webhook_deliveries`
+bodies), never the `tenants` row. One pass is one batch of one table in one transaction inside
+`tenant_context(tenant_id)`; a short batch moves the cursor (`{"table", "removed"}`) to the next table, a full one asks
+for another pass on the same table. A cursor it cannot read starts over, which is safe because each pass deletes whatever
+is left.
+
+- **No definer functions.** The app role already holds `DELETE` on the five tenant tables and `UPDATE` on
+  `webhook_deliveries`, and the `tenant_isolation` policies (ADR 0031) admit the context tenant, so the step adds no
+  privilege. Every pass starts with a lease guard in the same transaction (a `SELECT` on `tenant_deletions` for this
+  deletion's holder, fence and an unexpired lease, state `database`; the app role cannot lock that table, so it is a
+  check, not a lock): a stale holder gets `LeaseLost` and touches nothing. A holder that loses the lease just after the
+  check deletes at most one more batch of the same rows the new holder would delete, and `tb_delete_tenant` re-checks
+  that nothing is left.
+- **Webhook deliveries** recorded for the tenant keep their row (the dedupe key) with `body` null and status `deleted`.
+  Rows with no `tenant_id` are left to retention; the last pass counts those still holding a body on the deletion's host
+  and reports them once as `skipped` `webhook_bodies_unresolved` / `retention_only` with a `count`. That count is
+  host-wide: an unresolved delivery cannot be attributed to the tenant, so it is an upper bound.
+- **Retained:** `audit_events` and `tenant_deletions` (ADR 0034).
+- **Category names** in `counts` are `adapter_operations`, `access_grants`, `adapter_resources`, `scope_leases`,
+  `tenant_repositories` and `webhook_bodies`: the tables `credential_operations` and `adapter_credentials` contain a
+  secret word, so their counts take other names. A new tenant-keyed table is added to `database.PLAN`; an integration
+  test fails when a table with a `tenant_id` column is in neither `PLAN` nor the retained set.
+- The batch size is a constructor argument; the composition root (NG6h-7) chooses it.
 
 ## Audit (ADR 0034 "The audit trail", inv. 12, 14)
 
