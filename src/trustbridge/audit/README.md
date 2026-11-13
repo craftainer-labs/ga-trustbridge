@@ -264,7 +264,9 @@ delivery id). Nothing has changed at that point: no index, no rows.
    ```
 
    The `seq` gaps are harmless: exports resume with `after_seq`. Keep or drop the archive table
-   under your retention policy; it is outside the app's grants.
+   under your retention policy; it is outside the app's grants. If the transaction aborted, nothing
+   was created or deleted, so rerun it; if you rerun after a committed attempt, pick another archive
+   table name.
 4. Run the upgrade again (`alembic upgrade head`, or re-run the migrate Job). If an earlier
    attempt left an INVALID `ux_audit_events_webhook_delivery`, the upgrade drops it first. Check
    with `SELECT indisvalid FROM pg_index WHERE indexrelid = 'ux_audit_events_webhook_delivery'::regclass;`.

@@ -108,6 +108,8 @@ def upgrade() -> None:
             f"CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {INDEX} "
             f"ON audit_events ({KEY}) WHERE {PREDICATE}"
         )
+        op.execute("RESET statement_timeout")
+        op.execute("RESET lock_timeout")
 
 
 def downgrade() -> None:
@@ -117,3 +119,5 @@ def downgrade() -> None:
     with op.get_context().autocommit_block():
         op.execute("SET lock_timeout = '5s'")
         op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX}")
+        op.execute("RESET statement_timeout")
+        op.execute("RESET lock_timeout")
