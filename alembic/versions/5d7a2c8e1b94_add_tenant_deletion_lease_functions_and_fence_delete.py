@@ -367,7 +367,7 @@ BEGIN
     IF v_not_before IS NOT NULL AND v_not_before > now() THEN
         RAISE EXCEPTION 'the deletion grace window has not elapsed' USING ERRCODE = '55000';
     END IF;
-    
+
 SELECT concat_ws(', ',
     CASE WHEN EXISTS (SELECT 1 FROM public.tenant_repositories WHERE tenant_id = p_id)
          THEN 'tenant_repositories' END,
@@ -386,7 +386,7 @@ SELECT concat_ws(', ',
     DELETE FROM public.tenants WHERE id = p_id;
     -- The tables have no foreign key, so a writer is not blocked by the row lock: check once more
     -- and roll the delete back if a row committed in between.
-    
+
 SELECT concat_ws(', ',
     CASE WHEN EXISTS (SELECT 1 FROM public.tenant_repositories WHERE tenant_id = p_id)
          THEN 'tenant_repositories' END,
@@ -404,7 +404,7 @@ SELECT concat_ws(', ',
     END IF;
 END
 $$
-"""  # noqa: E501, W293 -- the 9c2e5a7f1d84 body, verbatim
+"""  # noqa: E501 -- the 9c2e5a7f1d84 body, verbatim
 
 
 def _replaced(body: str, old: str, new: str) -> str:

@@ -358,7 +358,8 @@ async def test_leaving_requested_needs_the_grace_window_over_and_a_disabled_tena
     await _admin(db, "UPDATE tenant_deletions SET not_before = NULL WHERE id = :d", {"d": deletion})
     await _admin(
         db,
-        "UPDATE tenants SET admin_disabled_at = NULL WHERE id = "
+        "UPDATE tenants SET admin_disabled_at = NULL, admin_disabled_by = NULL, "
+        "admin_disable_reason = NULL WHERE id = "
         "(SELECT tenant_id FROM tenant_deletions WHERE id = :d)",
         {"d": deletion},
     )
