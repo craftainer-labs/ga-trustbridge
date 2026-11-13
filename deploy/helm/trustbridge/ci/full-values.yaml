@@ -1,0 +1,81 @@
+# Test inputs for `helm lint` and `helm template` (deploy/helm/check.sh). Every
+# value here is a placeholder, not a credential.
+database:
+  host: postgres.example.internal
+  runtime:
+    existingSecret: tb-db-runtime
+  migrate:
+    existingSecret: tb-db-owner
+valkey:
+  existingSecret: tb-valkey
+oidc:
+  issuerUrl: https://idp.example.internal/realms/trustbridge
+publicBaseUrl: https://trustbridge.example.internal
+registrationStateKey:
+  existingSecret: tb-registration
+subscriberSecret:
+  existingSecret: tb-subscriber
+s3:
+  endpointUrl: https://s3.example.internal
+  existingSecret: tb-s3
+mqtt:
+  host: mqtt.example.internal
+  existingSecret: tb-mqtt
+trustbridge:
+  githubHosts:
+    - name: github-com
+      kind: github.com
+      web_url: https://github.com
+      api_url: https://api.github.com
+      oidc_issuer: https://token.actions.githubusercontent.com
+      registry_host: ghcr.io
+      signer: vault
+      app_id: 123456
+      webhook_secret_ref: file:/etc/trustbridge/webhook/secret
+  signers:
+    vault:
+      kind: vault-transit
+      addr: https://vault.example.internal
+      key: trustbridge
+      auth:
+        method: kubernetes
+        role: trustbridge
+  trustedProxies:
+    - 10.0.0.0/8
+  secretStore:
+    existingClaim: tb-secret-store
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: trustbridge.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: trustbridge-tls
+      hosts:
+        - trustbridge.example.internal
+networkPolicy:
+  enabled: true
+  egress:
+    enabled: true
+    rules:
+      - {}
+serviceAccount:
+  automount: true
+global:
+  imageRegistry: registry.example.internal/mirror
+  imagePullSecrets:
+    - name: mirror-pull
+ca:
+  existingConfigMap: tb-ca
+proxy:
+  httpProxy: http://proxy.example.internal:3128
+  noProxy: .svc,.cluster.local
+  existingSecret: tb-proxy
+  httpsProxyKey: https-proxy
+image:
+  digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+otel:
+  endpoint: http://otel-collector.example.internal:4318

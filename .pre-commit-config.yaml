@@ -20,6 +20,9 @@ repos:
       - id: end-of-file-fixer
         stages: [pre-commit, manual]
       - id: check-yaml
+        # Helm templates are Go templates, not YAML until rendered; the
+        # helm-chart hook below renders and checks them.
+        exclude: ^deploy/helm/[^/]+/templates/
         stages: [pre-commit, manual]
       - id: check-toml
         stages: [pre-commit, manual]
@@ -196,6 +199,18 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [manual]
+
+      # Lint and render the Helm chart (deploy/helm/trustbridge) with every
+      # ci/ values file and assert the result (security context, secrets by
+      # reference, air-gap/CA/proxy values, every setting mapped). Needs helm
+      # (scripts/develop.d/25-helm.sh; kubeconform is used when present).
+      - id: helm-chart
+        name: helm-chart (lint, render and assert the Helm chart)
+        entry: bash deploy/helm/check.sh
+        language: system
+        files: ^(deploy/helm/|src/trustbridge/settings\.py$|src/app/config\.py$)
+        pass_filenames: false
+        stages: [pre-commit, manual]
 
       # Offline tests of the scripts and Makefile logic above (repo
       # derivation, version-check edge cases, smoke-test failure on a missing

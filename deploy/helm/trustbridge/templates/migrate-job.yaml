@@ -1,0 +1,51 @@
+{{- /*
+The migrate Job (ADR 0028): a pre-install and pre-upgrade hook, run as the owner
+role against the primary. It runs before the chart's own resources exist, so it
+uses the namespace default ServiceAccount (no token) and only existing Secrets and
+ConfigMaps.
+*/ -}}
+{{- if .Values.database.migrate.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "trustbridge.resourceName" (dict "suffix" "migrate" "context" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "trustbridge.labels" (dict "root" . "component" "migrate") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.database.migrate.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.database.migrate.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "trustbridge.labels" (dict "root" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- include "trustbridge.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "trustbridge.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "trustbridge.migrations", "upgrade"]
+          env:
+            {{- include "trustbridge.env" (dict "root" . "process" "migrate" "role" "migrate") | nindent 12 }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.database.migrate.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "trustbridge.volumeMounts" (dict "root" . "secretStore" false) | nindent 12 }}
+      volumes:
+        {{- include "trustbridge.volumes" (dict "root" . "secretStore" false) | nindent 8 }}
+{{- end }}

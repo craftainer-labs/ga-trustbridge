@@ -1,0 +1,23 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- range $name := list "api" "worker" "reconciler" }}
+{{- if (index $.Values $name).enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "trustbridge.resourceName" (dict "suffix" $name "context" $) }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "trustbridge.labels" (dict "root" $ "component" $name) | nindent 4 }}
+spec:
+  {{- if not (kindIs "invalid" $.Values.podDisruptionBudget.minAvailable) }}
+  minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ $.Values.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "trustbridge.selectorLabels" (dict "root" $ "component" $name) | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}

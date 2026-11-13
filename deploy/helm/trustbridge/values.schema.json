@@ -1,0 +1,107 @@
+{
+  "type": "object",
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": [
+        "production",
+        "dev"
+      ]
+    },
+    "database": {
+      "type": "object",
+      "properties": {
+        "sslmode": {
+          "type": "string",
+          "enum": [
+            "disable",
+            "allow",
+            "prefer",
+            "require",
+            "verify-ca",
+            "verify-full"
+          ]
+        },
+        "pool": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "null",
+                "local",
+                "external"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "reconciler": {
+      "type": "object",
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "global": {},
+    "image": {},
+    "imagePullSecrets": {},
+    "podSecurityContext": {
+      "type": "object",
+      "minProperties": 1
+    },
+    "securityContext": {
+      "type": "object",
+      "minProperties": 1
+    },
+    "serviceAccount": {},
+    "podDisruptionBudget": {},
+    "ingress": {},
+    "networkPolicy": {},
+    "valkey": {},
+    "oidc": {},
+    "publicBaseUrl": {},
+    "registrationStateKey": {},
+    "subscriberSecret": {},
+    "s3": {},
+    "mqtt": {},
+    "app": {},
+    "securityTxt": {},
+    "trustbridge": {},
+    "ca": {},
+    "proxy": {},
+    "otel": {},
+    "extraEnv": {},
+    "extraEnvFrom": {},
+    "extraVolumes": {},
+    "extraVolumeMounts": {},
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

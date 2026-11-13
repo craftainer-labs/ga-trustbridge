@@ -1,0 +1,119 @@
+{{- /*
+One Deployment per process, from the same image with a different command: the
+image's default entrypoint serves the template app, so `command` is always set
+(ADR 0028 "Processes and database roles").
+*/ -}}
+{{- $commands := dict
+  "api" (list "uvicorn" "trustbridge.main:app" "--no-proxy-headers" "--host" "0.0.0.0" "--port" (toString .Values.api.port))
+  "worker" (list "python" "-m" "trustbridge.worker" "worker")
+  "reconciler" (list "python" "-m" "trustbridge.worker" "reconciler") }}
+{{- range $name := list "api" "worker" "reconciler" }}
+{{- $cfg := index $.Values $name }}
+{{- if $cfg.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trustbridge.resourceName" (dict "suffix" $name "context" $) }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "trustbridge.labels" (dict "root" $ "component" $name) | nindent 4 }}
+  {{- with $cfg.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ $cfg.replicas }}
+  {{- with $cfg.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "trustbridge.selectorLabels" (dict "root" $ "component" $name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "trustbridge.labels" (dict "root" $ "component" $name) | nindent 8 }}
+        {{- with $cfg.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $cfg.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "trustbridge.serviceAccountName" $ }}
+      automountServiceAccountToken: {{ $.Values.serviceAccount.automount }}
+      {{- include "trustbridge.imagePullSecrets" $ | nindent 6 }}
+      securityContext:
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ $cfg.terminationGracePeriodSeconds }}
+      {{- with $cfg.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "trustbridge.image" $ | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command:
+            {{- toYaml (index $commands $name) | nindent 12 }}
+          {{- if eq $name "api" }}
+          ports:
+            - name: http
+              containerPort: {{ $cfg.port }}
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: {{ $cfg.probes.startup.path }}
+              port: http
+            periodSeconds: {{ $cfg.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ $cfg.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ $cfg.probes.startup.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ $cfg.probes.liveness.path }}
+              port: http
+            periodSeconds: {{ $cfg.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ $cfg.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ $cfg.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ $cfg.probes.readiness.path }}
+              port: http
+            periodSeconds: {{ $cfg.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ $cfg.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ $cfg.probes.readiness.failureThreshold }}
+          {{- end }}
+          env:
+            {{- include "trustbridge.env" (dict "root" $ "process" $name "role" "runtime") | nindent 12 }}
+          {{- with $.Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml $cfg.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $.Values.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "trustbridge.volumeMounts" (dict "root" $ "secretStore" true) | nindent 12 }}
+      volumes:
+        {{- include "trustbridge.volumes" (dict "root" $ "secretStore" true) | nindent 8 }}
+      {{- with $cfg.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cfg.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cfg.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cfg.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}
