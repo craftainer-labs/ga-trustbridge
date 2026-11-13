@@ -322,11 +322,40 @@ adapter fakes.
   (NG6h-3c-2) must not run while a previous-release pod may exist**. A tombstone is one small row
   per deleted installation and is kept indefinitely: it is the guard against re-creation, not a
   record of the deletion, and holds no actor.
-- **Deletion records' retention.** `tenant_deletions` rows hold ids, counts and the requester's
-  `sub` and `iss`. Until NG6h-3c-2 they are kept indefinitely as a compliance record (the app role
-  has no `DELETE` on the table). User decision B4: retention is configurable, with a setting whose
-  default 0 keeps them forever and an owner-only purge function that NG6h-3c-2 adds; the tombstone
-  above is not affected by it.
+- **Deletion records' retention (decided, user decision B4, NG6h-3c-2).** `tenant_deletions` rows hold
+  ids, counts and the requester's `sub` and `iss`. Retention is configurable: `DELETION_RETENTION_DAYS`
+  defaults to **0, which keeps them indefinitely** (as before); a non-zero value must be at least
+  `DELETION_RETENTION_MIN_DAYS` (default 90, as for `AUDIT_RETENTION_MIN_DAYS`) and negative values
+  are rejected. The reconciler's singleton duty (`deletion-purge`, every `DELETION_PURGE_INTERVAL_SECONDS`)
+  calls the definer `tb_purge_tenant_deletions(before, min_days, batch)` (migration `7b2d4f8a1c36`:
+  `search_path` pinned with `pg_temp`, `EXECUTE` revoked from `PUBLIC` and granted to the app role,
+  the validation of `tb_audit_purge`), in at most `DELETION_PURGE_MAX_BATCHES` batches of
+  `DELETION_PURGE_BATCH_SIZE`, and stops starting batches after half the lease TTL.
+  - **What is eligible.** `cancelled` records and `done` records older than the cut-off. A
+    `done` record goes only when its `tenant_tombstones` row exists. A `cancelled` record needs no
+    tombstone (a cancelled deletion left the tenant standing and a new request makes a new record);
+    it holds the requester's identity, so it follows the same retention (storage limitation). Open
+    and `failed` records are never purged: an operator may still resume or cancel a `failed` one, so
+    it stays until it reaches a terminal state. A `done` record
+    without a tombstone is skipped and counted (`unprotected`); the duty logs it at WARNING. The purge
+    does not re-run the backfill and never deletes a `done` record whose tombstone is missing. The tombstones are
+    never purged, so B2 holds at any retention.
+  - **The composition hook.** `ReconcilerDeps.record_purger` (a `RecordPurger`, `deletion.ports`;
+    `deletion.purge.SqlRecordPurger` is the implementation) is filled by NG6h-7's composition
+    root; until then the duty is inert, like the deletion duty.
+  - **The one-way door and the upgrade order.** The previous release (N-1) reads `done` records, and
+    the repo's `schema_compat` integer only stops new code on an old schema, so nothing in the schema
+    can say "no N-1 pods". The guard is the default: roll the release out fully, then set a
+    retention. Once records are purged the downgrade of `4e9a1c7b5d23` refuses (its tombstones have
+    no `done` record behind them), so a purge is a point of no return for rolling back past it. The
+    downgrade of `7b2d4f8a1c36` itself only drops the function and the grant.
+  - **`AUDIT_RETENTION_DAYS` and this retention are independent.** The `tenant.deletion.*` audit events
+    (0032) carry the tenant id, host and installation id and stay until the audit purge removes
+    them, whatever `DELETION_RETENTION_DAYS` is; with `AUDIT_RETENTION_DAYS=0` (never purge) they stay
+    for ever, so the identifiers survive in the audit trail even after the record and (never) the
+    tombstone. They hold no organisation login or tenant content (invariant 14), but `requested` names
+    its actor. The record purge therefore shortens the table, not the audit
+    trail; erasing the audit trail's identifiers is a decision for `AUDIT_RETENTION_DAYS`.
 - **Identifiers that survive.** The tenant id, host and installation id remain in
   `tenant_deletions` and in the deletion's audit events until retention. They are treated as
   non-personal operational identifiers, not tenant content; this is a judgement call listed so

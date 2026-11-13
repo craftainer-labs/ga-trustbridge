@@ -140,6 +140,12 @@ reads the `done` rows, which are untouched. **While an N-1 pod may run, the `don
 be purged** (NG6h-3c-2 waits for that). The downgrade restores both bodies and drops the table; it
 refuses while a tombstone has no `done` record behind it (it would be lost).
 
+Migration `7b2d4f8a1c36` (NG6h-3c-2) adds `tb_purge_tenant_deletions(before, min_days, batch)`, the
+retention purge of finished records (see `deletion/README.md`, "Record retention"). It also grants the
+owner role `DELETE` on `tenant_deletions`; the app role keeps `SELECT` only and gets `EXECUTE` on the
+function. It deletes `done` records with a tombstone and `cancelled` records, so the `4e9a1c7b5d23` downgrade refuses once
+it has run.
+
 `gate.py`'s `SqlTenantGate.allows(tenant_id, kind, deletion_id=None)` (the adapter core's `OperationGate`) refuses every new adapter call for an
 admin-disabled tenant except an `OperationKind.DELETE` carrying the `deletion_id` of a non-terminal deletion of the same tenant
 (`tenant_deletions`, read in the same statement as the disable flag; a user's delete has no id; ADR 0034 B10, NG6h-4a-3). `SqlTenantGate.standing(host, installation_id)` returns `TenantStanding` (`standing.py`, kept here so `tenancy` never imports the worker: tenant id,

@@ -12,3 +12,7 @@ failed = _meter.create_counter(
     "trustbridge.deletion.failed",
     description="Tenant deletions written failed for a non-retryable error",
 )
+records_purged = _meter.create_counter(
+    "trustbridge.deletion.records_purged",
+    description="Finished tenant deletion records removed by the retention purge",
+)
