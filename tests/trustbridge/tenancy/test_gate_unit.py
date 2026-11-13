@@ -93,3 +93,43 @@ async def test_the_read_is_one_statement_in_no_tenant_context() -> None:
     assert "tenant_deletions" in sql
     assert params == {"id": tenant_id, "deletion": deletion}
     assert context is None
+
+
+class _OneResult:
+    def __init__(self, row: tuple[bool, bool, bool, bool]) -> None:
+        self._row = row
+
+    def one(self) -> tuple[bool, bool, bool, bool]:
+        return self._row
+
+
+class _OneSession(_Session):
+    def __init__(self, row: tuple[bool, bool, bool, bool], seen: list[Any]) -> None:
+        super().__init__(None, seen)
+        self._one = row
+
+    async def execute(self, statement: Any, params: dict[str, Any]) -> _OneResult:  # type: ignore[override]  # noqa: ANN401
+        self._seen.append((str(statement), params, current_tenant.get()))
+        return _OneResult(self._one)
+
+
+@pytest.mark.parametrize(
+    ("row", "refusal"),
+    [
+        ((True, False, False, False), "gone"),  # no tenant row
+        ((False, True, False, False), "gone"),  # installation state `deleted`
+        ((False, False, False, True), "deleting"),
+        ((False, False, True, False), "disabled"),
+        ((False, False, True, True), "deleting"),  # a deletion outranks the disable
+        ((False, False, False, False), None),
+    ],
+)
+async def test_refusal_of_names_why_a_reconcile_may_not_run(
+    row: tuple[bool, bool, bool, bool], refusal: str | None
+) -> None:
+    """Gone, deleting, disabled in that order; read in no tenant context."""
+    seen: list[Any] = []
+    gate = SqlTenantGate(cast(async_sessionmaker[AsyncSession], lambda: _OneSession(row, seen)))
+    tenant = uuid4()
+    assert await gate.refusal_of(tenant) == refusal
+    assert [(p, t) for _, p, t in seen] == [({"id": tenant}, None)]

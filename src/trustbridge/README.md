@@ -68,9 +68,12 @@ a `CredentialCore` for `POST .../credentials/{adapter}/{scope_key}/rotate` from 
 holds (`admin/credentials.py`).
 
 Not wired yet: the worker and the reconciler instantiate no `CredentialCore`, so nothing reconciles
-or resumes credential operations in the background (NG5 follow-up). The reconcile requests
+or resumes credential operations in the background (NG5r-b). The reconcile requests
 (`ReconcileScheduler`, `POST /admin/v1/tenants/{t}/reconcile`) are recorded in the Valkey set
-`tb:reconcile`, whose consumer is NG5r (it needs the tenant reconcile body and a credential core in the reconciler); until it exists a recorded request is only recorded.
+`tb:reconcile`; the reconciler's `tenant-reconcile` duty drains it with claim/ack
+(`worker/reconcile_queue.py`) and drops a request for a disabled, deleting or gone tenant. Any other
+request stays pending until the reconcile body (scope discovery and a credential core in the
+reconciler) exists and `TENANT_RECONCILE_ENABLED` is true.
 
 ## Accepted behaviours
 

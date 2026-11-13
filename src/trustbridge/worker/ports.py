@@ -9,8 +9,8 @@
   object per `(tenant, adapter)` at `store:tenants/<tenant>/<adapter>`; the reserved key
   `privileged_credential` becomes `AdapterConfig.privileged_credential`.
 - `ReconcileRequests`: `ReconcileScheduler`; tenant ids are added to the Valkey set
-  `tb:reconcile` (a process-local set without Valkey). Consuming the set is the reconcile
-  loop's job (NG5r); until then requests are recorded, not acted on.
+  `tb:reconcile` (a process-local set without Valkey). `reconcile_queue.ReconcileQueue` drains
+  the set with claim/ack (NG5r-a).
 - The lease needs no adapter: `trustbridge.worker.lease.LeaseManager.hold` and `Lease.guard`
   satisfy the core's `LeaseProvider` and `Lease`.
 """
