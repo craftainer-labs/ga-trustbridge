@@ -4,7 +4,7 @@ Covers 0028 invariants 3, 4, 7 and 0030 invariant 8.
 """
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -346,16 +346,23 @@ async def test_a_failure_after_a_lost_claim_is_not_counted_and_is_acked(
 
 async def test_a_lost_claim_does_not_dead_letter_a_row_that_was_settled() -> None:
     """The last attempt fails, but another consumer already processed the row: no dead letter."""
-    state = {"calls": 0}
 
     async def handler(ctx: EventContext) -> None:
-        state["calls"] += 1
-        if state["calls"] == 3:
-            # settled by someone else mid-handle
-            await h.store.mark_processed(key("d1"), h.clock(), attempts=2)
         raise RuntimeError("always")
 
     h = await Harness({"push": handler}).start()
+    counted = h.store.record_failure
+
+    async def record_then_settle(
+        k: DeliveryKey, error: str, now: datetime, later: datetime, *, attempts: int
+    ) -> int:
+        value = await counted(k, error, now, later, attempts=attempts)
+        if value == 3:
+            # settled by someone else between the counted failure and the dead mark
+            await h.store.mark_processed(key("d1"), h.clock(), attempts=3)
+        return value
+
+    h.store.record_failure = record_then_settle  # type: ignore[method-assign]
     await h.add("d1")
     for _ in range(3):
         await h.worker.run_once()

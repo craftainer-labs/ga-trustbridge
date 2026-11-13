@@ -10,6 +10,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import event as sa_event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import trustbridge.audit.credentials as creds
@@ -346,7 +347,7 @@ async def test_the_save_that_finishes_the_callers_rotation_appends_the_joined_ev
         return event.id
 
     monkeypatch.setattr(creds, "append", fake_append)
-    monkeypatch.setattr(creds.sa_event, "listen", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sa_event, "listen", lambda *args, **kwargs: None)
     built: list[UUID] = []
     pending = _joined(built)
     op = replace(_op(kind, status, base_kind="secret", base=OLD), scope_key=scope_key)
@@ -386,7 +387,7 @@ async def test_a_rolled_back_finishing_save_lets_the_retry_append_the_event_agai
 
     monkeypatch.setattr(creds, "append", fake_append)
     monkeypatch.setattr(
-        creds.sa_event, "listen", lambda target, name, fn, **kw: hooks.append((target, name, fn))
+        sa_event, "listen", lambda target, name, fn, **kw: hooks.append((target, name, fn))
     )
     pending = _joined([])
     op = _op(OperationKind.ROTATE, OperationStatus.FINISHED, base_kind="secret", base=OLD)

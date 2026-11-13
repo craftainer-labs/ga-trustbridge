@@ -9,6 +9,7 @@ from uuid import UUID
 import httpx
 import pytest
 from fastapi.routing import APIRoute
+from sqlalchemy import event as sa_event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import trustbridge.audit.credentials as audit_credentials
@@ -472,7 +473,7 @@ async def _finishing(
         return event.id
 
     monkeypatch.setattr(audit_credentials, "append", fake_append)
-    monkeypatch.setattr(audit_credentials.sa_event, "listen", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sa_event, "listen", lambda *args, **kwargs: None)
     observer = CredentialAuditObserver(writer, SystemActor.API)
     stored = await w.store.get_credential(w.tenant.id, "fake", key)
     assert stored is not None
