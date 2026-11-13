@@ -257,7 +257,11 @@ async def test_the_api_waits_for_the_schema_then_checks_the_role() -> None:
         async def background(self, *, production: bool, timeout: float, poll: float) -> None:
             calls.append(f"roles:{production}:{timeout}:{poll}")
 
-    core = types.SimpleNamespace(gate=Schema(), roles=Roles())
+    class Timeouts:
+        async def background(self, *, production: bool, timeout: float, poll: float) -> None:
+            return None
+
+    core = types.SimpleNamespace(gate=Schema(), roles=Roles(), timeouts=Timeouts())
     settings = make_settings(schema_wait_seconds=3.0, schema_poll_seconds=0.5)
     await main_module.wait_gates(core, settings, lambda: 50.0)  # type: ignore[arg-type]
     assert calls == ["schema:3.0:0.5", "roles:False:3.0:0.5"]
@@ -276,7 +280,11 @@ async def test_the_schema_and_role_waits_share_one_budget() -> None:
         async def background(self, *, production: bool, timeout: float, poll: float) -> None:
             seen.append(timeout)
 
-    core = types.SimpleNamespace(gate=Schema(), roles=Roles())
+    class Timeouts:
+        async def background(self, *, production: bool, timeout: float, poll: float) -> None:
+            return None
+
+    core = types.SimpleNamespace(gate=Schema(), roles=Roles(), timeouts=Timeouts())
     settings = make_settings(schema_wait_seconds=10.0)
     await main_module.wait_gates(core, settings, lambda: next(clock))  # type: ignore[arg-type]
     assert seen == [pytest.approx(3.0)]

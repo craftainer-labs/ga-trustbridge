@@ -51,7 +51,12 @@ from trustbridge.github.ports import SecretReader
 from trustbridge.github.webhook_secrets import WebhookSecretResolver
 from trustbridge.rbac import RbacConfig, RbacRuntime
 from trustbridge.settings import TrustbridgeSettings, get_trustbridge_settings
-from trustbridge.tenancy import budget_left, install_tenant_hook, register_role_check
+from trustbridge.tenancy import (
+    budget_left,
+    install_tenant_hook,
+    register_role_check,
+    register_timeout_check,
+)
 from trustbridge.webhooks.argocd import router as argocd_router
 from trustbridge.webhooks.ingress import ArgocdRuntime, WebhookRuntime
 from trustbridge.webhooks.ingress import router as webhook_router
@@ -100,7 +105,8 @@ def install(
             "trustbridge.main cannot wrap its lifespan (ADR 0028)"
         )
     chosen = overrides or Overrides()
-    install_tenant_hook()  # ADR 0031: set app.tenant_id per transaction (idempotent)
+    # ADR 0031 / 0034 B8: set app.tenant_id and transaction_timeout per transaction (idempotent)
+    install_tenant_hook(settings.transaction_timeout_seconds)
 
     @asynccontextmanager
     async def lifespan(inner: FastAPI) -> AsyncIterator[object]:
@@ -127,18 +133,23 @@ def install(
 async def wait_gates(
     core: Core, settings: TrustbridgeSettings, monotonic: Callable[[], float] = time.monotonic
 ) -> None:
-    """Wait for the schema, then check the database role (ADR 0031; the role check needs it).
+    """Wait for the schema, then check the database role (ADR 0031) and the transaction timeout.
 
-    Both waits share one `SCHEMA_WAIT_SECONDS` budget counted from here.
+    The waits share one `SCHEMA_WAIT_SECONDS` budget counted from here.
     """
     started = monotonic()
     await core.gate.wait_or_exit(
         timeout=settings.schema_wait_seconds, poll=settings.schema_poll_seconds
     )
-    await core.roles.background(
-        production=settings.production,
-        timeout=budget_left(settings.schema_wait_seconds, started, monotonic),
-        poll=settings.schema_poll_seconds,
+    remaining = budget_left(settings.schema_wait_seconds, started, monotonic)
+    # concurrently: outside production each keeps polling until safe; one must not starve the other
+    await asyncio.gather(
+        core.roles.background(
+            production=settings.production, timeout=remaining, poll=settings.schema_poll_seconds
+        ),
+        core.timeouts.background(
+            production=settings.production, timeout=remaining, poll=settings.schema_poll_seconds
+        ),
     )
 
 
@@ -178,6 +189,7 @@ async def _trustbridge_resources(
             registry = overrides.health_registry()
             register_schema_check(registry, core.gate)
             register_role_check(registry, core.roles)  # ADR 0031: not ready on a bypassing role
+            register_timeout_check(registry, core.timeouts)  # ADR 0034 B8: not ready on no bound
             await core.gate.refresh()
             tasks.append(asyncio.create_task(wait_gates(core, settings)))
         await monitor.check_all()

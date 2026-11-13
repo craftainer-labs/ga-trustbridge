@@ -185,9 +185,13 @@ The transport is user decision 2 below. The export is:
   the deletion batches run with a `transaction_timeout` (or `statement_timeout` plus
   `idle_in_transaction_session_timeout`) below the lag, and the lag is validated at startup
   against that timeout. This is a stated consistency model, not real-time delivery. The lag
-  filter is implemented (`tb_audit_list`, `export_ndjson`); the timeouts and the startup check
-  are not on main yet (no such timeout exists, and the engine is the template's) and arrive
-  with NG6h; NG6d left them out because the read routes do not need them.
+  filter is implemented (`tb_audit_list`, `export_ndjson`). The timeout is implemented (NG6h-3b,
+  ADR 0034 B8): the `after_begin` hook runs `SET LOCAL transaction_timeout` from its own setting
+  `TRANSACTION_TIMEOUT_SECONDS` (default 15, validated below the lag), and a start-up and
+  readiness check compares `SHOW transaction_timeout` with the lag, failing closed in production
+  and warning elsewhere (the role safety precedent). Before PostgreSQL 17 the hook sets
+  `statement_timeout` and `idle_in_transaction_session_timeout` instead, which the check accepts
+  with a warning (a weaker bound: many short statements can still outlive the lag).
 - **Filtered by scope** (the reader's tenants) and by a time or `seq` range.
 - Itself audited.
 

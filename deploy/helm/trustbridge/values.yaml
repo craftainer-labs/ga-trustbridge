@@ -388,6 +388,11 @@ trustbridge:
     retentionDays: 365
     retentionMinDays: 90
     exportLagSeconds: 30
+    # The longest any api, worker or reconciler transaction may stay open (SET LOCAL
+    # transaction_timeout in the after_begin hook, ADR 0034 B8). Must be above 0 and below
+    # exportLagSeconds, or the app refuses to start; the audit export lag guarantee relies on it.
+    # PostgreSQL 17+; earlier servers fall back to statement and idle timeouts (docs/upgrade.md).
+    transactionTimeoutSeconds: 15
     purgeIntervalSeconds: 3600
     purgeBatchSize: 1000
     # Batches per purge run, 1..10000. A run also stops starting batches after half the lease TTL

@@ -97,7 +97,9 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
 5. **Database.** In the tenant's context (0031), in batches and in the order
    `credential_operations`, `adapter_credentials`, `adapter_resources`, `scope_leases`,
    `tenant_repositories`, then the `tenants` row last through `tb_delete_tenant` (0031; the app
-   role has no `DELETE` on `tenants`), each batch its own transaction and
+   role has no `DELETE` on `tenants`), each batch its own transaction (bounded by the
+   `transaction_timeout` the `after_begin` hook sets, B8, so a batch must be sized to finish inside
+   `TRANSACTION_TIMEOUT_SECONDS`, below the audit export lag) and
    counted. Webhook bodies are cleared for deliveries recorded for the tenant: an expand
    migration adds a nullable `tenant_id` to `webhook_deliveries`, set by the worker when it
    resolves the delivery (NG6h-2: before it defers or handles it; an event with no registered

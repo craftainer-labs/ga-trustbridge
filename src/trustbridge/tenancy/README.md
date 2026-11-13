@@ -11,7 +11,9 @@ yet (release N+1), so the app role behaves as before.
   (the async session proxies to it) and runs `set_config('app.tenant_id', <uuid or ''>, true)`
   on the connection the transaction just began. `true` makes it transaction-local, so it never
   leaks to the next user of a pooled connection, PgBouncer transaction mode included. It is the
-  only writer of the setting. `worker.runtime.build_core` and `main.install` install it.
+  only writer of the setting. `worker.runtime.build_core` and `main.install` install it. The same
+  call also installs a second `after_begin` listener, the transaction time bound (below), configured
+  from `TRANSACTION_TIMEOUT_SECONDS`.
 - `session.py`: `tenant_session(factory, tenant_id)` (a session opened inside the context),
   `list_tenants` (reads `tb_list_tenants()` with no context), `get_tenant` (one tenant by id through `tb_get_tenant()`, also with no context), `iterate_tenants` (each tenant id
   yielded inside its own context) and `for_each_tenant` (runs a coroutine per tenant, logs and
@@ -22,6 +24,9 @@ yet (release N+1), so the app role behaves as before.
   `RoleGate` reads the role and the forced tables with one catalog query (fail closed if it cannot),
   `RoleCheck` / `register_role_check` add a `role_safety` check next to the schema check on the api's
   `/ready`, with the reason as its detail. See "Role safety check" below.
+- `timeout_check.py`: the transaction time bound check (ADR 0034 B8). `evaluate(TimeoutFacts, lag)` is the
+  pure decision, `TimeoutGate` / `TimeoutCheck` / `register_timeout_check` mirror the role check and add a
+  `transaction_timeout` check on `/ready`. See "Transaction time bound" below.
 
 ## Rules
 
@@ -146,3 +151,50 @@ counted from start-up.
 
 Dev databases are often reached as a superuser, so outside production the check only reports.
 `MODE=mock` is always ready and touches no database.
+
+## Transaction time bound
+
+The audit export (ADR 0032 "Export") returns only events older than `AUDIT_EXPORT_LAG_SECONDS`, so a
+SIEM that resumes from the last `seq` does not skip a late commit. That holds only if no
+audit-writing transaction stays open longer than the lag. ADR 0034 B8 enforces it in the
+application, for every `Session` of the api, the worker and the reconciler:
+
+- **The hook** (`hook._set_transaction_timeout`, installed with the tenant hook) runs
+  `set_config('transaction_timeout', '<ms>ms', true)` (that is `SET LOCAL`: it ends with the
+  transaction and never reaches the next user of a pooled connection, PgBouncer transaction mode
+  included) right after the transaction begins.
+- **The value** is its own setting, `TRANSACTION_TIMEOUT_SECONDS` (default 15; Helm
+  `trustbridge.audit.transactionTimeoutSeconds`), validated at start-up to be above 0 and below
+  `AUDIT_EXPORT_LAG_SECONDS` (default 30). It is not derived from the lag, because the lag is the
+  consumer-facing guarantee and the timeout is an operational limit that also has to cover the
+  slowest legitimate transaction; an explicit value is auditable, and the validation (like
+  `ADAPTER_CALL_TIMEOUT_SECONDS` below `LEASE_TTL_SECONDS`) keeps the two apart. Raising the lag
+  does not silently loosen the bound, and a bound at or above the lag is a start-up error.
+- **Legitimate long transactions.** Every transaction of these processes is short by design: the
+  deletion store's calls are one `_tx` each, the audit purge is one batch per transaction
+  (`purge_expired`, at most 10000 rows), the export reads one page per transaction, and the deletion
+  steps' batches are each their own transaction (ADR 0034 step 5). `DELETION_STEP_PASS_SECONDS` bounds
+  a *pass* made of several transactions, not one transaction, so a batch must still finish inside
+  `TRANSACTION_TIMEOUT_SECONDS`: size a batch (`AUDIT_PURGE_BATCH_SIZE`) so it does. Migrations are
+  outside the bound: the migrate Job (`worker.migrate`) and Alembic use a bare connection as the owner
+  role and open no `Session`, so the hook never fires for them (a long DDL transaction there is not
+  aborted).
+- **The check** (`timeout_check.py`) reads what the database actually applies, inside a session so
+  the hook has run (`pg_settings`, in milliseconds), and compares it with the lag: with
+  `transaction_timeout` it must be above 0 (0 is "off") and below the lag. It fails when the hook is
+  not installed, when the lag was raised past the bound or when the server ignores the setting. It
+  mirrors the role check:
+
+| | api | worker / reconciler |
+| --- | --- | --- |
+| `MODE=production` | `/ready` fails the `transaction_timeout` check with the reason; exits 1 after `SCHEMA_WAIT_SECONDS` | waits, then exits 1 after `SCHEMA_WAIT_SECONDS` |
+| otherwise | not ready with the reason, a warning is logged, polling continues, never exits | one check, a warning is logged, processing continues |
+
+- **Before PostgreSQL 17** there is no `transaction_timeout` (the hook cannot set it; it would be an
+  unknown parameter). The documented fallback is `statement_timeout` plus
+  `idle_in_transaction_session_timeout` (ADR 0032 allows either): the hook sets both to the same
+  value with `SET LOCAL`, and the check accepts them when both are above 0 and below the lag,
+  **with a warning**, because a transaction of many short statements can still outlive the lag. If
+  either is off or not below the lag, it fails as above (closed in production). The server version
+  is the one the dialect read on connect (`server_version_info`); an unknown version takes the
+  fallback. Upgrade to PostgreSQL 17 or later for the full guarantee (`docs/upgrade.md`).

@@ -117,6 +117,19 @@
     "trustbridge": {
       "type": "object",
       "properties": {
+        "audit": {
+          "type": "object",
+          "properties": {
+            "exportLagSeconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "transactionTimeoutSeconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
         "deletion": {
           "type": "object",
           "properties": {

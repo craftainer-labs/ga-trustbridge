@@ -196,6 +196,16 @@ def test_adapter_timeout_must_be_shorter_than_the_lease_ttl() -> None:  # 0028 i
         make_settings(lease_ttl_seconds=30, adapter_call_timeout_seconds=30)
 
 
+def test_the_transaction_timeout_must_be_shorter_than_the_export_lag() -> None:  # ADR 0034 B8
+    """The export lag guarantee needs the timeout below the lag, whatever the mode."""
+    assert make_settings().transaction_timeout_seconds == 15.0  # half the default lag
+    for seconds in (30, 45):
+        with pytest.raises(ValidationError, match="shorter than AUDIT_EXPORT_LAG_SECONDS"):
+            make_settings(audit_export_lag_seconds=30, transaction_timeout_seconds=seconds)
+    with pytest.raises(ValidationError):
+        make_settings(transaction_timeout_seconds=0)  # 0 would switch the bound off
+
+
 def test_retry_backoff_bounds_are_ordered() -> None:
     """Retry backoff bounds are ordered."""
     with pytest.raises(ValidationError, match="RETRY_BACKOFF_MAX_SECONDS"):

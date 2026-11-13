@@ -34,7 +34,7 @@ from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.models import SqlRegistrationStore
 from trustbridge.github.runtime import HostRuntime, RuntimeDeps, build_host_runtime
 from trustbridge.settings import TrustbridgeSettings, load_trustbridge_settings
-from trustbridge.tenancy import RoleGate, budget_left, install_tenant_hook
+from trustbridge.tenancy import RoleGate, TimeoutGate, budget_left, install_tenant_hook
 from trustbridge.tenancy.gate import SqlTenantGate
 from trustbridge.worker.deliveries import DeliveryStore, InMemoryDeliveryStore, PgDeliveryStore
 from trustbridge.worker.health import HealthServer, Heartbeat
@@ -70,6 +70,7 @@ class Core:
     connections: ConnectionData
     gate: SchemaGate
     roles: RoleGate
+    timeouts: TimeoutGate
     runtime: HostRuntime
     queue: StreamQueue | None
     relay: Relay | None
@@ -106,9 +107,9 @@ def build_core(
     `readd_on_ready` (the worker) makes a host that turns `ready` re-add its waiting rows to
     the stream (ADR 0030 invariant 8). `checker` replaces the network host checks (tests).
     Installs the tenant-context `after_begin` hook (idempotent, ADR 0031) so every session this
-    process opens sets `app.tenant_id` per transaction.
+    process opens sets `app.tenant_id` and `transaction_timeout` per transaction (ADR 0034 B8).
     """
-    install_tenant_hook()
+    install_tenant_hook(settings.transaction_timeout_seconds)
     store: DeliveryStore
     lease_store: LeaseStore
     tenants: SqlTenants | MemoryTenants
@@ -168,6 +169,9 @@ def build_core(
         connections=ConnectionData(secrets),
         gate=SchemaGate(session_factory, mock=settings.mode == "mock"),
         roles=RoleGate(session_factory, mock=settings.mode == "mock"),
+        timeouts=TimeoutGate(
+            session_factory, settings.audit_export_lag_seconds, mock=settings.mode == "mock"
+        ),
         runtime=runtime,
         queue=queue,
         relay=relay,
@@ -246,6 +250,13 @@ async def run_process(
             return 1
         # ADR 0031: production waits for a safe database role and exits; elsewhere it only warns
         if not await core.roles.startup(
+            production=settings.production,
+            timeout=budget_left(settings.schema_wait_seconds, started),
+            poll=settings.schema_poll_seconds,
+        ):
+            return 1
+        # ADR 0032/0034 B8: the same for the transaction time bound against the export lag
+        if not await core.timeouts.startup(
             production=settings.production,
             timeout=budget_left(settings.schema_wait_seconds, started),
             poll=settings.schema_poll_seconds,

@@ -145,7 +145,7 @@ ADR names them, with no emitter:
 | (none left for the admin API.) The router walk `admin.guards.mutations_without_emitter` fails any mutating route without an `emits` marker. Emitted since NG6e-2 to NG6e-5: `credential.rotate`, `tenant.disable`, `tenant.enable`, `tenant.reconcile`, `delivery.requeue` and `host.registration.start`, `.manual`, `.complete` (the `host_registration` shape); the credential events of a rotation made through the API have the system actor `api` | done |
 | `tenant.deletion.requested` and `.cancelled` (0034) | NG6h-7 (the request path) |
 | The reconciler duty calling `purge_expired` (ADR 0032 "Retention") | done (NG6h-3a): the `audit-purge` job |
-| A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export"). No such timeout exists on main and the engine is the template's (`app.db`) | NG6h (api and deletion batches). Left out of NG6d: the read routes do not need it, and no connection on main sets a timeout to check against |
+| A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export") | done (NG6h-3b): the `after_begin` hook and `tenancy.timeout_check`, see `tenancy/README.md` "Transaction time bound" |
 
 An operation ending `failed` (rolled back, previous state restored) has no event of its own
 because ADR 0032 does not list it; the inverse `oidc_trust` event shows a rolled-back kind change.
@@ -214,7 +214,7 @@ numeric `github_sender_id` and a string `delivery_id`. No roles, no grants.
 ## Settings
 
 `AUDIT_RETENTION_DAYS` (365; `0` never purges; otherwise at least the floor),
-`AUDIT_RETENTION_MIN_DAYS` (90), `AUDIT_EXPORT_LAG_SECONDS` (30), and for the purge duty
+`AUDIT_RETENTION_MIN_DAYS` (90), `AUDIT_EXPORT_LAG_SECONDS` (30, which `TRANSACTION_TIMEOUT_SECONDS`, 15, must stay below), and for the purge duty
 `AUDIT_PURGE_INTERVAL_SECONDS` (3600), `AUDIT_PURGE_BATCH_SIZE` (1000, at most 10000) and
 `AUDIT_PURGE_MAX_BATCHES` (100 batches per run, so a run holds its lease for a bounded time; the
 next run continues).
