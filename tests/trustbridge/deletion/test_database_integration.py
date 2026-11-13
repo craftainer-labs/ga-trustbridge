@@ -31,7 +31,7 @@ from tests.trustbridge.tenancy.test_deletion_db_integration import (
     _tenant,
 )
 from tests.trustbridge.tenancy.test_rls_integration import INSERTS, OWNER_ROLE, Db, _provision
-from trustbridge.deletion.database import PLAN, SqlDatabaseStep
+from trustbridge.deletion.database import PLAN, PRIMARY_KEYS, SqlDatabaseStep
 from trustbridge.deletion.drain import DrainStep
 from trustbridge.deletion.engine import DeletionEngine, EngineSteps
 from trustbridge.deletion.model import Lease, LeaseLost, StepContext
@@ -331,3 +331,75 @@ async def test_every_table_with_a_tenant_id_is_cleared_retained_or_listed(db: Db
     )
     retained = {"audit_events", "tenant_deletions"}  # ADR 0034 decision 3, record retention
     assert {row.table_name for row in rows} == {table for table, _ in PLAN} | retained
+
+
+async def test_primary_keys_match_the_catalog(db: Db) -> None:
+    """`PRIMARY_KEYS` is what the batches key on: it must be each table's real primary key."""
+    rows = await _admin_rows(
+        db,
+        "SELECT c.relname AS table_name, "
+        "array_agg(a.attname::text ORDER BY k.ord) AS cols "
+        "FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid "
+        "CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) "
+        "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum "
+        "WHERE i.indisprimary AND c.relname = ANY(:tables) GROUP BY c.relname",
+        {"tables": [table for table, _ in PLAN]},
+    )
+    assert {row.table_name: tuple(row.cols) for row in rows} == PRIMARY_KEYS
+
+
+async def test_rows_a_concurrent_update_holds_are_not_skipped_by_the_end_of_the_step(
+    db: Db,
+) -> None:
+    """Writers update two rows of two tables in open transactions: `SKIP LOCKED` passes them over
+    (a pass never waits), the step stays on the table instead of moving on, and takes them once
+    the writers commit. The updated rows are new tuple versions (their `ctid` changed), which a
+    `ctid` batch could have lost; the primary-key batch deletes them."""
+    tenant, deletion = await _in_database_step(db)
+    await _seed(db, tenant)
+    writers = {}
+    updates = {
+        "scope_leases": (
+            "UPDATE scope_leases SET fence = fence + 100 "
+            "WHERE tenant_id = :t AND lease_key IN ('k0', 'k1')",
+            {"t": tenant.id},
+        ),
+        "webhook_deliveries": (
+            "UPDATE webhook_deliveries SET event = 'ping' "
+            "WHERE tenant_id = :t AND delivery_id IN ('d0', 'd1')",
+            {"t": tenant.id},
+        ),
+    }
+    for table, (sql, params) in updates.items():
+        writers[table] = await db.admin.connect()
+        await writers[table].execute(text(sql), params)
+    stuck: list[str] = []
+    cursor: dict[str, Any] = {}
+    try:
+        for _ in range(60):
+            outcome = await _step(db).run(_ctx(tenant, deletion, cursor))
+            if outcome.done:
+                break
+            cursor = dict(outcome.cursor or {})
+            table = cursor["table"]
+            if table in writers and not outcome.counts:
+                # Nothing left but the locked rows: the step waits on the table, never leaves it.
+                stuck.append(table)
+                if table == "scope_leases":
+                    assert await _count(db, "scope_leases", tenant.id) == 2
+                writer = writers.pop(table)
+                await writer.commit()
+                await writer.close()
+    finally:
+        for writer in writers.values():
+            await writer.rollback()
+            await writer.close()
+    assert outcome.done
+    assert stuck == ["scope_leases", "webhook_deliveries"]
+    assert await _remaining(db, tenant.id) == dict.fromkeys(TENANT_TABLES, 0)
+    assert not await _admin_scalar(
+        db,
+        "SELECT count(*) FROM webhook_deliveries WHERE tenant_id = :t AND status <> 'deleted'",
+        {"t": tenant.id},
+    )
+    await _close(db, deletion)

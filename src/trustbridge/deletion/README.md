@@ -71,10 +71,20 @@ cursor leaves them alone.
 `SqlDatabaseStep(factory, batch_size=500)` deletes the tenant's rows in `PLAN` order (`credential_operations`,
 `adapter_credentials`, `adapter_resources`, `scope_leases`, `tenant_repositories`, then clears `webhook_deliveries`
 bodies), never the `tenants` row. One pass is one batch of one table in one transaction inside
-`tenant_context(tenant_id)`; a short batch moves the cursor (`{"table", "removed"}`) to the next table, a full one asks
+`tenant_context(tenant_id)`; a short batch with nothing of the tenant left in the table moves the cursor (`{"table", "removed"}`) to the next table, a full one asks
 for another pass on the same table. A cursor it cannot read starts over, which is safe because each pass deletes whatever
 is left.
 
+- **Primary-key batches (NG6h-4c).** A batch is `DELETE FROM t WHERE (pk) IN (SELECT pk FROM t WHERE tenant_id = :tenant
+  ORDER BY pk LIMIT :limit FOR UPDATE SKIP LOCKED)` (the `webhook_deliveries` UPDATE adds `status <> 'deleted'`), with the
+  key from `database.PRIMARY_KEYS` (composite for most tables; an integration test compares it with `pg_index`). It is not
+  keyed on `ctid`, which a concurrent update changes, so an updated row could be skipped. `SKIP LOCKED` passes over rows
+  another transaction holds instead of waiting, so a pass can remove fewer rows than the batch while rows are left; a short
+  pass therefore checks, in the same transaction, whether the tenant still has a row in the table (for deliveries, one not
+  yet `deleted`) and, if so, keeps the cursor on the table: the next pass takes the rows once their holder commits. The
+  step moves to the next table only when the table holds nothing of the tenant's. A holder that never lets go keeps the
+  step on that table until the run budget ends the run (each pass is cheap); `tb_delete_tenant`'s emptiness check stays the
+  backstop for a row written after the step passed the table.
 - **No definer functions.** The app role already holds `DELETE` on the five tenant tables and `UPDATE` on
   `webhook_deliveries`, and the `tenant_isolation` policies (ADR 0031) admit the context tenant, so the step adds no
   privilege. Every pass starts with a lease guard in the same transaction (a `SELECT` on `tenant_deletions` for this
