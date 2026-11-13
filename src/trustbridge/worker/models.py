@@ -38,16 +38,22 @@ class WebhookDelivery(Base):
     The primary key is `(host, delivery_id)`: GitHub's delivery GUID is unique per host, and a
     host must not be able to suppress another host's delivery by reusing its id.
     Host-scoped and outside tenant RLS (written before the tenant is known). `status` is
-    `pending`, `processed` or `dead`; `attempts` counts handler failures only.
+    `pending`, `processed`, `dead` or `deleted` (a tenant's body cleared by its data deletion,
+    ADR 0034; nothing relays or handles such a row again); `attempts` counts handler failures
+    only. `tenant_id` is set by the worker when it resolves the delivery's installation (null
+    until then and for rows older than the column); it has no foreign key.
     """
 
     __tablename__ = "webhook_deliveries"
     __table_args__ = (
-        CheckConstraint("status in ('pending', 'processed', 'dead')", name="ck_wd_status"),
+        CheckConstraint(
+            "status in ('pending', 'processed', 'dead', 'deleted')", name="ck_wd_status"
+        ),
         Index("ix_wd_status_next", "status", "next_attempt_at"),
         Index("ix_wd_host_status", "host", "status"),
         Index("ix_wd_received_at", "received_at"),
         Index("ux_wd_host_body_sha256", "host", "body_sha256", unique=True),
+        Index("ix_wd_tenant", "tenant_id", postgresql_where=text("tenant_id IS NOT NULL")),
     )
 
     host: Mapped[str] = mapped_column(String, primary_key=True)
@@ -66,6 +72,7 @@ class WebhookDelivery(Base):
     dead_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     body_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
 
 class ScopeLease(Base):
@@ -102,6 +109,57 @@ class Tenant(Base):
     admin_disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     admin_disabled_by: Mapped[str | None] = mapped_column(Text)
     admin_disable_reason: Mapped[str | None] = mapped_column(Text)
+
+
+DELETION_TERMINAL_STATES = ("done", "failed", "cancelled")
+"""The `tenant_deletions.state` values after which a deletion is over (ADR 0034)."""
+
+
+class TenantDeletion(Base):
+    """One tenant data deletion (ADR 0034): a write-ahead, resumable operation.
+
+    Host-scoped and outside RLS, with no foreign key to `tenants`: the record outlives the
+    tenant row. It stores ids, flags, counts and what was skipped, never the organisation login
+    or other tenant content. At most one non-terminal row exists per tenant.
+    """
+
+    __tablename__ = "tenant_deletions"
+    __table_args__ = (
+        CheckConstraint(
+            "state in ('requested', 'draining', 'platform', 'github', 'database', "
+            "'done', 'failed', 'cancelled')",
+            name="ck_tenant_deletions_state",
+        ),
+        Index(
+            "ux_tenant_deletions_open",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("state NOT IN ('done', 'failed', 'cancelled')"),
+        ),
+        Index("ix_tenant_deletions_state_updated", "state", "updated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    host: Mapped[str] = mapped_column(Text)
+    installation_id: Mapped[int] = mapped_column(BigInteger)
+    requested_by_sub: Mapped[str] = mapped_column(Text)
+    requested_by_iss: Mapped[str] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    delete_platform_resources: Mapped[bool] = mapped_column(server_default=text("false"))
+    state: Mapped[str] = mapped_column(Text, server_default="requested")
+    step_cursor: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=text("'{}'"))
+    counts: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=text("'{}'"))
+    skipped: Mapped[list[object]] = mapped_column(JSONB, server_default=text("'[]'"))
+    holder: Mapped[str | None] = mapped_column(Text)
+    fence: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_error: Mapped[str | None] = mapped_column(Text)
 
 
 class TenantRepository(Base):

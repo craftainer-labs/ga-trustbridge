@@ -40,6 +40,17 @@ async def test_installation_lifecycle_in_memory() -> None:
     assert await tenants.set_installation_state("github.com", 8, "suspended") is None
 
 
+async def test_a_deleted_installation_is_not_revived_by_an_upsert_in_memory() -> None:
+    """A deleted installation keeps its id, state and org when a later event upserts it."""
+    tenants = _tenants()
+    tenant_id = await tenants.upsert_installation("github.com", 7, "acme", 1)
+    await tenants.set_installation_state("github.com", 7, "deleted")
+    assert await tenants.upsert_installation("github.com", 7, "acme2", 2) == tenant_id
+    tenant = await tenants.get_tenant(tenant_id)
+    assert tenant.org == "acme"
+    assert tenants._rows[tenant_id]["state"] == "deleted"
+
+
 async def test_repository_changes_are_applied_renamed_and_removed_in_memory() -> None:
     """Repository changes are applied renamed and removed in memory."""
     tenants = _tenants()

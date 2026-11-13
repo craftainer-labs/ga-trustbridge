@@ -471,7 +471,8 @@ async def test_the_installation_sync_never_changes_the_admin_disable_columns() -
         async with session_factory() as session:
             row = await session.get(Tenant, tenant_id)
         assert row is not None
-        assert (row.state, row.org) == ("active", "acme-again")
+        # A deleted installation is not revived by a later upsert (ADR 0034): state and org stay.
+        assert (row.state, row.org) == ("deleted", "acme-renamed")
         assert row.admin_disabled_at is not None
         assert (row.admin_disabled_by, row.admin_disable_reason) == ("u1", "hold")
     finally:

@@ -44,7 +44,7 @@ yet (release N+1), so the app role behaves as before.
 `tb_current_tenant()`, the `SECURITY DEFINER` functions `tb_resolve_tenant`, `tb_upsert_tenant`
 and `tb_list_tenants` (fixed `search_path = pg_catalog, public`, `EXECUTE` revoked from `PUBLIC` and
 granted to `trustbridge_app` and `trustbridge_owner`), and the inert `tenant_isolation` and
-`owner_all` policies. `tb_delete_tenant` arrives with tenant data deletion (NG6h), and
+`owner_all` policies. `tb_delete_tenant` arrives with tenant data deletion (NG6h-1, migration `9c2e5a7f1d84`, below), and
 `tb_get_tenant(uuid)` (migration `a1c4e8d27b53`, NG6d-2) is its single-row twin with the same columns.
 Migration `b7d3f5a19c68` (NG6e-1) adds the nullable `tenants.admin_disabled_at`, `admin_disabled_by` and
 `admin_disable_reason` columns (a CHECK keeps them all set or all null; `tb_upsert_tenant` and the sync never
@@ -55,6 +55,23 @@ row-locked write and returns the before and after values. A repeat disable keeps
 reason. `TenantInfo` has the two new fields (defaulted, last). `deleting` stays the constant `false`
 until NG6h, which also adds the refusal to enable a tenant with a non-terminal deletion at the
 `v_deleting` hook in `tb_set_tenant_disabled`.
+
+Migration `9c2e5a7f1d84` (NG6h-1, ADR 0034) is the database foundation of tenant data deletion; no
+application code calls it yet. It adds the host-scoped `tenant_deletions` table (outside RLS, no foreign key
+to `tenants`; states `requested`, `draining`, `platform`, `github`, `database`, `done`, `failed`, `cancelled`,
+of which the last three are terminal; one non-terminal row per tenant; the app role has `SELECT`, `INSERT` and
+`UPDATE` and no `DELETE`) and `webhook_deliveries.tenant_id` (nullable, partial index, `deleted` status).
+It replaces, under the same signatures, `tb_list_tenants` and `tb_get_tenant` (`deleting` is now real),
+`tb_set_tenant_disabled` (`enable` is refused with SQLSTATE 55000 while a non-terminal deletion exists; the
+state is read after the tenant row lock) and `tb_upsert_tenant` (a `deleted` tenant is returned unchanged,
+and `SqlTenants.upsert_installation` does the same until release N+1 moves it onto the function). It adds
+`tb_request_tenant_deletion(...)`, which takes the same row lock as enable and disable, and
+`tb_delete_tenant(uuid)`, which refuses (55000) unless the tenant is admin-disabled, has a deletion in its
+`database` step and has no rows left in the five other tables. Because those tables have no foreign key, a
+writer is not blocked by the row lock; `tb_delete_tenant` checks again after the delete and rolls it back if
+a row committed in between, and the engine must stop writing for a deleting tenant first. The downgrade is
+refused while any `tenant_deletions` row exists. N-1 safe: only additions and same-signature function
+bodies; the previous release never reads or writes the new column, status or table.
 
 ## Grants
 

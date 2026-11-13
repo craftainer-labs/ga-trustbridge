@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 
 from pydantic import SecretStr
 from redis.asyncio import Redis
-from sqlalchemy import delete, select, update
+from sqlalchemy import case, delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -77,14 +77,25 @@ class SqlTenants:
     async def upsert_installation(
         self, host: str, installation_id: int, org: str, org_id: int, *, suspended: bool = False
     ) -> UUID:
-        """Create or update the tenant of `(host, installation_id)` as `suspended` or `active`."""
+        """Create or update the tenant of `(host, installation_id)` as `suspended` or `active`.
+
+        A tenant whose state is `deleted` is returned unchanged, as `tb_upsert_tenant` does: a
+        late or replayed event cannot revive it (ADR 0034).
+        """
         state = "suspended" if suspended else "active"
         insert = pg_insert(TenantRow).values(
             host=host, installation_id=installation_id, org=org, org_id=org_id, state=state
         )
         upsert = insert.on_conflict_do_update(
             constraint="uq_tenants_host_inst",
-            set_={"org": org, "org_id": org_id, "state": state},
+            set_={
+                column: case((TenantRow.state == "deleted", current), else_=new)
+                for column, current, new in (
+                    ("org", TenantRow.org, org),
+                    ("org_id", TenantRow.org_id, org_id),
+                    ("state", TenantRow.state, state),
+                )
+            },
         ).returning(TenantRow.id)
         async with self._sf() as session, session.begin():
             tenant_id: UUID = (await session.execute(upsert)).scalar_one()
@@ -182,6 +193,8 @@ class MemoryTenants:
     ) -> UUID:
         """Create or update the tenant as `suspended` or `active`."""
         tenant_id = self._by_key.setdefault((host, installation_id), uuid4())
+        if self._rows.get(tenant_id, {}).get("state") == "deleted":
+            return tenant_id  # a deleted installation is never revived
         self._rows[tenant_id] = {
             "host": host,
             "installation_id": installation_id,

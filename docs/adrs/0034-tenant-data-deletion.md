@@ -49,7 +49,7 @@ reconciler resumes a non-terminal deletion.
 - **Table `tenant_deletions`**, host-scoped and outside RLS like `webhook_deliveries`
   (0031 "Already decided"), with no foreign key to `tenants`: `id` (UUID), `tenant_id`,
   `host`, `installation_id`, `requested_by_sub` and `requested_by_iss`, `requested_at`,
-  `state` (`requested`, `draining`, `platform`, `github`, `database`, `done`, `failed`),
+  `delete_platform_resources` (the request flag, user decision 1), `state` (`requested`, `draining`, `platform`, `github`, `database`, `done`, `failed`, `cancelled`; the last three are terminal; NG6h-1 added `cancelled` and the flag column),
   `step_cursor` (jsonb: the position inside the current step), `counts` (rows and resources
   removed per category), `skipped` (jsonb: what was not removed and why), its own lease
   (`holder`, `fence`, `expires_at`, same fencing rule as 0028 invariant 10), `updated_at`,
