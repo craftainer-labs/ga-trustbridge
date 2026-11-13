@@ -730,7 +730,19 @@ async def test_the_hardening_downgrade_refuses_while_a_deletion_is_open_then_res
             "SELECT array_agg(DISTINCT p.proconfig[1]) FROM pg_proc p WHERE p.prosecdef "
             "AND p.pronamespace = 'public'::regnamespace AND p.proname = ANY(:n)"
         )
-        older = ["tb_get_tenant", "tb_audit_list", "tb_upsert_tenant"]
+        older = [
+            "tb_resolve_tenant",
+            "tb_upsert_tenant",
+            "tb_list_tenants",
+            "tb_get_tenant",
+            "tb_set_tenant_disabled",
+            "tb_request_tenant_deletion",
+            "tb_audit_purge",
+            "tb_audit_list",
+            "tb_audit_get",
+        ]
+        count = "SELECT count(*) FROM pg_proc WHERE proname = ANY(:n) AND prosecdef"
+        assert await _admin_scalar(scratch, count, {"n": older}) == len(older)
         assert await _admin_scalar(scratch, paths, {"n": older}) == [
             "search_path=pg_catalog, public"
         ]
