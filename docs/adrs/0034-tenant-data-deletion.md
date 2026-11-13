@@ -236,16 +236,17 @@ adapter fakes.
 ## Open issues
 
 - **Re-creation (decided, NG6h-1).** A `done` row in `tenant_deletions` for `(host, installation_id)`
-  (or a `database`-step row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` returns NULL and creates nothing, and `SqlTenants` and
+  (or a `database`-step row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` creates nothing (NG6h-1 returned NULL; NG6h-2 raises, below), and `SqlTenants` and
   `MemoryTenants` raise `TenantDeletedError`. A reinstall gets a new installation id and is not
   blocked; an open, failed or cancelled deletion is not a tombstone. The ports also refuse a
   `deleted` tenant and one with a non-terminal deletion, and the installation handler drops the
   event (NG6h-1). `tb_upsert_tenant`, `tb_delete_tenant`, `tb_request_tenant_deletion`,
   `SqlTenants.upsert_installation` and `SqlTenants.set_installation_state` take one
   per-installation advisory lock first, so a concurrent delete and upsert or state change cannot
-  recreate or rewrite the tenant. From NG6h-2 `tb_upsert_tenant` also returns NULL for a tenant
-  with a non-terminal deletion (migration `3b8d6f2a4c17`), the DB-level twin of the `deleting`
-  reason, and the worker drops a tombstoned installation's deliveries.
+  recreate or rewrite the tenant. From NG6h-2 `tb_upsert_tenant` never returns NULL: it raises SQLSTATE
+  `TB001` for a tombstone and `TB002` for a tenant with a non-terminal deletion (migration
+  `3b8d6f2a4c17`), the DB-level twins of the `tombstone` and `deleting` reasons (`SqlTenants.deleted_error`
+  maps them), and the worker drops a tombstoned installation's deliveries.
 - **Grace window (decided, NG6h-1).** `tenant_deletions.not_before` (nullable, default NULL: no
   delay) is stored from the optional `tb_request_tenant_deletion` argument; the engine honours it.
 - **Export before delete.** EB-15 lists "data export and deletion". A per-tenant data export is
