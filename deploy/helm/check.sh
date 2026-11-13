@@ -67,10 +67,12 @@ expect_failure "database.runtime.existingSecret is required" -- -f "$minimal" --
 expect_failure "valkey.existingSecret is required" -- -f "$minimal" --set valkey.existingSecret=
 expect_failure "trustbridge.signers is required" -- -f "$minimal" --set trustbridge.signers=null
 expect_failure "proxy.existingSecret is required" -- -f "$minimal" --set proxy.httpsProxyKey=https-proxy
-# values.schema.json: the output names the schema failure, the offending key and the rule.
-# The wording is helm's; CI prints it above, and the patterns are as specific as it allows.
-schema="don't meet the specifications of the schema"
-expect_failure "$schema" "nonsense" -- -f "$minimal" --set nonsense=1 # unknown top-level key
-expect_failure "$schema" "mode" '"production"' '"dev"' -- -f "$minimal" --set mode=mock
-expect_failure "$schema" "port" "65535" -- -f "$minimal" --set worker.health.port=70000
+# values.schema.json: the output names the schema failure, the path and the rule. The wording
+# is helm 4's (santhosh-tekuri/jsonschema), as printed in CI above.
+schema="values don't meet the specifications of the schema"
+expect_failure "$schema" "additional properties 'nonsense' not allowed" -- -f "$minimal" --set nonsense=1
+expect_failure "$schema" "at '/mode': value must be one of 'production', 'dev'" -- \
+    -f "$minimal" --set mode=mock
+expect_failure "$schema" "at '/worker/health/port'" "65535" -- \
+    -f "$minimal" --set worker.health.port=70000
 echo "helm chart checks passed"
