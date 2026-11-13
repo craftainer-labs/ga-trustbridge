@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from trustbridge.audit import AuditEvent, scrub_text
+from trustbridge.audit.redact import deletion_counts
 from trustbridge.deletion import audit, metrics
 from trustbridge.deletion.model import (
     NEXT_STATE,
@@ -29,6 +30,7 @@ from trustbridge.deletion.model import (
     NonRetryableError,
     RunBudgetExhausted,
     StepContext,
+    StepOutcome,
 )
 from trustbridge.deletion.steps import DatabaseStep, GithubStep, PlatformStep, Step
 from trustbridge.deletion.store import DeletionStore
@@ -60,7 +62,7 @@ class EngineSteps:
 
 @dataclass(frozen=True, slots=True)
 class EngineConfig:
-    """The engine's timing (the settings arrive in NG6h-4a-3)."""
+    """The engine's timing (the `DELETION_*` settings, `TrustbridgeSettings`)."""
 
     holder: str
     lease_ttl_seconds: int
@@ -85,6 +87,33 @@ def _merge_counts(base: Mapping[str, int], more: Mapping[str, int]) -> dict[str,
     for key, value in more.items():
         out[key] = out.get(key, 0) + value
     return out
+
+
+def _events_after(
+    record: DeletionRecord, outcome: StepOutcome, counts: Mapping[str, int]
+) -> list[AuditEvent]:
+    """The audit events of a step pass, in write order.
+
+    A step's output that the audit shapes refuse (a `ValueError` from the builders: a bad
+    category name, a negative or non-integer count) can never succeed on retry, so it is a
+    programming error in the step and ends the deletion as `failed`, visibly, instead of looping.
+    The cumulative `counts` are checked on every pass, partial ones included, so a bad value is
+    never saved (the failure event itself reports the last saved counts).
+    """
+    try:
+        deletion_counts(counts)  # a partial pass saves its counts, so check them now too
+        events = audit.skipped_events(record, outcome.skipped)
+        if not outcome.done:
+            return events
+        if record.state == "database":
+            return [
+                *events,
+                audit.step_event(record, "done", counts),
+                audit.completed_event(record, counts),
+            ]
+        return [audit.step_event(record, NEXT_STATE[record.state], counts), *events]
+    except ValueError as error:
+        raise NonRetryableError("invalid_step_output", str(error)) from error
 
 
 def _describe(error: Exception) -> str:
@@ -159,24 +188,18 @@ class DeletionEngine:
             )
             counts = _merge_counts(record.counts, outcome.counts)
             skipped = [*record.skipped, *outcome.skipped]
-            events = audit.skipped_events(record, outcome.skipped)
+            events = _events_after(record, outcome, counts)
             if not outcome.done:
                 await self._advance(
                     run, record.state, counts, skipped, events, cursor=outcome.cursor
                 )
                 continue
             if record.state == "database":
-                events += [
-                    audit.step_event(record, "done", counts),
-                    audit.completed_event(record, counts),
-                ]
                 await self._store.finish(
                     run.lease, record, counts=counts, skipped=skipped, events=events
                 )
                 return
-            to_state = NEXT_STATE[record.state]
-            events.insert(0, audit.step_event(record, to_state, counts))
-            await self._advance(run, to_state, counts, skipped, events)
+            await self._advance(run, NEXT_STATE[record.state], counts, skipped, events)
 
     async def _advance(  # noqa: PLR0913 -- one transition's data, kept explicit
         self,
@@ -191,7 +214,13 @@ class DeletionEngine:
         """Commit the transition and its events, then move `run.record` to what was committed."""
         record = run.record
         await self._store.advance(
-            run.lease, to_state, cursor=cursor, counts=counts, skipped=skipped, events=events
+            run.lease,
+            record.tenant_id,
+            to_state,
+            cursor=cursor,
+            counts=counts,
+            skipped=skipped,
+            events=events,
         )
         changed = to_state != record.state
         run.record = replace(
@@ -215,7 +244,12 @@ class DeletionEngine:
             reason = f"{error.code}: {scrub_text(error.message, MAX_ERROR_CHARS)}"
         metrics.failed.add(1, {"step": run.record.state})
         try:
-            await self._store.fail(run.lease, reason, [audit.failed_event(run.record, error.code)])
+            await self._store.fail(
+                run.lease,
+                run.record.tenant_id,
+                reason,
+                [audit.failed_event(run.record, error.code)],
+            )
         except LeaseLost:
             logger.warning("tenant deletion %s: lease lost before failing", run.record.id)
 

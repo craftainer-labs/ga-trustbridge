@@ -13,6 +13,8 @@ AI-assisted coding workflow (`CLAUDE.md` at the repo root covers that).
   the reasoning behind them. See `adrs/README.md`.
 - `openapi/` — committed OpenAPI snapshots of the admin API (see
   `src/trustbridge/admin/README.md`).
+- `runbooks/` — operator procedures for specific incidents and compliance
+  tasks, such as a tenant deletion. See `runbooks/README.md`.
 - `plans/` — working plans for in-progress or upcoming work. See
   `plans/README.md`.
 - `frs/` — functional requirements: what the system must do. See

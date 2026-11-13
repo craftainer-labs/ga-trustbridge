@@ -314,3 +314,126 @@ async def test_run_schedules_the_audit_purge() -> None:
     stop.set()
     await recon.run(stop)
     assert "audit-purge" in beat._limits
+
+
+class FakeDriver:
+    """A `DeletionDriver` that answers a script of claims (True) and ends (False) or raises."""
+
+    def __init__(self, *script: bool | Exception) -> None:
+        """`script` is consumed in order; once it is empty nothing is runnable."""
+        self.script = list(script)
+        self.calls = 0
+
+    async def run_once(self) -> bool:
+        """The next scripted answer."""
+        self.calls += 1
+        if not self.script:
+            return False
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _deleter(h: Harness, driver: FakeDriver | None) -> tuple[Reconciler, Heartbeat]:
+    beat = Heartbeat()
+    beat.register("tenant-deletion", 60)
+    recon = Reconciler(
+        h.settings,
+        ReconcilerDeps(
+            store=h.store,
+            queue=h.queue,
+            relay=h.relay,
+            hosts=h.hosts,
+            leases=h.leases,
+            deliveries=None,
+            clock=h.clock,
+            heartbeat=beat,
+            deletion=driver,
+        ),
+    )
+    return recon, beat
+
+
+async def test_tenant_deletion_runs_claims_until_none_is_runnable_beating_per_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two claims then an empty poll: three passes, a beat before each and one at the end."""
+    h = await Harness({}).start()
+    driver = FakeDriver(True, True)
+    recon, beat = _deleter(h, driver)
+    seen: list[str] = []
+    monkeypatch.setattr(beat, "beat", seen.append)
+    assert await recon.tenant_deletion() == 2
+    assert driver.calls == 3
+    assert seen == ["tenant-deletion"] * 4
+
+
+async def test_tenant_deletion_runs_at_most_the_batch_size_per_poll() -> None:
+    """`DELETION_BATCH_SIZE` bounds one poll; the rest waits for the next."""
+    h = await Harness({}, deletion_batch_size=2).start()
+    driver = FakeDriver(True, True, True, True)
+    assert await _deleter(h, driver)[0].tenant_deletion() == 2
+    assert driver.calls == 2
+    assert driver.script == [True, True]
+
+
+async def test_a_store_error_from_a_pass_is_logged_and_ends_the_poll_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The error does not escape (the loop stays alive) and the next poll runs again."""
+    h = await Harness({}).start()
+    driver = FakeDriver(True, ConnectionError("database went away"), True)
+    recon, _ = _deleter(h, driver)
+    with caplog.at_level("ERROR"):
+        assert await recon.tenant_deletion() == 1
+    assert caplog.text.count("tenant deletion pass failed") == 1
+    assert driver.calls == 2
+    assert await recon.tenant_deletion() == 1  # the next poll carries on
+    assert await recon.tenant_deletion() == 0
+
+
+async def test_tenant_deletion_is_a_singleton_duty() -> None:
+    """While another replica holds the `tenant-deletion` lease, the duty does nothing."""
+    h = await Harness({}).start()
+    driver = FakeDriver(True)
+    async with h.leases.hold(NIL_TENANT, "_core", "tenant-deletion"):
+        assert await _deleter(h, driver)[0].tenant_deletion() == 0
+    assert driver.calls == 0
+    assert await _deleter(h, driver)[0].tenant_deletion() == 1  # lease free again
+
+
+async def test_tenant_deletion_without_a_driver_is_a_no_op() -> None:
+    """No engine composed: nothing to run."""
+    h = await Harness({}).start()
+    assert await _deleter(h, None)[0].tenant_deletion() == 0
+
+
+async def test_run_schedules_tenant_deletion_with_a_limit_covering_its_lease_budget(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The loop's stale limit is its interval plus the longer of the two lease TTLs."""
+    h = await Harness({}, deletion_lease_ttl_seconds=600).start()
+    recon, beat = _deleter(h, None)
+    stop = asyncio.Event()
+    stop.set()
+    with caplog.at_level("INFO"):
+        await recon.run(stop)
+    assert beat._limits["tenant-deletion"] == h.settings.deletion_poll_seconds + 600
+    assert caplog.text.count("tenant deletion disabled: no deletion engine") == 1
+
+
+async def test_run_logs_nothing_about_deletion_when_a_driver_is_present(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The disabled line is only for a missing driver."""
+    h = await Harness({}).start()
+    recon, beat = _deleter(h, FakeDriver())
+    stop = asyncio.Event()
+    stop.set()
+    with caplog.at_level("INFO"):
+        await recon.run(stop)
+    assert "tenant deletion disabled" not in caplog.text
+    assert beat._limits["tenant-deletion"] == h.settings.deletion_poll_seconds + max(
+        h.settings.lease_ttl_seconds, h.settings.deletion_lease_ttl_seconds
+    )

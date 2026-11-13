@@ -295,8 +295,8 @@ core, not here:
 - **Adapter operations**: `CredentialCore` asks `CoreDeps.gate` (`OperationGate.allows`) before
   it starts an operation, refreshes a scope or sweeps orphans, and raises `TenantDisabledError`
   for a disabled tenant. An operation already in flight is resumed and finishes. The gate is
-  given the operation kind so NG6h can let a deletion's own delete and revoke operations
-  through. The api builds a `CredentialCore` for the rotate route with `SqlTenantGate`
+  given the operation kind and an optional `deletion_id`: `SqlTenantGate` lets a `delete` carrying
+  the id of a non-terminal deletion of that tenant through a disabled tenant (ADR 0034), and nothing else. The api builds a `CredentialCore` for the rotate route with `SqlTenantGate`
   (`tenancy/gate.py`) as its gate (NG6e-5); the worker has none yet.
 - The installation sync (`_sync`, `SqlTenants.upsert_installation`) never writes the columns.
 

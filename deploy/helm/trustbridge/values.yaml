@@ -396,6 +396,24 @@ trustbridge:
     deniedWindowSeconds: 60
     deniedBurst: 5
     deniedTimeoutMs: 50
+  ## Tenant deletion (ADR 0034): the reconciler's singleton duty and the engine's own lease.
+  ## The drain poll plus one step pass must fit in half of leaseTtlSeconds (the app refuses
+  ## to start in production otherwise, and warns elsewhere).
+  deletion:
+    pollSeconds: 10
+    # Deletions claimed per poll, 1..1000.
+    batchSize: 10
+    # The fenced database lease of one deletion, 1..3600 s; a run stops after budgetFraction of it.
+    leaseTtlSeconds: 120
+    budgetFraction: 0.5
+    # A failed attempt waits min(cap, base * 2^attempts) seconds, at most 86400.
+    backoffBaseSeconds: 30
+    backoffCapSeconds: 3600
+    # The drain step re-scans the tenant's writers every drainPollSeconds, at most this many times.
+    drainMaxPasses: 30
+    drainPollSeconds: 2
+    # The longest one step pass may take between two lease renewals.
+    stepPassSeconds: 30
   lease:
     ttlSeconds: 120
     adapterCallTimeoutSeconds: 30

@@ -344,3 +344,90 @@ def test_production_still_requires_https_for_the_public_base_url() -> None:
     """The template's production rule holds on top of this one."""
     with pytest.raises(ValidationError, match="must use https"):
         _prod(public_base_url="http://localhost:8000")
+
+
+def test_deletion_defaults_fit_the_engine_and_the_drain_step() -> None:
+    """The documented defaults build the engine's config and the drain step (NG6h-4a-3)."""
+    from trustbridge.deletion.drain import DrainStep  # noqa: PLC0415 -- only this test needs them
+    from trustbridge.deletion.engine import EngineConfig  # noqa: PLC0415
+
+    s = make_settings()
+    assert (s.deletion_poll_seconds, s.deletion_batch_size, s.deletion_lease_ttl_seconds) == (
+        10,
+        10,
+        120,
+    )
+    assert (s.deletion_budget_fraction, s.deletion_step_pass_seconds) == (0.5, 30)
+    assert (s.deletion_backoff_base_seconds, s.deletion_backoff_cap_seconds) == (30, 3600)
+    assert (s.deletion_drain_max_passes, s.deletion_drain_poll_seconds) == (30, 2)
+    EngineConfig(
+        "holder",
+        s.deletion_lease_ttl_seconds,
+        s.deletion_backoff_base_seconds,
+        s.deletion_backoff_cap_seconds,
+        s.deletion_budget_fraction,
+    )
+    DrainStep(
+        object(),  # type: ignore[arg-type]
+        poll_seconds=s.deletion_drain_poll_seconds,
+        max_passes=s.deletion_drain_max_passes,
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"deletion_poll_seconds": 0},
+        {"deletion_batch_size": 0},
+        {"deletion_batch_size": 1001},
+        {"deletion_lease_ttl_seconds": 0},
+        {"deletion_lease_ttl_seconds": 3601},
+        {"deletion_budget_fraction": 0},
+        {"deletion_budget_fraction": 1},
+        {"deletion_backoff_base_seconds": 0},
+        {"deletion_backoff_cap_seconds": 0},
+        {"deletion_backoff_cap_seconds": 86401},
+        {"deletion_drain_max_passes": 1},
+        {"deletion_drain_poll_seconds": -1},
+        {"deletion_step_pass_seconds": 0},
+    ],
+)
+def test_deletion_settings_are_bounded(bad: dict[str, Any]) -> None:
+    """Each value stays inside what the database functions and the engine accept."""
+    with pytest.raises(ValidationError):
+        make_settings(**bad)
+
+
+def test_the_deletion_backoff_bounds_are_ordered() -> None:
+    """Base above cap would be refused by the engine, so settings refuse it first."""
+    with pytest.raises(ValidationError, match="DELETION_BACKOFF_BASE_SECONDS"):
+        make_settings(deletion_backoff_base_seconds=100, deletion_backoff_cap_seconds=10)
+
+
+_TOO_SLOW: dict[str, Any] = {
+    "deletion_lease_ttl_seconds": 60,
+    "deletion_drain_poll_seconds": 10,
+    "deletion_step_pass_seconds": 25,
+}  # 35 s between renewals against half of 60 s
+
+
+def test_production_refuses_a_deletion_lease_the_drain_and_a_step_pass_could_outlast() -> None:
+    """Fail closed: the lease could lapse under a running step."""
+    with pytest.raises(ValidationError, match="DELETION_DRAIN_POLL_SECONDS"):
+        _prod(**_TOO_SLOW)
+
+
+def test_outside_production_the_same_timing_only_warns(caplog: pytest.LogCaptureFixture) -> None:
+    """Warn elsewhere, following the role-safety precedent."""
+    with caplog.at_level(logging.WARNING):
+        s = make_settings(**_TOO_SLOW)
+    assert s.deletion_lease_ttl_seconds == 60
+    assert "DELETION_STEP_PASS_SECONDS" in caplog.text
+
+
+def test_a_deletion_timing_at_exactly_half_the_ttl_is_accepted() -> None:
+    """The margin is inclusive."""
+    s = _prod(
+        deletion_lease_ttl_seconds=60, deletion_drain_poll_seconds=5, deletion_step_pass_seconds=25
+    )
+    assert s.production

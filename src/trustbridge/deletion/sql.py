@@ -119,6 +119,7 @@ class SqlDeletionStore:
     async def advance(  # noqa: PLR0913 -- the function's own arguments
         self,
         lease: Lease,
+        tenant_id: UUID,
         to_state: str,
         *,
         cursor: Mapping[str, Any] | None,
@@ -134,7 +135,6 @@ class SqlDeletionStore:
             "counts": _dump(counts),
             "skipped": _dump(skipped),
         }
-        tenant_id = events[0].tenant_id if events else None
         async with self._tx(tenant_id) as session:
             await session.execute(_ADVANCE, params)
             await self._events(session, events)
@@ -158,9 +158,10 @@ class SqlDeletionStore:
             )
             await self._events(session, events)
 
-    async def fail(self, lease: Lease, reason: str, events: Sequence[AuditEvent]) -> None:
+    async def fail(
+        self, lease: Lease, tenant_id: UUID, reason: str, events: Sequence[AuditEvent]
+    ) -> None:
         """Write the terminal `failed` state and `events`."""
-        tenant_id = events[0].tenant_id if events else None
         async with self._tx(tenant_id) as session:
             await session.execute(_FAIL, {**_lease_args(lease), "reason": reason})
             await self._events(session, events)

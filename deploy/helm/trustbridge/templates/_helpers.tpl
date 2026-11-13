@@ -223,6 +223,15 @@ existing Secret. A null or empty value is not set, so the application default ap
 {{- $_ := set $c "AUDIT_DENIED_WINDOW_SECONDS" $tb.audit.deniedWindowSeconds -}}
 {{- $_ := set $c "AUDIT_DENIED_BURST" $tb.audit.deniedBurst -}}
 {{- $_ := set $c "AUDIT_DENIED_TIMEOUT_MS" $tb.audit.deniedTimeoutMs -}}
+{{- $_ := set $c "DELETION_POLL_SECONDS" $tb.deletion.pollSeconds -}}
+{{- $_ := set $c "DELETION_BATCH_SIZE" $tb.deletion.batchSize -}}
+{{- $_ := set $c "DELETION_LEASE_TTL_SECONDS" $tb.deletion.leaseTtlSeconds -}}
+{{- $_ := set $c "DELETION_BUDGET_FRACTION" $tb.deletion.budgetFraction -}}
+{{- $_ := set $c "DELETION_BACKOFF_BASE_SECONDS" $tb.deletion.backoffBaseSeconds -}}
+{{- $_ := set $c "DELETION_BACKOFF_CAP_SECONDS" $tb.deletion.backoffCapSeconds -}}
+{{- $_ := set $c "DELETION_DRAIN_MAX_PASSES" $tb.deletion.drainMaxPasses -}}
+{{- $_ := set $c "DELETION_DRAIN_POLL_SECONDS" $tb.deletion.drainPollSeconds -}}
+{{- $_ := set $c "DELETION_STEP_PASS_SECONDS" $tb.deletion.stepPassSeconds -}}
 {{- $_ := set $c "LEASE_TTL_SECONDS" $tb.lease.ttlSeconds -}}
 {{- $_ := set $c "ADAPTER_CALL_TIMEOUT_SECONDS" $tb.lease.adapterCallTimeoutSeconds -}}
 {{- if $tb.secretStore.existingClaim -}}

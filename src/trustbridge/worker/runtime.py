@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters.interface import GitHubHost
 from trustbridge.audit.emit import AuditWriter, TenantSyncAudit
+from trustbridge.deletion.ports import DeletionDriver
 from trustbridge.github.availability import HostChecker
 from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.models import SqlRegistrationStore
@@ -188,6 +189,7 @@ class ProcessOverrides:
     session_factory: async_sessionmaker[AsyncSession] | None = None
     checker: HostChecker | None = None
     stop: asyncio.Event | None = None
+    deletion: DeletionDriver | None = None  # the reconciler's tenant deletion engine
 
 
 async def run_process(
@@ -274,6 +276,7 @@ async def run_process(
                     deliveries=core.runtime.deliveries,
                     heartbeat=heartbeat,
                     audit_sessions=sessions,
+                    deletion=chosen.deletion,
                 )
                 await Reconciler(settings, rdeps).run(stop)
         finally:

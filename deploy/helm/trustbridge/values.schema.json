@@ -114,7 +114,58 @@
     "mqtt": {},
     "app": {},
     "securityTxt": {},
-    "trustbridge": {},
+    "trustbridge": {
+      "type": "object",
+      "properties": {
+        "deletion": {
+          "type": "object",
+          "properties": {
+            "pollSeconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "batchSize": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "leaseTtlSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "budgetFraction": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            },
+            "backoffBaseSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400
+            },
+            "backoffCapSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400
+            },
+            "drainMaxPasses": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 10000
+            },
+            "drainPollSeconds": {
+              "type": "number",
+              "minimum": 0
+            },
+            "stepPassSeconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        }
+      }
+    },
     "ca": {},
     "proxy": {},
     "otel": {},
