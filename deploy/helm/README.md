@@ -1,9 +1,10 @@
 # deploy/helm/
 
 The Helm chart that runs trustbridge's three processes on Kubernetes
-(`trustbridge/`), and its checks. Install, upgrade, backup and the air-gap, CA
-and proxy setup are in [`docs/`](../../docs/README.md) (`install.md`,
-`upgrade.md`, `backup-restore.md`, `airgap-ca-proxy.md`).
+(`trustbridge/`), and its checks. Operating docs: [install](../../docs/install.md),
+[upgrade](../../docs/upgrade.md),
+[backup and restore](../../docs/backup-restore.md) and
+[air-gap, CA and proxy](../../docs/airgap-ca-proxy.md).
 
 - `trustbridge/` — the chart. One Deployment each for the **api**, the
   **worker** and the **reconciler** (same image, different `command`; the
