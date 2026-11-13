@@ -29,28 +29,56 @@ for values in "$chart"/ci/*.yaml; do
     fi
 done
 
-# Each of these must fail with a message that names the missing input.
+# With the health ports null, neither process gets an endpoint, probes or HEALTH_PORT.
+echo "==> render health-off"
+helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
+    --set worker.health.port=null --set reconciler.health.port=null >"$work/health-off.yaml"
+(cd "$repo" && uv run python -I deploy/helm/assert_render.py health-off "$work/health-off.yaml")
+
+# An omitted health block (null deletes the key) is the same as null ports, not a template error.
+echo "==> render health-omitted"
+helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
+    --set worker.health=null --set reconciler.health=null >"$work/health-omitted.yaml"
+(cd "$repo" && uv run python -I deploy/helm/assert_render.py health-off "$work/health-omitted.yaml")
+
+# Each of these must fail, and its output must match an extended regex that names the
+# problem (a message of the chart's own `required`/`fail`, or the values.schema.json error).
+# The output of every refused render is printed, so a CI log shows the wording.
 expect_failure() {
-    local message="$1"
+    local patterns=()
+    while [ "$1" != "--" ]; do
+        patterns+=("$1")
+        shift
+    done
     shift
     if helm template tb "$chart" "$@" >"$work/neg.out" 2>&1; then
-        echo "expected helm template to fail ($message): $*" >&2
+        echo "expected helm template to fail: $*" >&2
         exit 1
     fi
-    if ! grep -qF "$message" "$work/neg.out"; then
-        echo "failed without the expected message '$message':" >&2
-        cat "$work/neg.out" >&2
-        exit 1
-    fi
-    echo "==> refused as expected: $message"
+    echo "==> refused: helm template $*"
+    sed 's/^/    | /' "$work/neg.out"
+    local pattern
+    for pattern in "${patterns[@]}"; do
+        if ! grep -qE -- "$pattern" "$work/neg.out"; then
+            echo "failed, but the output does not match /$pattern/" >&2
+            exit 1
+        fi
+    done
+    echo "==> matched: ${patterns[*]}"
 }
 minimal="$chart/ci/minimal-values.yaml"
-expect_failure "publicBaseUrl is required" # the defaults alone
-expect_failure "trustedProxies is required" -f "$minimal" --set trustbridge.trustedProxies=null
-expect_failure "database.runtime.existingSecret is required" -f "$minimal" --set database.runtime.existingSecret=
-expect_failure "valkey.existingSecret is required" -f "$minimal" --set valkey.existingSecret=
-expect_failure "trustbridge.signers is required" -f "$minimal" --set trustbridge.signers=null
-expect_failure "proxy.existingSecret is required" -f "$minimal" --set proxy.httpsProxyKey=https-proxy
-expect_failure "nonsense" -f "$minimal" --set nonsense=1 # values.schema.json: unknown top-level key
-expect_failure "mode" -f "$minimal" --set mode=mock # values.schema.json
+expect_failure "publicBaseUrl is required" -- # the defaults alone
+expect_failure "trustedProxies is required" -- -f "$minimal" --set trustbridge.trustedProxies=null
+expect_failure "database.runtime.existingSecret is required" -- -f "$minimal" --set database.runtime.existingSecret=
+expect_failure "valkey.existingSecret is required" -- -f "$minimal" --set valkey.existingSecret=
+expect_failure "trustbridge.signers is required" -- -f "$minimal" --set trustbridge.signers=null
+expect_failure "proxy.existingSecret is required" -- -f "$minimal" --set proxy.httpsProxyKey=https-proxy
+# values.schema.json: the output names the schema failure, the path and the rule. The wording
+# is helm 4's (santhosh-tekuri/jsonschema), as printed in CI above.
+schema="values don't meet the specifications of the schema"
+expect_failure "$schema" "additional properties 'nonsense' not allowed" -- -f "$minimal" --set nonsense=1
+expect_failure "$schema" "at '/mode': value must be one of 'production', 'dev'" -- \
+    -f "$minimal" --set mode=mock
+expect_failure "$schema" "at '/worker/health/port': maximum: got 70,000, want 65,535" -- \
+    -f "$minimal" --set worker.health.port=70000
 echo "helm chart checks passed"

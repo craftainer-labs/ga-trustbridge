@@ -84,6 +84,21 @@ spec:
             periodSeconds: {{ $cfg.probes.readiness.periodSeconds }}
             timeoutSeconds: {{ $cfg.probes.readiness.timeoutSeconds }}
             failureThreshold: {{ $cfg.probes.readiness.failureThreshold }}
+          {{- else if dig "health" "port" nil $cfg }}
+          ports:
+            - name: health
+              containerPort: {{ $cfg.health.port }}
+              protocol: TCP
+          {{- range $kind, $path := dict "startupProbe" "/health/live" "livenessProbe" "/health/live" "readinessProbe" "/health/ready" }}
+          {{- $p := index $cfg.health.probes (trimSuffix "Probe" $kind) }}
+          {{ $kind }}:
+            httpGet:
+              path: {{ $path }}
+              port: health
+            periodSeconds: {{ $p.periodSeconds }}
+            timeoutSeconds: {{ $p.timeoutSeconds }}
+            failureThreshold: {{ $p.failureThreshold }}
+          {{- end }}
           {{- end }}
           env:
             {{- include "trustbridge.env" (dict "root" $ "process" $name "role" "runtime") | nindent 12 }}
