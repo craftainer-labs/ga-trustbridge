@@ -537,3 +537,16 @@ async def test_run_schedules_the_deletion_record_purge_and_logs_when_it_is_not_c
         h.settings.deletion_purge_interval_seconds + h.settings.lease_ttl_seconds
     )
     assert caplog.text.count("deletion record purge disabled: no record purger") == 1
+
+
+async def test_run_is_silent_about_the_record_purge_when_a_purger_is_composed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With a `RecordPurger` the startup line about a disabled purge is not logged."""
+    h = await Harness({}).start()
+    recon, _ = _record_purger(h, FakePurger())
+    stop = asyncio.Event()
+    stop.set()
+    with caplog.at_level("INFO"):
+        await recon.run(stop)
+    assert "deletion record purge disabled" not in caplog.text
