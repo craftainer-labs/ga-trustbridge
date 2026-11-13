@@ -162,7 +162,9 @@ application, for every `Session` of the api, the worker and the reconciler:
 - **The hook** (`hook._set_transaction_timeout`, installed with the tenant hook) runs
   `set_config('transaction_timeout', '<ms>ms', true)` (that is `SET LOCAL`: it ends with the
   transaction and never reaches the next user of a pooled connection, PgBouncer transaction mode
-  included) right after the transaction begins.
+  included) right after the transaction begins. It sets the lesser of the session's current value
+  (a role-, database- or server-level setting) and the configured bound, treating 0 as off, so it
+  never loosens a stricter existing bound.
 - **The value** is its own setting, `TRANSACTION_TIMEOUT_SECONDS` (default 15; Helm
   `trustbridge.audit.transactionTimeoutSeconds`), validated at start-up to be above 0 and below
   `AUDIT_EXPORT_LAG_SECONDS` (default 30). It is not derived from the lag, because the lag is the

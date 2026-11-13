@@ -45,9 +45,9 @@ class _Conn:
 
     def __init__(self, dialect: str, version: tuple[int, ...] | None = (17, 0)) -> None:
         self.dialect = SimpleNamespace(name=dialect, server_version_info=version)
-        self.calls: list[tuple[str, dict[str, str]]] = []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    def execute(self, stmt: object, params: dict[str, str]) -> None:
+    def execute(self, stmt: object, params: dict[str, Any]) -> None:
         self.calls.append((str(stmt), params))
 
 
@@ -68,8 +68,9 @@ def test_the_hook_sets_transaction_timeout_on_postgres_17_and_later() -> None:
     hook_module._set_transaction_timeout(None, None, conn)  # type: ignore[arg-type]
     [(sql, params)] = conn.calls
     assert "'transaction_timeout'" in sql
-    assert sql.rstrip().endswith("true)")  # transaction-local: SET LOCAL
-    assert params == {"ms": "15000ms"}
+    assert ", true)" in sql  # transaction-local: SET LOCAL
+    assert "t.cur = 0 OR t.cur > b.bound" in sql  # never loosens a stricter current value
+    assert params == {"ms": 15_000}
 
 
 def test_the_hook_falls_back_to_statement_and_idle_timeouts_before_17() -> None:
@@ -82,7 +83,9 @@ def test_the_hook_falls_back_to_statement_and_idle_timeouts_before_17() -> None:
         assert "transaction_timeout" not in sql
         assert "'statement_timeout'" in sql
         assert "'idle_in_transaction_session_timeout'" in sql
-        assert params == {"ms": "1ms"}
+        assert "s.cur = 0 OR s.cur > b.bound" in sql
+        assert "i.cur = 0 OR i.cur > b.bound" in sql
+        assert params == {"ms": 1}
 
 
 def test_the_hook_does_nothing_without_a_bound_or_off_postgres() -> None:
@@ -105,6 +108,42 @@ def test_installing_the_hook_registers_the_timeout_listener_once_and_configures_
     hook_module.install_tenant_hook()
     assert hook_module._timeout_ms == 12_000
     assert event.contains(Session, "after_begin", hook_module._set_transaction_timeout)
+
+
+def test_the_hook_sql_keeps_the_stricter_of_the_current_and_the_configured_value() -> None:
+    """Each `set_config` takes the bound only where the current value is 0 or looser."""
+    for stmt in (hook_module._SET_TRANSACTION_TIMEOUT, hook_module._SET_FALLBACK_TIMEOUTS):
+        sql = str(stmt)
+        assert sql.count("THEN b.bound ELSE") == sql.count("set_config(")
+
+
+def test_the_api_and_the_worker_build_the_gate_from_the_same_production_flag() -> None:
+    """`build_core` (the api's `main.py` and `run_process` both call it) passes production on."""
+    prod = make_settings().model_copy(update={"mode": "production"})
+    core = runtime.build_core(prod, redis=None, session_factory=None, checker=FakeHostChecker())
+    assert core.timeouts._production is True
+    core = runtime.build_core(
+        make_settings(), redis=None, session_factory=None, checker=FakeHostChecker()
+    )
+    assert core.timeouts._production is False
+
+
+async def test_the_api_gate_in_production_fails_closed_on_postgres_16() -> None:
+    """The api's `core.timeouts` built in production refuses a PG 16 server (and exits 1)."""
+    prod = make_settings().model_copy(update={"mode": "production"})
+    core = runtime.build_core(
+        prod,
+        redis=None,
+        session_factory=_Session(FALLBACK),  # type: ignore[arg-type]
+        checker=FakeHostChecker(),
+    )
+    exits: list[int] = []
+    await core.timeouts.background(
+        production=True, timeout=0.02, poll=0.005, exit_process=exits.append
+    )
+    assert exits == [1]
+    assert core.timeouts.reason is not None
+    assert "requires PostgreSQL 17" in core.timeouts.reason
 
 
 # --- the decision --------------------------------------------------------------------------

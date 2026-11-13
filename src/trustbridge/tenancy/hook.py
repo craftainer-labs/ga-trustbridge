@@ -35,10 +35,30 @@ def _set_tenant_setting(
 # `transaction_timeout` exists from PostgreSQL 17. Below it the fallback bounds each statement and
 # each idle gap with the same value, which is weaker (see `timeout_check`).
 TRANSACTION_TIMEOUT_MIN_VERSION = (17,)
-_SET_TRANSACTION_TIMEOUT = text("SELECT set_config('transaction_timeout', :ms, true)")
+
+
+# Each statement sets `set_config(name, <least of the session's current value and :ms>, true)`:
+# the session's current value (the role's, the database's, the server's or a session `SET`) is kept
+# when it is above 0 and not above the configured bound; otherwise the bound applies (0 is "off"),
+# so a stricter existing setting is never loosened. `pg_settings.setting` is in milliseconds for
+# all three parameters. The third argument `true` makes it transaction-local (`SET LOCAL`).
+_SET_TRANSACTION_TIMEOUT = text(
+    "SELECT set_config('transaction_timeout', CAST(CASE WHEN t.cur = 0 OR t.cur > b.bound "
+    "THEN b.bound ELSE t.cur END AS text) || 'ms', true) "
+    "FROM (SELECT CAST(:ms AS bigint) AS bound) b, "
+    "(SELECT CAST(setting AS bigint) AS cur FROM pg_settings "
+    "WHERE name = 'transaction_timeout') t"
+)
 _SET_FALLBACK_TIMEOUTS = text(
-    "SELECT set_config('statement_timeout', :ms, true), "
-    "set_config('idle_in_transaction_session_timeout', :ms, true)"
+    "SELECT set_config('statement_timeout', CAST(CASE WHEN s.cur = 0 OR s.cur > b.bound "
+    "THEN b.bound ELSE s.cur END AS text) || 'ms', true), "
+    "set_config('idle_in_transaction_session_timeout', CAST(CASE WHEN i.cur = 0 "
+    "OR i.cur > b.bound THEN b.bound ELSE i.cur END AS text) || 'ms', true) "
+    "FROM (SELECT CAST(:ms AS bigint) AS bound) b, "
+    "(SELECT CAST(setting AS bigint) AS cur FROM pg_settings "
+    "WHERE name = 'statement_timeout') s, "
+    "(SELECT CAST(setting AS bigint) AS cur FROM pg_settings "
+    "WHERE name = 'idle_in_transaction_session_timeout') i"
 )
 _timeout_ms: int | None = None
 
@@ -54,6 +74,9 @@ def _set_transaction_timeout(
 ) -> None:
     """`SET LOCAL transaction_timeout` (PostgreSQL 17+), or the statement and idle fallback.
 
+    Applies the configured bound only where the session's current value is 0 (off) or looser,
+    so a stricter role- or database-level setting is never loosened.
+
     `set_config(..., true)` is `SET LOCAL`: it ends with the transaction, so it never reaches
     the next user of a pooled connection and works behind PgBouncer's transaction mode. The
     server version is the one the dialect read on connect. A no-op when no bound is configured
@@ -68,7 +91,7 @@ def _set_transaction_timeout(
         if version >= TRANSACTION_TIMEOUT_MIN_VERSION
         else _SET_FALLBACK_TIMEOUTS
     )
-    connection.execute(statement, {"ms": f"{_timeout_ms}ms"})
+    connection.execute(statement, {"ms": _timeout_ms})
 
 
 def install_tenant_hook(transaction_timeout_seconds: float | None = None) -> None:

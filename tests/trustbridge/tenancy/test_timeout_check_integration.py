@@ -137,3 +137,30 @@ async def test_the_check_fails_when_no_bound_is_applied(
     gate = _gate(factory, 30)
     assert not await gate.refresh()
     assert gate.reason is not None
+
+
+async def test_a_stricter_role_level_timeout_is_not_loosened(
+    factory: async_sessionmaker,  # type: ignore[type-arg]
+) -> None:
+    """With `ALTER ROLE ... SET transaction_timeout = 2s` and a 15 s bound, 2 s stays in force."""
+    await _require(factory, at_least_17=True)
+    async with factory() as session:
+        role = (await session.execute(text("SELECT current_user"))).scalar_one()
+    admin = factory.kw["bind"]
+    quoted = '"' + role.replace('"', '""') + '"'
+    async with admin.connect() as conn:
+        await conn.execute(text(f"ALTER ROLE {quoted} SET transaction_timeout = '2s'"))
+        await conn.commit()
+    try:
+        configure_transaction_timeout(15)
+        async with factory() as session, session.begin():
+            inside = (await session.execute(text("SHOW transaction_timeout"))).scalar_one()
+        assert inside == "2s"
+        configure_transaction_timeout(1)  # a stricter configured bound still wins
+        async with factory() as session, session.begin():
+            inside = (await session.execute(text("SHOW transaction_timeout"))).scalar_one()
+        assert inside == "1s"
+    finally:
+        async with admin.connect() as conn:
+            await conn.execute(text(f"ALTER ROLE {quoted} RESET transaction_timeout"))
+            await conn.commit()
