@@ -119,7 +119,7 @@ worker:
     limits:
       cpu: "1"
       memory: 512Mi
-  ## Health endpoint of the process (HEALTH_PORT, python -m trustbridge.worker).
+  ## Health endpoint of the process (HEALTH_PORT, python -m trustbridge.worker worker).
   ## null turns the endpoint, its probes and the container port off.
   health:
     port: 8081
@@ -165,7 +165,7 @@ reconciler:
     limits:
       cpu: 500m
       memory: 384Mi
-  ## Health endpoint of the process (HEALTH_PORT, python -m trustbridge.worker).
+  ## Health endpoint of the process (HEALTH_PORT, python -m trustbridge.worker reconciler).
   ## null turns the endpoint, its probes and the container port off.
   health:
     port: 8081

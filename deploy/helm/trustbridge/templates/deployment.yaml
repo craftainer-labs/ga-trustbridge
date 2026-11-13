@@ -84,7 +84,7 @@ spec:
             periodSeconds: {{ $cfg.probes.readiness.periodSeconds }}
             timeoutSeconds: {{ $cfg.probes.readiness.timeoutSeconds }}
             failureThreshold: {{ $cfg.probes.readiness.failureThreshold }}
-          {{- else if $cfg.health.port }}
+          {{- else if dig "health" "port" nil $cfg }}
           ports:
             - name: health
               containerPort: {{ $cfg.health.port }}

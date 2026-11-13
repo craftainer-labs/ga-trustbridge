@@ -215,8 +215,8 @@ class Reconciler:
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run every job on its own interval until `stop` is set."""
-        await self._d.queue.ensure_group()
         s = self._s
+        beat = self._d.heartbeat or Heartbeat()
         schedule: list[tuple[str, float, Job]] = [
             ("relay-tick", s.relay_interval_seconds, self.relay_tick),
             ("resweep", s.relay_recheck_seconds, self.resweep),
@@ -224,8 +224,8 @@ class Reconciler:
             ("retention", s.retention_interval_seconds, self.retention),
             ("trim", s.stream_trim_interval_seconds, self.trim_streams),
         ]
-        beat = self._d.heartbeat or Heartbeat()
         for name, interval, _job in schedule:
             beat.register(name, stale_after(s, interval))
+        await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop
         jobs = [periodic(name, interval, job, stop, beat.beat) for name, interval, job in schedule]
         await asyncio.gather(*jobs)

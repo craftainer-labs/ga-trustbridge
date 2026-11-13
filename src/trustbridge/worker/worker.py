@@ -83,9 +83,9 @@ class Worker:
 
     async def run(self, stop: asyncio.Event) -> None:
         """Consume until `stop` is set."""
-        await self._d.queue.ensure_group()
         beat = self._d.heartbeat or Heartbeat()
         beat.register(LOOP, stale_after(self._s, self._s.worker_block_ms / 1000))
+        await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop
         while not stop.is_set():
             try:
                 await self.run_once()

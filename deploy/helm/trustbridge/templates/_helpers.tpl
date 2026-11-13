@@ -241,7 +241,7 @@ existing Secret. A null or empty value is not set, so the application default ap
 {{- $_ := set $c "RBAC_ALIAS_TEMPLATE_PERSONAS" $tb.rbac.aliasTemplatePersonas -}}
 {{- $_ := set $c "RBAC_ROLE_SEPARATOR" $tb.rbac.roleSeparator -}}
 {{- if has .process (list "worker" "reconciler") -}}
-{{- $_ := set $c "HEALTH_PORT" (index $v .process).health.port -}}
+{{- $_ := set $c "HEALTH_PORT" (dig "health" "port" nil (index $v .process)) -}}
 {{- end -}}
 {{- $_ := set $c "OTEL_EXPORTER_OTLP_ENDPOINT" $v.otel.endpoint -}}
 {{- $_ := set $c "OTEL_SERVICE_NAME" (printf "%s-%s" $v.otel.serviceName .process) -}}
