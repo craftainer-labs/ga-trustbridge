@@ -440,7 +440,10 @@ Each is one testable sentence; NG6b, NG6d and NG6e implement and test them.
     instance scope; a tenant with a non-terminal deletion cannot be enabled. The reconcile requests
     follow the same rule (NG5r-a): the reconciler's `tenant-reconcile` duty checks the tenant
     (`SqlTenantGate.refusal_of`) before it acts, and a request for a disabled, deleting or gone
-    tenant is acknowledged and dropped with a log line.
+    tenant is acknowledged and dropped with a log line. The reconcile body (NG5r-b) keeps the rule
+    after the check: it runs `CredentialCore`, whose `SqlTenantGate` refuses every new adapter call
+    of a disabled tenant, so a tenant disabled while its body runs stops the body (logged, request
+    acknowledged) and the body never provisions a first credential.
 19a. With `RBAC_ALIAS_TEMPLATE_PERSONAS` on, each persona grants exactly its aliased role at
     instance scope; with it off, a persona grants nothing in the admin API and only the
     namespaced roles count.

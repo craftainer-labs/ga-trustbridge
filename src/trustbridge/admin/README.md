@@ -263,9 +263,10 @@ with the `attempts` they claimed (NG6i), so a lost claim changes nothing. Handle
 **Reconcile** records the tenant in the reconcile set (`ReconcileRequests`, Valkey `tb:reconcile`),
 so a repeat is one request, and answers 202. The event (`tenant.reconcile`, no `before`/`after`)
 is appended first, then the request recorded, then the transaction commits, so a queue failure
-leaves no `success` event. A disabled tenant is a 409. **Nothing consumes the set yet**: the
-consumer and the tenant reconcile body are NG5r (it will re-check `admin_disabled_at`, ADR 0033
-invariant 19), so today the request is only recorded and stays queued. Without a queue (no
+leaves no `success` event. A disabled tenant is a 409. The reconciler's
+`tenant-reconcile` duty consumes the set (NG5r): it drops a request for a disabled tenant (ADR 0033
+invariant 19) and otherwise runs the reconcile body, unless `TENANT_RECONCILE_ENABLED` is off, when
+the request stays queued. Without a queue (no
 `AdminRuntime.scheduler`) the route is a 503.
 
 ## Tenant disable and enable (NG6e-2)
@@ -379,7 +380,7 @@ not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_
 
 - `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
   (ADR 0034); NG6h.
-- The tenant-deletion `POST`s (NG6h). The consumer of the reconcile set is NG5r.
+- The tenant-deletion `POST`s (NG6h). The reconcile set is consumed by the reconciler (NG5r).
 - ADR 0033 stays Proposed until the mutating routes (NG6e) and the deletion reads (NG6h) exist.
 
 ## Don't

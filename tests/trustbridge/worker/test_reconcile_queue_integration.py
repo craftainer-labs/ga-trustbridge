@@ -6,6 +6,7 @@ key set: the scripts are the same text the queue sends, only the key names diffe
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -32,6 +33,7 @@ async def keys() -> AsyncIterator[tuple[Redis, dict[str, str]]]:
         "RECONCILE_SET": f"tb:reconcile:test:{suffix}",
         "INFLIGHT_SET": f"tb:reconcile:inflight:test:{suffix}",
         "CLAIMS_HASH": f"tb:reconcile:claims:test:{suffix}",
+        "ATTEMPTS_HASH": f"tb:reconcile:attempts:test:{suffix}",
     }
     originals = {name: getattr(reconcile_queue, name) for name in names}
     for name, value in names.items():
@@ -98,3 +100,25 @@ async def test_an_unstamped_member_is_stamped_then_reclaimed() -> None:
         assert await queue.reclaim(NOW + timedelta(seconds=TTL + 1), TTL) == 2
         assert await client.smembers(names["RECONCILE_SET"]) == {bare, garbled}
         assert await client.hlen(names["CLAIMS_HASH"]) == 0
+
+
+async def test_extend_restamps_only_for_the_holder_and_attempts_are_counted() -> None:
+    """NG5r-b: the extend script's token check and the attempt counter, as the server runs them."""
+    async with keys() as (client, names):
+        queue = ReconcileQueue(client)
+        tenant = uuid4()
+        await client.sadd(names["RECONCILE_SET"], str(tenant))
+        (claim,) = await queue.claim(NOW, 10)
+        later = NOW + timedelta(seconds=TTL - 1)
+        assert await queue.extend(claim, later) is True
+        assert await client.hget(names["CLAIMS_HASH"], str(tenant)) == (
+            f"{later.timestamp():.3f}|{claim.token}"
+        )
+        assert await queue.extend(replace(claim, token=uuid4().hex), later) is False
+        # a claim extended past the TTL is not reclaimed; one that was not is
+        assert await queue.reclaim(later + timedelta(seconds=TTL - 1), TTL) == 0
+        assert await queue.reclaim(later + timedelta(seconds=TTL + 1), TTL) == 1
+        assert await queue.extend(claim, later) is False  # the claim is gone
+        assert [await queue.begin_attempt(claim) for _ in range(3)] == [1, 2, 3]
+        await queue.clear_attempts(claim)
+        assert await client.hlen(names["ATTEMPTS_HASH"]) == 0

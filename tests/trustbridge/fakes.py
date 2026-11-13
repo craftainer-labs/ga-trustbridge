@@ -154,6 +154,13 @@ class FakeRedis:
         fields[key] = value
         return True
 
+    async def hincrby(self, name: str, key: str, amount: int = 1) -> int:
+        """Add to a hash field holding an integer."""
+        self._check()
+        fields = self.hashes.setdefault(name, {})
+        fields[key] = str(int(fields.get(key, "0")) + amount)
+        return int(fields[key])
+
     async def hget(self, name: str, key: str) -> str | None:
         """A hash field."""
         self._check()
@@ -184,16 +191,22 @@ class FakeRedis:
         member, extra = args[numkeys], args[numkeys + 1]
         entry = self.hashes.get(claims, {}).get(member)
         if script == reconcile_queue._STAMP:
-            if member not in self.sets.get(inflight, set()) or (entry or "") != args[numkeys + 2]:
-                return 0
-            await self.hset(claims, member, extra)
-            return 1
+            stamped = (
+                member in self.sets.get(inflight, set()) and (entry or "") == args[numkeys + 2]
+            )
+            if stamped:
+                await self.hset(claims, member, extra)
+            return int(stamped)
         if script == reconcile_queue._CLAIM:
             moved = await self.smove(pending, inflight, member)
             if moved:
                 await self.hset(claims, member, extra)
             return int(moved)
         token = None if entry is None else entry.partition("|")[2]
+        if script == reconcile_queue._EXTEND:
+            if token == extra:
+                await self.hset(claims, member, args[numkeys + 2])
+            return int(token == extra)
         # reclaim compares the whole entry, ack and release the token
         held = entry == extra if script == reconcile_queue._RECLAIM else token == extra
         if not held:

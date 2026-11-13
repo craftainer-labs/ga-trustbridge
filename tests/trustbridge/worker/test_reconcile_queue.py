@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -14,7 +15,14 @@ from tests.trustbridge.helpers import as_redis, make_settings
 from tests.trustbridge.worker.harness import Harness
 from trustbridge.worker.health import Heartbeat
 from trustbridge.worker.ports import RECONCILE_SET, ReconcileRequests
-from trustbridge.worker.reconcile_queue import CLAIMS_HASH, INFLIGHT_SET, ReconcileQueue
+from trustbridge.worker.reconcile_queue import (
+    ATTEMPTS_HASH,
+    CLAIMS_HASH,
+    INFLIGHT_SET,
+    ClaimLostError,
+    Extend,
+    ReconcileQueue,
+)
 from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
 
 TTL = 300.0
@@ -208,10 +216,12 @@ class Body:
         self.calls: list[UUID] = []
         self.error: Exception | None = None
         self.hook: Callable[[], Awaitable[None]] | None = None
+        self.extend: Extend | None = None
 
-    async def reconcile(self, tenant_id: UUID) -> None:
+    async def reconcile(self, tenant_id: UUID, extend: Extend) -> None:
         """Record, then maybe fail."""
         self.calls.append(tenant_id)
+        self.extend = extend
         if self.hook is not None:
             await self.hook()
         if self.error is not None:
@@ -481,3 +491,145 @@ async def test_run_is_quiet_when_a_body_is_composed_and_enabled(
     with caplog.at_level(logging.INFO):
         await _duty(h, Refusals(), Body()).run(stop)
     assert "tenant reconcile" not in caplog.text
+
+
+# ---- claim extension and poison handling (NG5r-b) --------------------------------------
+
+
+async def test_extend_restamps_the_claim_and_keeps_the_token() -> None:
+    """The token check passes for the holder; the time moves forward; a stale token fails."""
+    valkey, queue, clock = _queue()
+    tenant = uuid4()
+    await _request(valkey, tenant)
+    [claim] = await queue.claim(clock(), 10)
+    before = valkey.hashes[CLAIMS_HASH][str(tenant)]
+    clock.advance(seconds=100)
+    assert await queue.extend(claim, clock()) is True
+    after = valkey.hashes[CLAIMS_HASH][str(tenant)]
+    assert after != before
+    assert after.partition("|")[2] == claim.token
+    stale = replace(claim, token=uuid4().hex)
+    assert await queue.extend(stale, clock()) is False
+    assert valkey.hashes[CLAIMS_HASH][str(tenant)] == after
+
+
+async def test_an_extended_claim_is_not_reclaimed_while_the_body_works() -> None:
+    """A body that heartbeats keeps its claim past the TTL; a silent one loses it."""
+    valkey, queue, clock = _queue()
+    tenant = uuid4()
+    await _request(valkey, tenant)
+    [claim] = await queue.claim(clock(), 10)
+    clock.advance(seconds=TTL - 1)
+    assert await queue.extend(claim, clock()) is True
+    clock.advance(seconds=TTL - 1)
+    assert await queue.reclaim(clock(), TTL) == 0
+    clock.advance(seconds=2)
+    assert await queue.reclaim(clock(), TTL) == 1
+    assert await queue.extend(claim, clock()) is False
+
+
+async def test_the_body_extends_the_claim_and_the_loop_beats() -> None:
+    """`extend` re-stamps the claim at the injected clock and reports progress."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, body, beat = uuid4(), Body(), Heartbeat()
+    beat.register("tenant-reconcile", 60)
+    await _request(h.valkey, tenant)
+    stamps: list[str] = []
+
+    async def hook() -> None:
+        assert body.extend is not None
+        h.advance(10)
+        await body.extend()
+        stamps.append(h.valkey.hashes[CLAIMS_HASH][str(tenant)].partition("|")[0])
+
+    body.hook = hook
+    assert await _duty(h, Refusals(), body, beat=beat).tenant_reconcile() == 1
+    assert stamps == [f"{h.clock().timestamp():.3f}"]
+
+
+async def test_an_aborted_extension_stops_the_body_and_leaves_the_request_to_its_holder(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The claim is reclaimed under a running body: its next extension raises and is logged."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, body = uuid4(), Body()
+    await _request(h.valkey, tenant)
+    after_abort: list[str] = []
+
+    async def hook() -> None:
+        assert body.extend is not None
+        h.valkey.hashes[CLAIMS_HASH].pop(str(tenant))  # the claim is gone (reclaimed)
+        with pytest.raises(ClaimLostError):
+            await body.extend()
+        await body.extend()  # a second step also aborts
+        after_abort.append("a write step ran")  # pragma: no cover -- must not be reached
+
+    body.hook = hook
+    with caplog.at_level(logging.WARNING):
+        assert await _duty(h, Refusals(), body).tenant_reconcile() == 0
+    assert after_abort == []
+    assert "tenant reconcile aborted: its claim was reclaimed while it ran" in caplog.text
+    assert "reconcile failed" not in caplog.text  # not logged as an error
+    assert h.valkey.sets == {INFLIGHT_SET: {str(tenant)}}  # not acked, left to the reclaim
+
+
+async def test_a_request_that_keeps_failing_is_dropped_at_error_after_the_attempt_limit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Poison handling: N runs (each a TTL apart), then one ERROR line and the request is gone."""
+    h = await Harness({}, tenant_reconcile_enabled=True, tenant_reconcile_max_attempts=3).start()
+    tenant, body = uuid4(), Body()
+    body.error = RuntimeError("platform down")
+    await _request(h.valkey, tenant)
+    recon = _duty(h, Refusals(), body)
+    for run in range(3):
+        assert await recon.tenant_reconcile() == 0
+        assert h.valkey.hashes[ATTEMPTS_HASH] == {str(tenant): str(run + 1)}
+        h.advance(TTL + 1)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR):
+        assert await recon.tenant_reconcile() == 1  # reclaimed, counted a fourth time and dropped
+    assert len(body.calls) == 3  # the body did not run again
+    assert "dropped a reconcile request: it failed 3 times" in caplog.text
+    assert [r.levelno for r in caplog.records if "dropped" in r.message] == [logging.ERROR]
+    assert h.valkey.sets == {}
+    assert h.valkey.hashes == {}
+    await _request(h.valkey, tenant)  # a later request starts afresh
+    body.error = None
+    assert await recon.tenant_reconcile() == 1
+    assert len(body.calls) == 4
+
+
+async def test_a_success_clears_the_attempts() -> None:
+    """A run that fails once and then succeeds leaves no counter behind."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, body = uuid4(), Body()
+    body.error = RuntimeError("once")
+    await _request(h.valkey, tenant)
+    recon = _duty(h, Refusals(), body)
+    assert await recon.tenant_reconcile() == 0
+    assert h.valkey.hashes[ATTEMPTS_HASH] == {str(tenant): "1"}
+    body.error = None
+    h.advance(TTL + 1)
+    assert await recon.tenant_reconcile() == 1
+    assert h.valkey.hashes == {}
+
+
+async def test_a_request_dropped_for_a_refusal_leaves_no_attempts() -> None:
+    """A refused tenant never counts an attempt."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant = uuid4()
+    await _request(h.valkey, tenant)
+    assert await _duty(h, Refusals(**{str(tenant): "disabled"}), Body()).tenant_reconcile() == 1
+    assert ATTEMPTS_HASH not in h.valkey.hashes
+
+
+def test_the_settings_enable_the_reconcile_by_default_with_a_bounded_attempt_count() -> None:
+    """NG5r-b turns the duty on (the flag stays); the attempt limit is 1 to 100."""
+    default = make_settings()
+    assert default.tenant_reconcile_enabled is True
+    assert default.tenant_reconcile_max_attempts == 5
+    assert make_settings(tenant_reconcile_enabled=False).tenant_reconcile_enabled is False
+    for bad in (0, 101):
+        with pytest.raises(ValidationError):
+            make_settings(tenant_reconcile_max_attempts=bad)

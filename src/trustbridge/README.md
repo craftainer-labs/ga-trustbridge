@@ -67,13 +67,15 @@ under `/admin/v1/hosts/{host}/registration` (the BFF owns the browser callback),
 a `CredentialCore` for `POST .../credentials/{adapter}/{scope_key}/rotate` from the parts `Core`
 holds (`admin/credentials.py`).
 
-Not wired yet: the worker and the reconciler instantiate no `CredentialCore`, so nothing reconciles
-or resumes credential operations in the background (NG5r-b). The reconcile requests
-(`ReconcileScheduler`, `POST /admin/v1/tenants/{t}/reconcile`) are recorded in the Valkey set
-`tb:reconcile`; the reconciler's `tenant-reconcile` duty drains it with claim/ack
-(`worker/reconcile_queue.py`) and drops a request for a disabled, deleting or gone tenant. Any other
-request stays pending until the reconcile body (scope discovery and a credential core in the
-reconciler) exists and `TENANT_RECONCILE_ENABLED` is true.
+The reconciler builds a `CredentialCore` too (`worker/tenant_reconcile.py`, composed as the api does,
+with the actor `reconciler`). The reconcile requests (`ReconcileScheduler`,
+`POST /admin/v1/tenants/{t}/reconcile`) are recorded in the Valkey set `tb:reconcile`; the
+reconciler's `tenant-reconcile` duty drains it with claim/ack (`worker/reconcile_queue.py`), drops a
+request for a disabled, deleting or gone tenant, and otherwise runs the reconcile body for the
+tenant (resume its open operations, re-evaluate each stored scope, sweep orphans and parked
+values; it creates no new scope). `TENANT_RECONCILE_ENABLED` (default true) switches the body off:
+the requests then stay pending. The background retry of an operation that failed mid-way is this
+duty, driven by a request; no timer resumes operations on its own yet.
 
 ## Accepted behaviours
 
