@@ -31,12 +31,15 @@ WHERE state NOT IN ('done', 'failed', 'cancelled')
 ORDER BY updated_at;
 ```
 
-- `attempts` counts failed attempts at the current step and resets when the
-  step advances. A deletion with a rising `attempts` and a
-  `last_error` is blocked: the engine keeps retrying with a capped backoff
-  (`DELETION_BACKOFF_BASE_SECONDS`, `DELETION_BACKOFF_CAP_SECONDS`) and never
-  advances past a blocked step on its own. Alert on `attempts` and on the
-  `trustbridge.deletion.attempts` counter.
+- `attempts` counts failed attempts at the current step. It resets when the
+  step advances (a saved cursor within the same step leaves it alone). A
+  deletion with a rising `attempts` and a `last_error` is blocked: the engine
+  keeps retrying with a capped backoff (`DELETION_BACKOFF_BASE_SECONDS`,
+  `DELETION_BACKOFF_CAP_SECONDS`, both at least 1) and never advances past a
+  blocked step on its own. Alert on `attempts` and on the
+  `trustbridge.deletion.attempts` counter. Because a step that flaps between
+  failing and advancing keeps `attempts` low, also alert on a non-terminal
+  deletion whose `updated_at` is older than your expected step duration.
 - `trustbridge.deletion.failed` counts deletions the engine ended as `failed`
   itself (a non-retryable error, for example a step output the audit shapes
   refuse). Each also has a `tenant.deletion.failed` audit event.
@@ -99,7 +102,7 @@ back and the `done` record that blocked re-creation is gone. Deleted data must
 not stay restored, so replay those deletions before the system takes traffic.
 
 1. Restore the database but keep the worker and reconciler scaled to 0
-   (backup-restore steps 1 to 3). Bring up only the api when you reach step 3
+   (backup-restore steps 1 to 3). Bring up only the api when you reach step 4
    below.
 2. Find the events the restore lost. The audit log is append-only and the
    restore returns it to the backup's `max(seq)`; the SIEM export holds what
@@ -120,7 +123,11 @@ not stay restored, so replay those deletions before the system takes traffic.
    A deletion that was still running at the backup is in `tenant_deletions`
    with its saved state and resumes by itself when the reconciler starts
    (each step is idempotent).
-4. For each tenant that came back, with only the api running: disable it
+4. For each tenant that came back, with only the api running (until NG6h-7
+   adds the request route, run the SQL functions instead:
+   `tb_set_tenant_disabled` and `tb_request_tenant_deletion(tenant, host,
+   installation id, org, by_sub, by_iss, delete_platform, not_before)` as the
+   application role, and record the actions in your change log): disable it
    (`POST /admin/v1/tenants/{id}/disable`, reason "restore replay of
    deletion <old id>"), then request its deletion again
    (`POST /admin/v1/tenants/{id}/deletion`, echoing host, installation id and

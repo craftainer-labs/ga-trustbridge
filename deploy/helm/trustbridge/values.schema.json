@@ -141,12 +141,12 @@
             },
             "backoffBaseSeconds": {
               "type": "integer",
-              "minimum": 0,
+              "minimum": 1,
               "maximum": 86400
             },
             "backoffCapSeconds": {
               "type": "integer",
-              "minimum": 0,
+              "minimum": 1,
               "maximum": 86400
             },
             "drainMaxPasses": {
