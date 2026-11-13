@@ -44,8 +44,9 @@ BATCH = 2
 TENANT_TABLES = tuple(table for table, _ in PLAN if table != "webhook_deliveries")
 DELIVERY = (
     "INSERT INTO webhook_deliveries "
-    "(host, delivery_id, event, headers, body, status, tenant_id) "
-    "VALUES (:h, :d, 'push', CAST('{}' AS jsonb), CAST(:b AS bytea), :s, :t)"
+    "(host, delivery_id, event, headers, body, status, tenant_id, last_error) "
+    "VALUES (:h, :d, 'push', CAST('{\"x-forwarded-for\": \"203.0.113.9\"}' AS jsonb), "
+    "CAST(:b AS bytea), :s, :t, 'handler failed for acme/widgets')"
 )
 
 
@@ -164,11 +165,14 @@ async def test_the_step_clears_every_inventoried_table_in_batches_and_resumes_fr
     ]
     rows = await _admin_rows(
         db,
-        "SELECT status, body IS NULL AS cleared FROM webhook_deliveries WHERE tenant_id = :t",
+        "SELECT status, body IS NULL AS cleared, headers = CAST('{}' AS jsonb) AS bare, "
+        "last_error IS NULL AS no_error FROM webhook_deliveries WHERE tenant_id = :t",
         {"t": tenant.id},
     )
     assert len(rows) == ROWS  # the dedupe rows stay
-    assert {(row.status, row.cleared) for row in rows} == {("deleted", True)}
+    assert {(row.status, row.cleared, row.bare, row.no_error) for row in rows} == {
+        ("deleted", True, True, True)
+    }
     # Deliveries with no tenant, on this host or another, are untouched.
     kept = await _admin_rows(
         db,

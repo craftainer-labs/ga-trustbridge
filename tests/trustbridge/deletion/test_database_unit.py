@@ -192,7 +192,8 @@ async def test_the_webhook_pass_clears_bodies_and_marks_the_rows_deleted() -> No
     log = _Log()
     await _step(log).run(_ctx({"table": "webhook_deliveries"}))
     sql = log.statements[1][0]
-    assert "SET body = NULL, status = 'deleted'" in sql
+    assert "SET body = NULL, headers = CAST('{}' AS jsonb), last_error = NULL" in sql
+    assert "status = 'deleted'" in sql
     assert "DELETE" not in sql
 
 

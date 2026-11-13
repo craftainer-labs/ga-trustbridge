@@ -80,7 +80,9 @@ is left.
   check, not a lock): a stale holder gets `LeaseLost` and touches nothing. A holder that loses the lease just after the
   check deletes at most one more batch of the same rows the new holder would delete, and `tb_delete_tenant` re-checks
   that nothing is left.
-- **Webhook deliveries** recorded for the tenant keep their row (the dedupe key) with `body` null and status `deleted`.
+- **Webhook deliveries** recorded for the tenant keep their row with status `deleted` and the dedupe key (`host`, `delivery_id`, `body_sha256`) and the
+  non-personal `event`; `body`, `headers` (allow-listed request headers; NOT NULL, so `{}`) and `last_error` (handler
+  error text, which may name tenant data) are cleared. Nothing reads the headers of a `deleted` row.
   Rows with no `tenant_id` are left to retention; the last pass counts those still holding a body on the deletion's host
   and reports them once as `skipped` `webhook_bodies_unresolved` / `retention_only` with a `count`. That count is
   host-wide: an unresolved delivery cannot be attributed to the tenant, so it is an upper bound.

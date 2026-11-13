@@ -105,7 +105,7 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    hold a secret word the audit view would hide). Webhook bodies are cleared for deliveries recorded for the tenant: an expand
    migration adds a nullable `tenant_id` to `webhook_deliveries`, set by the worker when it
    resolves the delivery (NG6h-2: before it defers or handles it; an event with no registered
-   handler, or a payload naming no installation, is not resolved); deletion nulls `body` and sets the row terminal with status `deleted`, which the relay, the
+   handler, or a payload naming no installation, is not resolved); deletion nulls `body`, `headers` (to `{}`) and `last_error` and sets the row terminal with status `deleted`, which the relay, the
    re-relay sweep and the worker skip (the row stays for deduplication, as the retention purge
    keeps rows, 0028 item 5), so a held, body-less row is never re-relayed. Rows with no `tenant_id` (never resolved, or older than
    the column) fall to the normal retention and are counted under `skipped` as
@@ -255,10 +255,11 @@ adapter fakes.
   the tenant's context, with a lease guard (holder, fence, unexpired, state `database`) as its first statement, then the
   tables in the order above and the delivery bodies. Inventory gaps found, none changed here: (1) the `tenant_id` of a
   delivery is set only when the worker resolves it, so an event with no registered handler that names the tenant's
-  installation keeps its body until retention and appears only as the host-wide `retention_only` count; (2) `headers` and
-  `last_error` of a cleared delivery are kept (the ADR names only `body`); `last_error` is handler error text and may
-  mention tenant data; (3) the inventory has no tenant-keyed table beyond the six, and the integration test fails if one
-  is added without a decision.
+  installation keeps its body until retention and appears only as the host-wide `retention_only` count; (2) a cleared
+  delivery keeps only its dedupe key (`host`, `delivery_id`, `body_sha256`), `event`, timestamps and counters: `body`,
+  `headers` (NOT NULL, so `{}`) and `last_error` (handler error text, may name tenant data) are cleared, since erasure
+  covers every field that can hold personal or tenant data; (3) the inventory has no tenant-keyed table beyond the six,
+  and the integration test fails if one is added without a decision.
 - **Wiring (NG6h-4a-3).** The reconciler runs the engine as a singleton duty (`tenant-deletion`, under a lease like
   the audit purge) through the `DeletionDriver` Protocol only: at most `DELETION_BATCH_SIZE` claims per poll of
   `DELETION_POLL_SECONDS`, a liveness beat per pass, and a store error that escapes `run_once` is logged and ends that

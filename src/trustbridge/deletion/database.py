@@ -7,7 +7,10 @@ app role: its `tenant_isolation` policies admit `DELETE` for the context tenant 
 already holds the table grants, so no `SECURITY DEFINER` function is added (least privilege: the
 app role gains nothing). The tables have no foreign keys; the order is the ADR's (in-flight
 operations first). `webhook_deliveries` is host-scoped and outside RLS: the tenant's rows keep
-their dedupe key but lose the body and become `deleted` (never relayed or handled again).
+their dedupe key (`host`, `delivery_id`, `body_sha256`) and the non-personal `event`, and lose
+every field that can hold personal or tenant data: `body`, `headers` (the allow-listed request
+headers, which are not read once a row is `deleted`; the column is NOT NULL, so it becomes `{}`)
+and `last_error` (handler error text). The row becomes `deleted` (never relayed or handled again).
 
 Every pass starts with a lease check in its own transaction: the holder, the fence and an
 unexpired lease for a deletion still in the `database` step (a `SELECT`, because the app role
@@ -55,7 +58,8 @@ _UNRESOLVED = text(
     "WHERE host = :host AND tenant_id IS NULL AND body IS NOT NULL"
 )
 _CLEAR_BODIES = text(
-    "WITH cleared AS (UPDATE webhook_deliveries SET body = NULL, status = 'deleted' "
+    "WITH cleared AS (UPDATE webhook_deliveries SET body = NULL, "
+    "headers = CAST('{}' AS jsonb), last_error = NULL, status = 'deleted' "
     "WHERE (host, delivery_id) IN (SELECT host, delivery_id FROM webhook_deliveries "
     "WHERE tenant_id = :tenant AND status <> 'deleted' LIMIT :limit) RETURNING 1) "
     "SELECT count(*) FROM cleared"
