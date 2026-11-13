@@ -95,7 +95,13 @@
     "extraEnv": {},
     "extraEnvFrom": {},
     "extraVolumes": {},
-    "extraVolumeMounts": {}
+    "extraVolumeMounts": {},
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    }
   },
   "additionalProperties": false
 }
