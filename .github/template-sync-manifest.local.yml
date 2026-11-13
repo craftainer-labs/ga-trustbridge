@@ -12,3 +12,5 @@ ignore:
   - docs/upgrade.md
   - docs/backup-restore.md
   - docs/airgap-ca-proxy.md
+  # Operating runbooks (NG6h-4a-3): instance-owned product knowledge.
+  - docs/runbooks/
