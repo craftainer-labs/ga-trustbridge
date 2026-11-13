@@ -75,14 +75,28 @@ unaffected. `tb_upsert_tenant`, `tb_delete_tenant` and `SqlTenants.upsert_instal
 `pg_advisory_xact_lock(hashtextextended('tb_tenant:' || host || ':' || installation_id, 0))`, so a
 concurrent delete and upsert cannot recreate the tenant. `tb_request_tenant_deletion(...)` takes the
 same row lock as enable and disable, validates the confirmation before returning an open deletion,
-and stores an optional `not_before` (default NULL: no delay). `tb_delete_tenant(uuid)` refuses
-(55000) unless the tenant is admin-disabled, has a deletion in its `database` step whose
-`not_before` has passed, and has no rows left in the five other tables. Because those tables have no
+and stores an optional `not_before` (default NULL: no delay). `tb_delete_tenant(uuid, text, bigint)`
+(holder and fence, NG6h-4a-1, migration `5d7a2c8e1b94`) refuses (55000) unless the tenant is
+admin-disabled, has a deletion in its `database` step whose `not_before` has passed, and has no
+rows left in the five other tables, and raises `TB003` (`deletion lease lost`) unless the caller
+holds that deletion's live lease (holder, fence and an unexpired `expires_at`). Because those tables have no
 foreign key, a writer is not blocked by the row lock; `tb_delete_tenant` checks again after the
 delete and rolls it back if a row committed in between, and the engine must stop writing for a
 deleting tenant first. The downgrade is refused while any `tenant_deletions` row or `deleted`
 delivery exists. N-1 safe: only additions and same-signature function bodies; the previous release
 never reads or writes the new column, status or table.
+
+The engine's writes to `tenant_deletions` are `SECURITY DEFINER` functions of `5d7a2c8e1b94` (the
+app role keeps `SELECT` only, `search_path` pinned to `pg_catalog, public, pg_temp`): `tb_claim_tenant_deletion` (lease, fence bump,
+skips terminal, future `not_before` and backed-off rows, `SKIP LOCKED`), `tb_renew_`, `tb_release_`,
+`tb_retry_` (records `last_error`, counts `attempts`, sets `retry_at`), `tb_advance_` (one step along
+`requested`, `draining`, `platform`, `github`, `database`), `tb_fail_` (`failed`, always with the lease),
+`tb_operator_fail_` (`failed` by an operator: no lease of its own, refused with `TB003` while a live
+one is held; the actor lands in `last_error`; granted to `trustbridge_app`, the only runtime role
+(ADR 0031), which also serves the admin API), `tb_cancel_` (`requested` only) and `tb_finish_` (`done`,
+the tombstone, only after the tenant row is gone). Every guarded call needs the live lease, judged by `clock_timestamp()` (`TB003`);
+a terminal or invalid move is `TB004`. None writes `audit_events`: the engine does, in the same
+session transaction.
 
 Migration `3b8d6f2a4c17` (NG6h-2) replaces `tb_upsert_tenant` once more (same signature, expand-only):
 it never returns NULL any more. A tombstone raises SQLSTATE `TB001` (`tenant tombstoned`) and a
