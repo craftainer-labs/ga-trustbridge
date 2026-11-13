@@ -40,8 +40,8 @@ the function replacement (the lock), so no `done` row is left without its tombst
 Both replaced bodies are checked before they are replaced: ``md5(prosrc)`` of the live function must
 equal the md5 of the exact expected body, computed from this file's text of the body that revisions
 ``5d7a2c8e1b94`` (the finish function) and ``3b8d6f2a4c17`` (the upsert) left on upgrade, and
-of this revision's own bodies on downgrade, or the migration fails (``55000``) instead of overwriting a
-drifted function. The downgrade refuses (``55000``) while a tombstone has no
+of this revision's own bodies on downgrade, or the migration fails (``55000``)
+instead of overwriting a drifted function. The downgrade refuses (``55000``) while a tombstone has no
 matching ``done`` deletion (the tombstone would be lost), restores both bodies and drops the
 table; with the ``done`` rows kept (they are, until NG6h-3c-2) nothing is lost.
 """
