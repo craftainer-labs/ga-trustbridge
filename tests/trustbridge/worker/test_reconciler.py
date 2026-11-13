@@ -512,7 +512,7 @@ async def test_deletion_record_purge_is_quiet_when_nothing_was_purged(
     with caplog.at_level("INFO"):
         assert await _record_purger(h, purger)[0].deletion_record_purge() == 0
     assert purger.calls == 1
-    assert "deletion record purge" not in caplog.text
+    assert [r for r in caplog.records if r.getMessage() == "deletion record purge"] == []
 
 
 async def test_deletion_record_purge_is_a_no_op_for_zero_retention_and_without_a_purger() -> None:
