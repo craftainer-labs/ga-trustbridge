@@ -82,6 +82,9 @@ is left.
   check, not a lock): a stale holder gets `LeaseLost` and touches nothing. A holder that loses the lease just after the
   check deletes at most one more batch of the same rows the new holder would delete, and `tb_delete_tenant` re-checks
   that nothing is left (including any `webhook_deliveries` row of the tenant not yet `deleted`).
+- **A late delivery** (a webhook accepted for the tenant after the step cleared its rows) makes
+  `tb_delete_tenant` refuse with `55000`; the engine retries the database step, which marks it `deleted`, so the deletion
+  converges. NG6h-7's end-to-end test must cover a delivery that arrives during a deletion.
 - **Webhook deliveries** recorded for the tenant keep their row with status `deleted` and the dedupe key (`host`, `delivery_id`, `body_sha256`) and the
   non-personal `event`; `body`, `headers` (allow-listed request headers; NOT NULL, so `{}`) and `last_error` (handler
   error text, which may name tenant data) are cleared. Nothing reads the headers of a `deleted` row.

@@ -753,3 +753,71 @@ async def test_the_hardening_downgrade_refuses_while_a_deletion_is_open_then_res
         assert await _admin_scalar(scratch, paths, {"n": older}) == [
             "search_path=pg_catalog, public, pg_temp"
         ]
+
+
+async def _drift(db: Db, signature: str) -> None:
+    """Edit the live function the way a hotfix would: one comment inside its body."""
+    definition = await _admin_scalar(
+        db, "SELECT pg_get_functiondef(CAST(:f AS regprocedure))", {"f": signature}
+    )
+    assert "\nBEGIN\n" in definition
+    async with db.admin.begin() as conn:
+        await conn.exec_driver_sql(definition.replace("\nBEGIN\n", "\nBEGIN\n    -- drifted\n", 1))
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "tb_advance_tenant_deletion(uuid, text, bigint, text, jsonb, jsonb, jsonb)",
+        "tb_delete_tenant(uuid, text, bigint)",
+    ],
+)
+async def test_the_hardening_upgrade_refuses_a_drifted_body_and_changes_nothing(
+    signature: str,
+) -> None:
+    """A body that differs anywhere from the 5d7a2c8e1b94 text is refused, not overwritten."""
+    async for scratch in _provision(enforce=False):
+        stepped = await _alembic(scratch.name, "downgrade", REVISION)
+        assert stepped.returncode == 0, stepped.stderr[-2000:]
+        await _drift(scratch, signature)
+        refused = await _alembic(scratch.name, "upgrade", HARDENING)
+        assert refused.returncode != 0
+        assert f"{signature} is not the 5d7a2c8e1b94 body" in refused.stderr
+        assert await _admin_scalar(
+            scratch,
+            "SELECT prosrc LIKE '%-- drifted%' FROM pg_proc WHERE oid = CAST(:f AS regprocedure)",
+            {"f": signature},
+        )
+        paths = (
+            "SELECT count(*) FROM pg_proc WHERE prosecdef "
+            "AND pronamespace = 'public'::regnamespace AND NOT proconfig @> ARRAY['search_path=pg_catalog, public, pg_temp']"
+        )
+        assert await _admin_scalar(scratch, paths) > 0  # the transaction rolled back
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "tb_advance_tenant_deletion(uuid, text, bigint, text, jsonb, jsonb, jsonb)",
+        "tb_delete_tenant(uuid, text, bigint)",
+    ],
+)
+async def test_the_hardening_downgrade_refuses_a_drifted_body_and_changes_nothing(
+    signature: str,
+) -> None:
+    """The downgrade restores only this revision's exact bodies."""
+    async for scratch in _provision(enforce=False):
+        await _drift(scratch, signature)
+        refused = await _alembic(scratch.name, "downgrade", REVISION)
+        assert refused.returncode != 0
+        assert f"{signature} is not the 6f3b9d2e4a85 body" in refused.stderr
+        assert await _admin_scalar(
+            scratch,
+            "SELECT prosrc LIKE '%-- drifted%' FROM pg_proc WHERE oid = CAST(:f AS regprocedure)",
+            {"f": signature},
+        )
+        still = "SELECT count(*) FROM pg_proc WHERE proname = 'tb_get_tenant' AND proconfig @> :p"
+        assert (
+            await _admin_scalar(scratch, still, {"p": ["search_path=pg_catalog, public, pg_temp"]})
+            == 1
+        )

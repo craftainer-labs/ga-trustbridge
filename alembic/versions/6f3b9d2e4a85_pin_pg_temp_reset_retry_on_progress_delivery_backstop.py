@@ -24,12 +24,16 @@ no table, column or signature changes, so the previous release (N-1) is unaffect
    for the ``DatabaseStep``, which clears the bodies and marks the rows ``deleted``. The lock order
    (advisory lock, deletion row, ``tenants`` row) is unchanged.
 
-Both replaced bodies are checked before they are replaced (the upgrade fails loudly if it is not
-the ``5d7a2c8e1b94`` body). The downgrade refuses (``55000``) while any non-terminal deletion
-exists, checks that the bodies are this revision's, restores the ``5d7a2c8e1b94`` ones and puts the
-older definers' ``search_path`` back to ``pg_catalog, public``.
+Both replaced bodies are checked before they are replaced: ``md5(prosrc)`` of the live function must
+equal the md5 of the exact expected body (the ``5d7a2c8e1b94`` one on upgrade, this revision's on
+downgrade), or the migration fails (``55000``) instead of overwriting a drifted function. The
+downgrade refuses (``55000``) while any non-terminal deletion exists, restores the ``5d7a2c8e1b94``
+bodies and puts the nine older definers' ``search_path`` back to ``pg_catalog, public``. That
+reopens the ``pg_temp`` shadowing risk on them, so the downgrade is for rollback only: re-run the
+upgrade as soon as the rollback's cause is fixed.
 """
 
+import hashlib
 from collections.abc import Sequence
 
 from alembic import op
@@ -255,28 +259,34 @@ _DELIVERIES = """    CASE WHEN EXISTS (SELECT 1 FROM public.credential_operation
 _DELETE_FN = _replaced(_PREVIOUS_DELETE_FN, _LAST_TABLE, _DELIVERIES, count=2)
 
 
-def _assert_body(signature: str, present: str, absent: str | None, source: str) -> str:
-    """A DO block failing (55000) unless the function's body has `present` and lacks `absent`."""
-    definition = f"pg_get_functiondef(to_regprocedure('{signature}'))"
-    wrong = f"{definition} NOT LIKE '%{present}%'"
-    if absent is not None:
-        wrong += f" OR {definition} LIKE '%{absent}%'"
+def _body_md5(function_sql: str) -> str:
+    """The md5 of the text between the outer ``$$`` of `function_sql`, which is the `prosrc`."""
+    body = function_sql[function_sql.index("$$") + 2 : function_sql.rindex("$$")]
+    return hashlib.md5(body.encode(), usedforsecurity=False).hexdigest()
+
+
+def _assert_body(signature: str, function_sql: str, source: str) -> str:
+    """A DO block failing (55000) unless the live body is exactly `function_sql`'s body.
+
+    Compares ``md5(prosrc)`` of the function in the database with the md5 of the expected text,
+    so a body edited anywhere (a hotfix, a drifted copy) is refused, not overwritten.
+    """
     return (
-        f"DO $$ BEGIN IF to_regprocedure('{signature}') IS NULL OR {wrong} THEN "
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE "  # noqa: S608 -- constants only
+        f"oid = to_regprocedure('{signature}') "
+        f"AND pg_catalog.md5(prosrc) = '{_body_md5(function_sql)}') THEN "
         f"RAISE EXCEPTION '{signature} is not the {source} body' "
         "USING ERRCODE = '55000'; END IF; END $$"
     )
 
 
 _ASSERT_PREVIOUS = (
-    _assert_body(
-        ADVANCE, "attempts = CASE WHEN p_to <> d.state THEN 0", "v_progress", "5d7a2c8e1b94"
-    ),
-    _assert_body(DELETE, "deletion lease lost", "webhook_deliveries", "5d7a2c8e1b94"),
+    _assert_body(ADVANCE, _PREVIOUS_ADVANCE_FN, "5d7a2c8e1b94"),
+    _assert_body(DELETE, _PREVIOUS_DELETE_FN, "5d7a2c8e1b94"),
 )
 _ASSERT_NEW = (
-    _assert_body(ADVANCE, "v_progress", "attempts = CASE WHEN p_to <> d.state", "6f3b9d2e4a85"),
-    _assert_body(DELETE, "webhook_deliveries", None, "6f3b9d2e4a85"),
+    _assert_body(ADVANCE, _ADVANCE_FN, "6f3b9d2e4a85"),
+    _assert_body(DELETE, _DELETE_FN, "6f3b9d2e4a85"),
 )
 _REFUSE_LIVE_DELETIONS = (
     "DO $$ BEGIN IF EXISTS (SELECT 1 FROM tenant_deletions "  # noqa: S608 -- constants only
