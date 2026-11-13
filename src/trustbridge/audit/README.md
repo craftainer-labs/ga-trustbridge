@@ -63,7 +63,7 @@ null `tenant_id` (`authz.denied`, instance-level events) is written with no cont
 
 | Action | Where | Actor | Transaction |
 | --- | --- | --- | --- |
-| `tenant.sync` | `github.handlers.InstallationHandlers` (`created`, `deleted`, `suspend`, `unsuspend`) through `TenantSyncAudit`, wired in `worker.runtime.build_core` | `github-webhook`, `on_behalf_of` = `{"github_sender_id": <numeric id>, "delivery_id": "<id>"}` (JSON object; null, not an empty object, when the payload has no numeric sender) | Own, after the tenant change and the repository changes. A failure fails the handler, the worker retries, and the sync repeats (a retry may add a second event; a change is never left without one). `after` = `{"state"}`; `before` is not recorded (the sync overwrites the state from GitHub's current view). |
+| `tenant.sync` | `github.handlers.InstallationHandlers` (`created`, `deleted`, `suspend`, `unsuspend`) through `TenantSyncAudit`, wired in `worker.runtime.build_core` | `github-webhook`, `on_behalf_of` = `{"github_sender_id": <numeric id>, "delivery_id": "<id>"}` (JSON object; null, not an empty object, when the payload has no numeric sender) | Own, after the tenant change and the repository changes. A failure fails the handler, the worker retries, and the sync repeats (a retry of the same delivery is deduplicated by the idempotency key; a change is never left without one). `after` = `{"state"}`; `before` is not recorded (the sync overwrites the state from GitHub's current view). |
 | `authz.denied` | `rbac.deps.require_role` through `RbacRuntime.denials` (`AuditDenials`), for a role that is missing and for a tenant that is unknown, malformed or not granted (answered 404) | the denied user (`sub`, `iss`), `source_ip` from the ASGI client, `request_id` from a plain `X-Request-ID` | Own, null `tenant_id`. Instance route: `resource_type=role`, `resource_id=<required role>`. Tenant route: `resource_type=tenant`, `resource_id=<requested tenant id>` (none if the path value is not a canonical UUID). If the sink fails the request fails. Unauthenticated rejections are never rows. |
 | `credential.rotate.begin`, `credential.rotate.finish`, `credential.issue`, `credential.revoke`, `credential.operation.abandoned`, `oidc_trust.create`, `oidc_trust.remove` | `adapters.sql_store.SqlCredentialStore.save` through its `observer` (`credentials.CredentialAuditObserver`) | `worker` or `reconciler` (chosen at construction) | The save's own, so the event commits with the credential state. See `credentials.py` for the transition table. |
 | `credential.rotate` (admin call, success) | `credentials.CredentialAuditObserver.saved`, for the call that finishes a rotation (`join_call_event` / `JoinedCallEvent`); otherwise `admin.credentials` after the core returns | the caller | Appended in the finishing save's own transaction, so a finished rotation never commits without it (invariant 9, NG6i); if the append fails the save rolls back and the call fails. |
@@ -157,7 +157,7 @@ All take an `AsyncSession` (or factory) and leave the transaction to the caller,
 
 | Function | Use |
 | --- | --- |
-| `append(session, event) -> UUID` | Insert in the caller's transaction, so the row commits with the change. No `RETURNING` (a null-tenant row is not selectable by the app role); the id is generated in code. `tenant_id` must be null or the session's tenant context. |
+| `append(session, event) -> UUID \| None` | Insert in the caller's transaction, so the row commits with the change. No `RETURNING` (a null-tenant row is not selectable by the app role); the id is generated in code, and the insert count says whether the row was written. `None` means a redelivered webhook's event already exists (see "Idempotency key"); no caller uses the id. `tenant_id` must be null or the session's tenant context. |
 | `list_events(session, query, *, tenant_id=None, instance_scope=False) -> AuditPage` | One page. `tenant_id` set: that tenant (open the session in its `tenant_session`; the tenant is also filtered explicitly). `instance_scope=True` with `tenant_id=None`: instance scope through `tb_audit_list()`, all tenants and null-tenant events; the caller must have checked the instance-scoped `auditor` role, this layer does not. `tenant_id=None` without the flag, or both together, raises `ValueError` before any query, so a failed tenant lookup never widens a read. NG6d passes the flag only after the role check. |
 | `get_event(session, event_id) -> AuditRecord \| None` | One event by id, any tenant (null-tenant included), through `tb_audit_get()`. Instance scope like `list_events(instance_scope=True)`: the caller must have checked the instance-scoped `auditor` role. Imported from `trustbridge.audit.store`. |
 | `export_ndjson(session, query, *, tenant_id=None, instance_scope=False, lag_seconds, page_size) -> AsyncIterator[bytes]` | Ascending `seq`, one line per event, resumable with `AuditQuery.after_seq`. Same scope rules as `list_events`. |
@@ -210,6 +210,24 @@ numeric `github_sender_id` and a string `delivery_id`. No roles, no grants.
   deferred to release N+1 for all definer functions. For the purge to pass the trigger, that
   owner must be `trustbridge_owner` (the migrate Job's role, ADR 0028); the integration test
   re-owns them to emulate it.
+
+## Idempotency key (migration `8c4e1a7d3b52`, NG6h-2b)
+
+A webhook-driven event is the one with `on_behalf_of` set. `(tenant_id, action,
+on_behalf_of->>'delivery_id')` is unique where `on_behalf_of IS NOT NULL` (the partial index
+`ux_audit_events_webhook_delivery`), and `append` inserts `ON CONFLICT (...) WHERE on_behalf_of IS
+NOT NULL DO NOTHING`, matching the index definition exactly so PostgreSQL infers it. A redelivery,
+or a worker retry after the audit write committed, therefore adds no second row; `append` and
+`AuditWriter.record` return `None` for it. Any other unique violation (the primary key) still
+raises. Events with a null `on_behalf_of` (admin, worker, denials, purge, and a webhook event with
+no numeric sender) are never deduplicated, and neither is a webhook event with a null `tenant_id`
+(NULLs are distinct; no emitter writes one).
+
+The migration is an index only, built `CONCURRENTLY` (no table rewrite, writes continue), so it is
+N-1 compatible: the previous release's inserts keep working. It refuses to run, changing nothing, if
+the table already holds duplicates for the key (the log is append-only and migrations never edit
+history); the error names the count and the query. Reconcile them as the table owner, then upgrade
+again. A failed build leaves an INVALID index, which the next upgrade drops and rebuilds.
 
 ## Settings
 

@@ -243,7 +243,7 @@ def _event(tenant: UUID | None, **overrides: Any) -> AuditEvent:  # noqa: ANN401
     return AuditEvent(**values)
 
 
-async def _write(db: Db, tenant: UUID | None, **overrides: Any) -> UUID:  # noqa: ANN401
+async def _write(db: Db, tenant: UUID | None, **overrides: Any) -> UUID | None:  # noqa: ANN401
     """Append one event as the app role in its own committed transaction."""
     if tenant is None:
         async with db.app() as session, session.begin():
@@ -449,6 +449,7 @@ async def test_the_table_constraints_back_the_actor_and_outcome_rules(db: Db) ->
 async def _seed_aged(db: Db, ages_days: list[int]) -> list[UUID]:
     """Append null-tenant events, then (as the owner) set their `occurred_at` back."""
     ids = [await _write(db, None, resource_id=f"age-{age}") for age in ages_days]
+    assert None not in ids  # no `on_behalf_of`: never deduplicated
     for event_id, age in zip(ids, ages_days, strict=True):
         await _run_owner(
             db,
@@ -456,7 +457,7 @@ async def _seed_aged(db: Db, ages_days: list[int]) -> list[UUID]:
             d=age,
             i=event_id,
         )
-    return ids
+    return [i for i in ids if i is not None]
 
 
 async def test_the_purge_function_is_the_only_delete_path(fresh_db: Db) -> None:  # inv. 3
@@ -1076,3 +1077,172 @@ async def test_a_canary_in_a_credential_name_reference_or_error_reaches_no_row(d
         "WHERE row_to_json(audit_events)::text LIKE '%canary-secret-7f3a9c1e%'",
     )
     assert leaked == 0
+
+
+# --- NG6h-2b: the webhook delivery idempotency key ------------------------------------------
+
+INDEX_NAME = "ux_audit_events_webhook_delivery"
+_DELIVERY = {"github_sender_id": 5, "delivery_id": "d-1"}
+
+
+async def _rows(db: Db, tenant: UUID) -> list[Any]:
+    async with db.owner() as session:
+        return list(
+            (
+                await session.execute(
+                    text("SELECT action, on_behalf_of FROM audit_events WHERE tenant_id = :t"),
+                    {"t": tenant},
+                )
+            ).all()
+        )
+
+
+async def test_a_redelivered_webhook_event_writes_one_row(db: Db) -> None:
+    """Same tenant, action and delivery id: the second append is a no-op and returns None."""
+    tenant = uuid4()
+    first = await _write(db, tenant, action="tenant.sync", on_behalf_of=_DELIVERY)
+    second = await _write(db, tenant, action="tenant.sync", on_behalf_of=_DELIVERY)
+    assert first is not None
+    assert second is None
+    assert len(await _rows(db, tenant)) == 1
+
+
+async def test_the_tenant_sync_sink_is_idempotent_on_the_delivery(db: Db) -> None:
+    """A retried or redelivered installation event, through the real sink, adds no second row."""
+    tenant = uuid4()
+    sink = TenantSyncAudit(AuditWriter(db.app))
+    for _ in range(2):
+        await sink.tenant_synced(tenant_id=tenant, state="deleted", delivery_id="d-9", sender_id=3)
+    assert len(await _tenant_events(db, tenant)) == 1
+
+
+async def test_distinct_deliveries_actions_and_tenants_are_distinct_keys(db: Db) -> None:
+    """Only the full (tenant, action, delivery) triple collides."""
+    tenant, other = uuid4(), uuid4()
+    other_delivery = {**_DELIVERY, "delivery_id": "d-2"}
+    await _write(db, tenant, action="tenant.sync", on_behalf_of=_DELIVERY)
+    await _write(db, tenant, action="tenant.sync", on_behalf_of=other_delivery)
+    await _write(db, tenant, action="tenant.disable", on_behalf_of=_DELIVERY)
+    await _write(db, other, action="tenant.sync", on_behalf_of=_DELIVERY)
+    assert len(await _rows(db, tenant)) == 3
+    assert len(await _rows(db, other)) == 1
+
+
+async def test_events_without_a_delivery_id_are_never_deduplicated(db: Db) -> None:
+    """Null `on_behalf_of` (admin, worker, denial and purge events) keeps its behaviour."""
+    tenant = uuid4()
+    ids = [await _write(db, tenant, action="tenant.disable") for _ in range(2)]
+    assert all(ids)
+    assert len(await _rows(db, tenant)) == 2
+    denials = [await _write(db, None, action="authz.denied") for _ in range(2)]
+    assert all(denials)
+
+
+async def test_a_conflict_on_the_primary_key_still_raises(db: Db) -> None:
+    """Only the delivery key is the conflict target, so any other violation stays loud."""
+    tenant = uuid4()
+    event = _event(tenant, action="tenant.disable")
+    async with tenant_session(db.app, tenant) as session, session.begin():
+        await append(session, event)
+    with pytest.raises(DBAPIError, match="audit_events_pkey"):
+        async with tenant_session(db.app, tenant) as session, session.begin():
+            await append(session, event)
+
+
+def _alembic(database: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 -- fixed argv, a throwaway database
+        [sys.executable, "-m", "alembic", *args],
+        cwd=ROOT,
+        env={**os.environ, "POSTGRES_DB": database},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+async def _index_state(db: Db) -> bool | None:
+    """Whether the key's index is valid (None: absent)."""
+    async with db.admin.connect() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+                    "WHERE c.relname = :name"
+                ),
+                {"name": INDEX_NAME},
+            )
+        ).scalar()
+
+
+async def _insert_raw(db: Db, tenant: UUID, delivery: str) -> None:
+    await _run_owner(
+        db,
+        "INSERT INTO audit_events (id, tenant_id, actor_type, actor_sub, action, resource_type, "
+        "outcome, on_behalf_of) VALUES (gen_random_uuid(), CAST(:t AS uuid), 'system', "
+        "'github-webhook', 'tenant.sync', 'tenant', 'success', CAST(:v AS jsonb))",
+        t=tenant,
+        v=json.dumps({"github_sender_id": 1, "delivery_id": delivery}),
+    )
+
+
+def _skip_if_not_permitted(proc: subprocess.CompletedProcess[str]) -> None:
+    if "must be owner" in proc.stderr or "permission denied" in proc.stderr:
+        pytest.skip("the test database user cannot alter the re-owned table")
+
+
+async def test_the_idempotency_migration_round_trips_without_duplicates(fresh_db: Db) -> None:
+    """Down drops the index, up rebuilds it valid; a second up is a no-op (retry-safe)."""
+    assert await _index_state(fresh_db) is True
+    down = await asyncio.to_thread(_alembic, fresh_db.name, "downgrade", "-1")
+    _skip_if_not_permitted(down)
+    assert down.returncode == 0, down.stderr[-2000:]
+    assert await _index_state(fresh_db) is None
+    # Without the index an old writer's insert (no ON CONFLICT) still works, twice.
+    tenant = uuid4()
+    await _insert_raw(fresh_db, tenant, "d-old")
+    await _insert_raw(fresh_db, tenant, "d-old")
+    owner_dupes = await _count(fresh_db, f"tenant_id = '{tenant}'")
+    assert owner_dupes == 2
+    # Duplicates present: the upgrade refuses, names the problem and changes nothing.
+    up = await asyncio.to_thread(_alembic, fresh_db.name, "upgrade", "head")
+    assert up.returncode != 0
+    assert "duplicate webhook delivery group" in up.stderr
+    assert await _index_state(fresh_db) is None
+    assert await _count(fresh_db, f"tenant_id = '{tenant}'") == 2  # history untouched
+    # Duplicates reconciled (as the owner, outside the migration): the upgrade builds the index.
+    await _run_owner(
+        fresh_db, "DELETE FROM audit_events WHERE tenant_id = CAST(:t AS uuid)", t=tenant
+    )
+    up = await asyncio.to_thread(_alembic, fresh_db.name, "upgrade", "head")
+    assert up.returncode == 0, up.stderr[-2000:]
+    assert await _index_state(fresh_db) is True
+    with pytest.raises(DBAPIError, match=INDEX_NAME):
+        await _insert_raw(fresh_db, tenant, "d-new")
+        await _insert_raw(fresh_db, tenant, "d-new")
+
+
+async def test_the_idempotency_migration_rebuilds_an_invalid_index(fresh_db: Db) -> None:
+    """A failed concurrent build leaves an INVALID index; the next upgrade drops and rebuilds it."""
+    down = await asyncio.to_thread(_alembic, fresh_db.name, "downgrade", "-1")
+    _skip_if_not_permitted(down)
+    assert down.returncode == 0, down.stderr[-2000:]
+    tenant = uuid4()
+    await _insert_raw(fresh_db, tenant, "d-dup")
+    await _insert_raw(fresh_db, tenant, "d-dup")
+    async with fresh_db.admin.connect() as conn:
+        conn = await conn.execution_options(isolation_level="AUTOCOMMIT")  # noqa: PLW2901
+        with pytest.raises(DBAPIError):
+            await conn.execute(
+                text(
+                    f"CREATE UNIQUE INDEX CONCURRENTLY {INDEX_NAME} ON audit_events "
+                    "(tenant_id, action, (on_behalf_of->>'delivery_id')) "
+                    "WHERE on_behalf_of IS NOT NULL"
+                )
+            )
+    assert await _index_state(fresh_db) is False
+    await _run_owner(
+        fresh_db, "DELETE FROM audit_events WHERE tenant_id = CAST(:t AS uuid)", t=tenant
+    )
+    up = await asyncio.to_thread(_alembic, fresh_db.name, "upgrade", "head")
+    assert up.returncode == 0, up.stderr[-2000:]
+    assert await _index_state(fresh_db) is True

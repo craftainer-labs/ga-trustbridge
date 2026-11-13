@@ -49,8 +49,11 @@ class AuditWriter:
         """Use `factory` for one short session per event."""
         self._factory = factory
 
-    async def record(self, event: AuditEvent) -> UUID:
-        """Insert `event` and commit it, with the event's tenant (or none) as the context."""
+    async def record(self, event: AuditEvent) -> UUID | None:
+        """Insert `event` and commit it, with the event's tenant (or none) as the context.
+
+        Returns the id, or `None` when a redelivered webhook's event already exists.
+        """
         with tenant_context(event.tenant_id):
             async with self._factory() as session, session.begin():
                 return await append(session, with_trace(event))

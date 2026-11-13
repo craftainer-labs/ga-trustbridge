@@ -14,10 +14,10 @@ import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import RowMapping, text
+from sqlalchemy import CursorResult, RowMapping, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.audit.model import (
@@ -47,7 +47,11 @@ _INSERT = text(
     ":actor_sub, :actor_iss, CAST(CAST(:on_behalf_of AS text) AS jsonb), "
     "CAST(CAST(:source_ip AS text) AS inet), :action, "
     ":resource_type, :resource_id, :outcome, CAST(CAST(:before AS text) AS jsonb), "
-    "CAST(CAST(:after AS text) AS jsonb), :request_id, :trace_id, :schema_version)"
+    "CAST(CAST(:after AS text) AS jsonb), :request_id, :trace_id, :schema_version) "
+    # The idempotency key of a webhook-driven event (NG6h-2b): the target repeats the partial
+    # unique index `ux_audit_events_webhook_delivery` exactly, so PostgreSQL infers it.
+    "ON CONFLICT (tenant_id, action, (on_behalf_of->>'delivery_id')) "
+    "WHERE on_behalf_of IS NOT NULL DO NOTHING"
 )
 _LIST_ALL = text(
     f"SELECT {_COLUMNS} FROM tb_audit_list("  # noqa: S608 -- constants only
@@ -75,12 +79,17 @@ def _load(value: str | None) -> dict[str, Any] | None:
     return None if value is None else json.loads(value)
 
 
-async def append(session: AsyncSession, event: AuditEvent) -> UUID:
+async def append(session: AsyncSession, event: AuditEvent) -> UUID | None:
     """Insert `event` in the session's transaction and return its id. Does not commit.
 
     The row's `tenant_id` must be null or the session's tenant context (the insert policy).
+
+    A webhook-driven event (`on_behalf_of` set) is idempotent on `(tenant_id, action,
+    delivery_id)`: a redelivery finds the row and inserts nothing, and this returns `None`
+    (the count of inserted rows, not `RETURNING`, which a null-tenant row could not read back).
+    Every other event always inserts and returns its id.
     """
-    await session.execute(
+    result = await session.execute(
         _INSERT,
         {
             "id": event.id,
@@ -101,7 +110,7 @@ async def append(session: AsyncSession, event: AuditEvent) -> UUID:
             "schema_version": event.schema_version,
         },
     )
-    return event.id
+    return event.id if cast("CursorResult[Any]", result).rowcount else None
 
 
 def _record(row: RowMapping) -> AuditRecord:

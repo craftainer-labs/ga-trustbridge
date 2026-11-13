@@ -218,7 +218,13 @@ it once the migration has run, and the previous release, which never touches the
 unaffected (NFR-0027). Because the table is new, the migration writes the existing
 `schema_compat` without a bump. A second revision in #21 (NG6f) changes `on_behalf_of` from
 `text` to `jsonb` and adds its CHECK: nothing had written the column, so it ships in the same
-release as the emitters and needs no backfill.
+release as the emitters and needs no backfill. A third revision (NG6h-2b, `8c4e1a7d3b52`) adds
+the idempotency key of a webhook-driven event: the partial unique index
+`ux_audit_events_webhook_delivery` on `(tenant_id, action, (on_behalf_of->>'delivery_id')) WHERE
+on_behalf_of IS NOT NULL`, built `CONCURRENTLY`. `append` inserts with `ON CONFLICT` on that
+target `DO NOTHING`, so a redelivered webhook writes no second row and `append` returns `None`.
+Events without `on_behalf_of` are not keyed. The upgrade refuses, changing nothing, when the
+table already holds duplicates: the log is append-only and the migration never edits history.
 
 ## User decisions (G-api, 2026-11-03)
 
