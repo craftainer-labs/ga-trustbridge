@@ -13,6 +13,10 @@ AI-assisted coding workflow (`CLAUDE.md` at the repo root covers that).
   the reasoning behind them. See `adrs/README.md`.
 - `openapi/` — committed OpenAPI snapshots of the admin API (see
   `src/trustbridge/admin/README.md`).
+- `install.md`, `upgrade.md`, `backup-restore.md`, `airgap-ca-proxy.md` —
+  operating the app on Kubernetes with the Helm chart in `../deploy/helm/`:
+  install, upgrade, backup and restore (Postgres, the audit log, what a
+  Valkey loss costs), and the air-gap, CA bundle and proxy setup.
 - `plans/` — working plans for in-progress or upcoming work. See
   `plans/README.md`.
 - `frs/` — functional requirements: what the system must do. See

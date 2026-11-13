@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "mode": { "type": "string", "enum": ["production", "dev"] },
+    "database": {
+      "type": "object",
+      "properties": {
+        "sslmode": {
+          "type": "string",
+          "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]
+        },
+        "pool": {
+          "type": "object",
+          "properties": { "mode": { "type": "string", "enum": ["null", "local", "external"] } }
+        }
+      }
+    },
+    "api": { "type": "object", "properties": { "replicas": { "type": "integer", "minimum": 0 } } },
+    "worker": { "type": "object", "properties": { "replicas": { "type": "integer", "minimum": 0 } } },
+    "reconciler": {
+      "type": "object",
+      "properties": { "replicas": { "type": "integer", "minimum": 0 } }
+    }
+  }
+}

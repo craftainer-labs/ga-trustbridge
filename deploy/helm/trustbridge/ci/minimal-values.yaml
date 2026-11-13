@@ -1,0 +1,38 @@
+# The smallest production install: no ingress, no CA, no proxy, no extras.
+database:
+  host: postgres.example.internal
+  runtime:
+    existingSecret: tb-db-runtime
+  migrate:
+    existingSecret: tb-db-owner
+valkey:
+  existingSecret: tb-valkey
+oidc:
+  issuerUrl: https://idp.example.internal/realms/trustbridge
+publicBaseUrl: https://trustbridge.example.internal
+subscriberSecret:
+  existingSecret: tb-subscriber
+s3:
+  endpointUrl: https://s3.example.internal
+  existingSecret: tb-s3
+mqtt:
+  host: mqtt.example.internal
+  existingSecret: tb-mqtt
+trustbridge:
+  githubHosts:
+    - name: github-com
+      kind: github.com
+      web_url: https://github.com
+      api_url: https://api.github.com
+      oidc_issuer: https://token.actions.githubusercontent.com
+      registry_host: ghcr.io
+      signer: vault
+  signers:
+    vault:
+      kind: vault-transit
+      addr: https://vault.example.internal
+      key: trustbridge
+      auth:
+        method: kubernetes
+        role: trustbridge
+  trustedProxies: []

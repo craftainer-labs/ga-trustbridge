@@ -1,0 +1,400 @@
+## String to partially override trustbridge.fullname (keeps the release name)
+##
+# nameOverride: ""
+
+## String to fully override trustbridge.fullname
+##
+# fullnameOverride: ""
+
+## Values shared by every chart that adds this one as a dependency
+##
+global:
+  ## Registry host (and optional path prefix) to pull the image from, e.g. an
+  ## internal mirror for an air-gapped cluster. Replaces image.registry.
+  ## Empty: use image.registry.
+  imageRegistry: ""
+  ## Pull secrets added to every pod, in addition to imagePullSecrets
+  imagePullSecrets: []
+
+image:
+  ## The image is <registry>/<repository>@<digest>, or :<tag> (default
+  ## Chart.appVersion) without a digest. Air-gapped installs pin a digest.
+  ## ghcr.io is the default because the repository variable OCI_REGISTRY
+  ## (release.yml) is not set; change it if your release publishes elsewhere.
+  registry: ghcr.io
+  repository: craftainer-labs/ga-trustbridge
+  ## Image digest, "sha256:<64 hex>"; wins over tag
+  digest: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+## Pull secrets, for example [{name: myregistrykey}]
+imagePullSecrets: []
+
+## MODE: production (default) or dev. mock is not offered (it disables auth).
+mode: production
+
+## Pod-level security settings (Pod Security `restricted`, EB-10), all processes
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+## Container-level security settings, all processes
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+serviceAccount:
+  create: true
+  ## Name to use; defaults to the fullname when created, else "default"
+  name: ""
+  annotations: {}
+  ## Mount the API token into the pods. Off: no process calls the Kubernetes
+  ## API. Turn it on for a Vault `kubernetes` signer (SIGNERS jwt_file).
+  automount: false
+
+podDisruptionBudget:
+  enabled: true
+  ## minAvailable wins when set
+  maxUnavailable: 1
+  minAvailable: null
+
+## One Deployment per process. Replicas stay at 1 until scaling is decided.
+api:
+  enabled: true
+  replicas: 1
+  port: 8000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  probes:
+    startup:
+      path: /health/live
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 60
+    liveness:
+      path: /health/live
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      path: /health/ready
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+  terminationGracePeriodSeconds: 30
+  strategy: {}
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  annotations: {}
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+
+worker:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  terminationGracePeriodSeconds: 60
+  strategy: {}
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  annotations: {}
+
+reconciler:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+  terminationGracePeriodSeconds: 60
+  strategy: {}
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  annotations: {}
+
+## Ingress for the api only. No default class.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  #  - host: trustbridge.example.com
+  #    paths:
+  #      - path: /
+  #        pathType: Prefix
+  tls: []
+  #  - secretName: trustbridge-tls
+  #    hosts: [trustbridge.example.com]
+
+## Optional NetworkPolicy (off by default)
+networkPolicy:
+  enabled: false
+  ## `from` peers allowed to reach the api port; empty allows any source
+  apiIngressFrom: []
+  egress:
+    ## When true, egress is restricted to rules (an empty list denies all)
+    enabled: false
+    rules: []
+
+## External Postgres. There is no DSN setting: the app builds it from these
+## pieces. The password comes from an existing Secret.
+database:
+  host: ""
+  port: 5432
+  name: trustbridge
+  ## production requires require, verify-ca or verify-full. verify-ca and
+  ## verify-full need ca.existingConfigMap (PGSSLROOTCERT).
+  sslmode: verify-full
+  pool:
+    ## POSTGRES pool: "null", "local" or "external" (DB_POOL_MODE)
+    mode: "null"
+    size: null
+    maxOverflow: null
+    recycle: null
+  connectTimeout: null
+  commandTimeout: null
+  ## Runtime role (RLS applies; no DDL rights)
+  runtime:
+    user: trustbridge_app
+    existingSecret: ""
+    passwordKey: password
+  ## The migrate hook Job, run as the owner role before install and upgrade
+  migrate:
+    enabled: true
+    user: trustbridge_owner
+    existingSecret: ""
+    passwordKey: password
+    ## MIGRATE_EXPECTED_ROLE: the Job refuses to run as any other role
+    expectedRole: trustbridge_owner
+    backoffLimit: 1
+    activeDeadlineSeconds: 900
+    resources:
+      requests:
+        cpu: 50m
+        memory: 192Mi
+      limits:
+        cpu: 500m
+        memory: 384Mi
+
+## External Valkey: REDIS_URL (rediss://...) from an existing Secret
+valkey:
+  existingSecret: ""
+  urlKey: url
+
+## OIDC provider (https in production)
+oidc:
+  issuerUrl: ""
+  issuer: null
+  discoveryUrl: null
+  authorizationUrl: null
+  tokenUrl: null
+  clientId: api
+  algorithm: RS256
+  audience: api
+  scopesSupported:
+    - openid
+
+## This service's public origin (https, no path); required in production
+publicBaseUrl: ""
+
+## REGISTRATION_STATE_KEY (at least 32 characters, shared by every api
+## replica). Unset: host registration answers 503.
+registrationStateKey:
+  existingSecret: ""
+  key: registration-state-key
+
+## SUBSCRIBER_SECRET (at least 32 characters); required in production
+subscriberSecret:
+  existingSecret: ""
+  key: subscriber-secret
+
+## S3 (the template requires these in production)
+s3:
+  endpointUrl: ""
+  existingSecret: ""
+  accessKeyKey: access-key
+  secretKeyKey: secret-key
+
+## MQTT (the template requires TLS and credentials in production)
+mqtt:
+  host: ""
+  port: 8883
+  keepaliveSeconds: 60
+  useTls: true
+  existingSecret: ""
+  usernameKey: username
+  passwordKey: password
+
+## Template settings
+app:
+  name: trustbridge
+  bulkActionMaxMatched: 1000
+  rateLimitMockToken: 10/minute
+  rateLimitBulkAction: 20/minute
+  archivePurgeAfterDays: null
+  gcFreeze: true
+  healthInfoEnabled: false
+  profilingEnabled: false
+  statsCacheTtlSeconds: null
+  sseKeepaliveSeconds: 15
+
+securityTxt:
+  contact: null
+  expires: null
+  policy: null
+  preferredLanguages: null
+  canonical: null
+
+## trustbridge settings (src/trustbridge/settings.py)
+trustbridge:
+  ## GITHUB_HOSTS: required list of host entries (name, kind, web_url, api_url,
+  ## oidc_issuer, registry_host, signer, optional app_id, webhook_secret_ref,
+  ## ca_bundle). Holds references and paths, never secret values.
+  githubHosts: []
+  ## SIGNERS: required map of signer name to config (kind file, or
+  ## vault-transit). Credentials are file paths; mount them with extraVolumes.
+  signers: {}
+  allowInsecureGithubUrls: false
+  ## ADAPTERS_ENABLED: entry-point names, for example [ghcr, jfrog]
+  adaptersEnabled: []
+  ## TRUSTED_PROXIES: required in production. Use [] for "no proxy". `*` is
+  ## refused. List the ingress controller's addresses or CIDRs.
+  trustedProxies: null
+  webhook:
+    maxBodyBytes: 26214400
+    secretReadTimeoutSeconds: 5
+    secretRefreshMinSeconds: 60
+    rateLimit:
+      enabled: true
+      requests: 300
+      windowSeconds: 60
+      timeoutMs: 50
+      exemptCidrs: []
+  queue:
+    maxDeliveryAttempts: 8
+    retryBackoffBaseSeconds: 30
+    retryBackoffMaxSeconds: 1800
+    busyRetrySeconds: 10
+    disabledTenantRetrySeconds: 15
+    workerBlockMs: 5000
+    workerBatchSize: 10
+    streamClaimIdleSeconds: 120
+    streamTrimIntervalSeconds: 300
+    relayIntervalSeconds: 5
+    relayBatchSize: 5000
+    relayRecheckSeconds: 900
+    relayResweepMinAgeSeconds: 60
+    deliveryReconcileIntervalSeconds: 300
+    deliveryReconcileLookbackHours: 72
+    deliveryReconcileMaxPerRun: 100
+    retentionIntervalSeconds: 3600
+  retention:
+    bodyProcessedDays: 7
+    bodyDeadDays: 30
+    deliveryIdDays: 30
+    deadStreamDays: 30
+  audit:
+    retentionDays: 365
+    retentionMinDays: 90
+    exportLagSeconds: 30
+    deniedWindowSeconds: 60
+    deniedBurst: 5
+    deniedTimeoutMs: 50
+  lease:
+    ttlSeconds: 120
+    adapterCallTimeoutSeconds: 30
+  ## SECRET_STORE_DIR: a writable directory for `store:` secret references.
+  ## Mounted from an existing PersistentVolumeClaim; unset: such writes fail
+  ## closed. Several replicas of different Deployments share it, so use a
+  ## ReadWriteMany claim (or run one replica of each process).
+  secretStore:
+    existingClaim: ""
+    mountPath: /var/lib/trustbridge/secrets
+  schema:
+    waitSeconds: 300
+    pollSeconds: 2
+  hosts:
+    recheckSeconds: 60
+    checkTimeoutSeconds: 10
+  admin:
+    maxBodyBytes: 16384
+    rateLimit:
+      enabled: true
+      readRequests: 600
+      mutationRequests: 60
+      exportRequests: 6
+      anonymousRequests: 30
+      windowSeconds: 60
+      timeoutMs: 50
+      exemptCidrs: []
+  rbac:
+    aliasTemplatePersonas: true
+    roleSeparator: ":"
+
+## Custom CA bundle (an existing ConfigMap only): mounted and pointed at by
+## SSL_CERT_FILE, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE, AWS_CA_BUNDLE and
+## PGSSLROOTCERT. The bundle replaces the image's system roots, so include
+## every root the processes need.
+ca:
+  existingConfigMap: ""
+  key: ca-bundle.crt
+  mountPath: /etc/trustbridge/ca
+
+## Outbound proxy (HTTP(S)_PROXY / NO_PROXY). Credentials in a proxy URL come
+## from an existing Secret instead of the values.
+proxy:
+  httpProxy: ""
+  httpsProxy: ""
+  noProxy: ""
+  existingSecret: ""
+  httpProxyKey: ""
+  httpsProxyKey: ""
+
+## OpenTelemetry export is off unless an endpoint is set (no outbound calls
+## by default).
+otel:
+  endpoint: ""
+  serviceName: trustbridge
+
+## Extras for every pod (including the migrate Job): signer key files, host CA
+## bundles, `env:` secret references.
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []

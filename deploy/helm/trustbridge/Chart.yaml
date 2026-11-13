@@ -1,0 +1,15 @@
+apiVersion: v2
+name: trustbridge
+description: Self-hosted OIDC-first GitHub App that provisions registry and GitOps access (api, worker and reconciler; Postgres and Valkey are external)
+type: application
+# The release flow overrides both with the release version
+# (`helm package --version X --app-version X`); these are the development values.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.30.0-0"
+home: https://github.com/craftainer-labs/ga-trustbridge
+sources:
+  - https://github.com/craftainer-labs/ga-trustbridge
+keywords:
+  - github-app
+  - oidc

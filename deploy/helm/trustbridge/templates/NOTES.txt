@@ -1,0 +1,11 @@
+trustbridge {{ .Chart.AppVersion }} installed as {{ .Release.Name }} in {{ .Release.Namespace }}.
+
+Processes: api, worker and reconciler (one Deployment each). Postgres and Valkey are external.
+{{- if .Values.database.migrate.enabled }}
+The schema was migrated by the pre-install/pre-upgrade hook Job as {{ .Values.database.migrate.user }}.
+{{- end }}
+{{- if .Values.ingress.enabled }}
+Webhook URL per host: {{ .Values.publicBaseUrl }}/webhooks/github/<host name>
+{{- end }}
+
+Check the api: kubectl -n {{ .Release.Namespace }} get deploy,pods -l app.kubernetes.io/instance={{ .Release.Name }}
