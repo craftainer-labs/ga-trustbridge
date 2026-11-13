@@ -514,6 +514,14 @@ async def test_a_done_deletion_tombstones_only_its_own_installation_key() -> Non
             ),
             {"h": host},
         )
+        await session.execute(
+            text(
+                "INSERT INTO tenant_tombstones (host, installation_id, tenant_id) "
+                "SELECT host, installation_id, tenant_id FROM tenant_deletions "
+                "WHERE state = 'done' AND host = :h ON CONFLICT DO NOTHING"
+            ),
+            {"h": host},
+        )
         await session.execute(delete(Tenant).where(Tenant.host == host))
     with pytest.raises(TenantDeletedError) as tombstone:
         await tenants.upsert_installation(host, 77, "acme-3", 9)
@@ -559,6 +567,14 @@ async def test_the_state_setter_and_the_active_lookup_refuse_the_same_keys_as_th
         async with session_factory() as session, session.begin():
             await session.execute(
                 text("UPDATE tenant_deletions SET state = 'done' WHERE host = :h"), {"h": host}
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO tenant_tombstones (host, installation_id, tenant_id) "
+                    "SELECT host, installation_id, tenant_id FROM tenant_deletions "
+                    "WHERE state = 'done' AND host = :h ON CONFLICT DO NOTHING"
+                ),
+                {"h": host},
             )
             await session.execute(delete(Tenant).where(Tenant.host == host))
         await refused("tombstone")

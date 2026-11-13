@@ -63,7 +63,7 @@ cursor leaves them alone.
   refusals stop new writes and `tb_delete_tenant` holds the installation's advisory lock.
 - **Finish.** After the `database` step the engine calls `DeletionStore.finish`: in one
   transaction `tb_delete_tenant(tenant, holder, fence)` (the `tenants` row, last), then
-  `tb_finish_tenant_deletion` (`done`, the tombstone) and the audit events. The `DatabaseStep`
+  `tb_finish_tenant_deletion` (`done`, and the `tenant_tombstones` row, in that one function) and the audit events. The `DatabaseStep`
   therefore clears everything except the `tenants` row.
 
 ## The database step

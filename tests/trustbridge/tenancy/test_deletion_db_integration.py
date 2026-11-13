@@ -9,6 +9,7 @@ production: with row-level security enabled and forced.
 """
 
 import asyncio
+import importlib.util
 import os
 import subprocess
 import sys
@@ -38,6 +39,8 @@ from trustbridge.worker.ports import SqlTenants
 pytestmark = pytest.mark.integration
 
 MIGRATION = "9c2e5a7f1d84"
+BEFORE_TOMBSTONES = "8c4e1a7d3b52"
+TOMBSTONES = "4e9a1c7b5d23"  # NG6h-3c-1: tenant_tombstones
 DELETING_GUARD = "3b8d6f2a4c17"  # NG6h-2: tb_upsert_tenant refuses a deleting tenant
 PREVIOUS = "b7d3f5a19c68"
 NEW_FUNCTIONS = (
@@ -154,7 +157,11 @@ HOLDER, FENCE = "test-holder", 1
 
 
 async def _set_state(db: Db, deletion: UUID, state: str) -> None:
-    """Force `state`; the `database` step comes with the live lease (`HOLDER`, `FENCE`)."""
+    """Force `state`; the `database` step comes with the live lease (`HOLDER`, `FENCE`).
+
+    `done` also writes the tenant's tombstone, as `tb_finish_tenant_deletion` does in the same
+    transaction (tests of the tombstone itself go through the real finish function).
+    """
     await _admin(
         db,
         "UPDATE tenant_deletions SET state = :s, holder = :h, fence = :f, expires_at = :e "
@@ -167,6 +174,14 @@ async def _set_state(db: Db, deletion: UUID, state: str) -> None:
             "e": datetime.now(UTC) + timedelta(hours=1) if state == "database" else None,
         },
     )
+    if state == "done":
+        await _admin(
+            db,
+            "INSERT INTO tenant_tombstones (host, installation_id, tenant_id) "
+            "SELECT host, installation_id, tenant_id FROM tenant_deletions WHERE id = :d "
+            "ON CONFLICT DO NOTHING",
+            {"d": deletion},
+        )
 
 
 # --- the request function ------------------------------------------------------------------
@@ -395,6 +410,68 @@ async def test_the_app_role_can_only_read_deletion_records(db: Db) -> None:
         )
         == 1
     )
+
+
+async def test_the_app_role_can_only_read_tombstones(db: Db) -> None:
+    """SELECT is granted; only `tb_finish_tenant_deletion` (the owner role) writes a row."""
+    key = {"h": f"tomb-{uuid4().hex[:8]}", "i": 5, "t": uuid4()}
+    insert = "INSERT INTO tenant_tombstones (host, installation_id, tenant_id) VALUES (:h, :i, :t)"
+    await _admin(db, insert, key)
+    rows = await _app_rows(db, "SELECT tenant_id FROM tenant_tombstones WHERE host = :h", key)
+    assert [r.tenant_id for r in rows] == [key["t"]]
+    for write in (
+        insert,
+        "UPDATE tenant_tombstones SET deleted_at = now() WHERE host = :h",
+        "DELETE FROM tenant_tombstones WHERE host = :h",
+    ):
+        with pytest.raises(DBAPIError, match="permission denied"):
+            await _app_rows(db, write, key)
+    privileges = {
+        row.privilege_type
+        for row in await _admin_rows(
+            db,
+            "SELECT privilege_type FROM information_schema.role_table_grants "
+            "WHERE table_name = 'tenant_tombstones' AND grantee = :r",
+            {"r": OWNER_ROLE},
+        )
+    }
+    assert privileges == {"SELECT", "INSERT"}  # no UPDATE and no DELETE: a tombstone is final
+
+
+async def test_a_tombstone_outlives_its_deletion_record(db: Db) -> None:
+    """B2 and B4: purging the `done` record (NG6h-3c-2) must not end the tombstone."""
+    gate = SqlTenantGate(db.app)
+    tenants = SqlTenants(db.app, _no_hosts)
+    tenant = await _tenant(db)
+    deletion = (await _request(db, tenant)).deletion_id
+    await _set_state(db, deletion, "database")
+    await _admin(db, "DELETE FROM tenants WHERE id = :t", {"t": tenant.id})
+    await _set_state(db, deletion, "done")
+    await _admin(db, "DELETE FROM tenant_deletions WHERE id = :d", {"d": deletion})
+    assert (
+        await _admin_scalar(
+            db, "SELECT count(*) FROM tenant_deletions WHERE tenant_id = :t", {"t": tenant.id}
+        )
+        == 0
+    )
+    args = {"h": tenant.host, "i": tenant.installation}
+    upsert = "SELECT tb_upsert_tenant(:h, :i, 'o', 1, 'active')"
+    assert await _upsert_refusal(db, upsert, args) == "tombstone"
+    assert await gate.standing(tenant.host, tenant.installation) == TenantStanding(
+        refusal="tombstone"
+    )
+    with pytest.raises(TenantDeletedError) as refused:
+        await tenants.upsert_installation(tenant.host, tenant.installation, "o", 1)
+    assert refused.value.reason == "tombstone"
+    count = "SELECT count(*) FROM tenants WHERE host = :h AND installation_id = :i"
+    assert await _admin_scalar(db, count, args) == 0
+    # a `done` record without a tombstone row is not a tombstone any more (the table decides)
+    other = await _tenant(db)
+    second = (await _request(db, other)).deletion_id
+    await _admin(db, "UPDATE tenant_deletions SET state = 'done' WHERE id = :d", {"d": second})
+    await _admin(db, "DELETE FROM tenants WHERE id = :t", {"t": other.id})
+    row = await _app_rows(db, upsert, {"h": other.host, "i": other.installation})
+    assert row[0][0] is not None
 
 
 # --- tb_delete_tenant ----------------------------------------------------------------------
@@ -907,3 +984,89 @@ async def test_the_sql_function_the_store_and_the_gate_agree_on_every_deletion_s
             assert (state, present, store) == (state, present, expected)
             assert (state, present, function) == (state, present, expected)
             assert (state, present, standing.refusal) == (state, present, expected)
+
+
+def _migration_backfill() -> str:
+    """The backfill statement of the tombstone migration, read from the revision itself."""
+    path = next((ROOT / "alembic" / "versions").glob(f"{TOMBSTONES}_*.py"))
+    spec = importlib.util.spec_from_file_location("tombstone_migration", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return str(module._BACKFILL)
+
+
+async def test_the_tombstone_backfill_and_downgrade_round_trip() -> None:
+    """The backfill copies `done` records once per key and is idempotent; the downgrade is safe."""
+    async for scratch in _provision(enforce=False):
+        stepped = await _alembic(scratch.name, "downgrade", BEFORE_TOMBSTONES)
+        assert stepped.returncode == 0, stepped.stderr[-2000:]
+        assert await _admin_scalar(scratch, "SELECT to_regclass('tenant_tombstones') IS NULL")
+        host = f"back-{uuid4().hex[:8]}"
+        older, newer, only, failed, running = (uuid4() for _ in range(5))
+        record = (
+            "INSERT INTO tenant_deletions (tenant_id, host, installation_id, requested_by_sub, "
+            "requested_by_iss, state, updated_at) "
+            "VALUES (:t, :h, :i, 's', 'i', :s, CAST(:u AS timestamptz))"
+        )
+        for tenant_id, installation, state, updated in (
+            (older, 1, "done", "2026-01-01T00:00:00+00"),
+            (newer, 1, "done", "2026-02-01T00:00:00+00"),  # the same key, deleted again later
+            (only, 2, "done", "2026-03-01T00:00:00+00"),
+            (failed, 3, "failed", "2026-03-01T00:00:00+00"),
+            (running, 4, "database", "2026-03-01T00:00:00+00"),
+        ):
+            await _admin(
+                scratch,
+                record,
+                {"t": tenant_id, "h": host, "i": installation, "s": state, "u": updated},
+            )
+        upgraded = await _alembic(scratch.name, "upgrade", TOMBSTONES)
+        assert upgraded.returncode == 0, upgraded.stderr[-2000:]
+        read = (
+            "SELECT installation_id, tenant_id, deleted_at FROM tenant_tombstones "
+            "WHERE host = :h ORDER BY installation_id"
+        )
+        rows = await _admin_rows(scratch, read, {"h": host})
+        assert [(r.installation_id, r.tenant_id) for r in rows] == [(1, newer), (2, only)]
+        assert rows[0].deleted_at == datetime(2026, 2, 1, tzinfo=UTC)
+        # idempotent: the same statement again changes nothing, even with a stale newer record
+        await _admin(scratch, _migration_backfill())
+        assert await _admin_rows(scratch, read, {"h": host}) == rows
+        # the app role reads it; the gate sees the backfilled tombstone
+        assert await SqlTenantGate(scratch.app).standing(host, 1) == TenantStanding(
+            refusal="tombstone"
+        )
+        # a tombstone without a done record would be lost with the table: refused
+        await _admin(
+            scratch,
+            "INSERT INTO tenant_tombstones (host, installation_id, tenant_id) VALUES (:h, 9, :t)",
+            {"h": host, "t": uuid4()},
+        )
+        refused = await _alembic(scratch.name, "downgrade", BEFORE_TOMBSTONES)
+        assert refused.returncode != 0
+        assert "tombstone has no done deletion record" in refused.stderr
+        assert await _admin_scalar(scratch, "SELECT to_regclass('tenant_tombstones') IS NOT NULL")
+        await _admin(scratch, "DELETE FROM tenant_tombstones WHERE installation_id = 9")
+        done = await _alembic(scratch.name, "downgrade", BEFORE_TOMBSTONES)
+        assert done.returncode == 0, done.stderr[-2000:]
+        assert await _admin_scalar(scratch, "SELECT to_regclass('tenant_tombstones') IS NULL")
+        for function in (
+            "tb_finish_tenant_deletion(uuid,text,bigint,jsonb,jsonb)",
+            "tb_upsert_tenant(text,bigint,text,bigint,text)",
+        ):
+            assert await _admin_scalar(
+                scratch,
+                f"SELECT pg_get_functiondef('{function}'::regprocedure) NOT LIKE "
+                "'%tenant_tombstones%'",
+            )
+        # the previous bodies read the `done` rows again, and `pg_temp` is still pinned
+        assert await _admin_scalar(
+            scratch,
+            "SELECT p.proconfig @> ARRAY['search_path=pg_catalog, public, pg_temp'] "
+            "FROM pg_proc p WHERE p.oid = 'tb_upsert_tenant(text,bigint,text,bigint,text)'"
+            "::regprocedure",
+        )
+        again = await _alembic(scratch.name, "upgrade", TOMBSTONES)
+        assert again.returncode == 0, again.stderr[-2000:]
+        assert await _admin_rows(scratch, read, {"h": host}) == rows

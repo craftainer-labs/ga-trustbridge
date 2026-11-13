@@ -137,7 +137,7 @@ only at retention. What happens to the **other** audit rows of the tenant is use
 ### After deletion
 
 The tenant id no longer resolves. If the GitHub installation still exists (the App was not
-uninstalled), its events are **acknowledged and dropped**: a `done` row in `tenant_deletions` for
+uninstalled), its events are **acknowledged and dropped**: a row in `tenant_tombstones` for
 `(host, installation_id)` is a tombstone, so `tb_upsert_tenant` and `SqlTenants` create nothing,
 and the worker marks the delivery processed without running a handler (user decision B2, NG6h-2).
 The only answer to the installation's admins is the response to the deletion request and its
@@ -284,8 +284,9 @@ adapter fakes.
   A user-initiated delete on a deleting tenant, every other kind, a refresh and an orphan sweep stay refused. Composing the engine with its steps is left to the items that build them (4b, 5, 6).
   The runbook (cancel, operator-fail, and replaying `tenant.deletion.completed` after a restore) is
   [`docs/runbooks/tenant-deletion.md`](../runbooks/tenant-deletion.md).
-- **Re-creation (decided, NG6h-1).** A `done` row in `tenant_deletions` for `(host, installation_id)`
-  (or a `database`-step row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` creates nothing (NG6h-1 returned NULL; NG6h-2 raises, below), and `SqlTenants` and
+- **Re-creation (decided, NG6h-1; the table moved in NG6h-3c-1).** A row in `tenant_tombstones` for
+  `(host, installation_id)` (until NG6h-3c-1 a `done` row in `tenant_deletions`; or a
+  `database`-step deletion row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` creates nothing (NG6h-1 returned NULL; NG6h-2 raises, below), and `SqlTenants` and
   `MemoryTenants` raise `TenantDeletedError`. A reinstall gets a new installation id and is not
   blocked; an open, failed or cancelled deletion is not a tombstone. The ports also refuse a
   `deleted` tenant and one with a non-terminal deletion, and the installation handler drops the
@@ -307,9 +308,25 @@ adapter fakes.
   `tenant.deletion.completed` events (the SIEM export) before the worker and reconciler start.
 - **Large tenants.** Batch size and a per-step time budget are settings (`DELETION_*`, NG6h-4a-3); a tenant with very
   many repositories makes the GitHub step long, which the resumable cursor handles.
-- **Deletion records' retention.** `tenant_deletions` rows hold ids and counts only and are
-  **kept indefinitely** as a compliance record (the app role has no `DELETE` on the table; a
-  purge would need its own owner-only function and is not part of this ADR).
+- **The tombstone table (decided, user decisions B2 and B4, NG6h-3c-1).** `tenant_tombstones`
+  (primary key `(host, installation_id)`, plus `tenant_id` and `deleted_at`) is the tombstone, apart from the
+  deletion record, so the record can be purged (B4) without ending B2. It is host-scoped, outside
+  RLS, ids only, with no foreign key. The app role has `SELECT` only and the owner role `SELECT,
+  INSERT` (no `UPDATE` or `DELETE`); its only writer is `tb_finish_tenant_deletion`, which inserts
+  the row (`ON CONFLICT DO NOTHING`) in the transaction that marks the deletion `done`. The readers
+  (`tb_upsert_tenant` raising `TB001`, `SqlTenants`, `MemoryTenants`, `SqlTenantGate.standing` and
+  through it the worker's drop) read the table; the in-flight rule (a `database`-step deletion whose
+  tenant row is gone) stays on `tenant_deletions`. The migration (`4e9a1c7b5d23`) backfills the
+  table from the existing `done` rows, idempotently, and is expand-only: the previous release still
+  reads the `done` rows, which it leaves alone, so **the retention purge of the deletion records
+  (NG6h-3c-2) must not run while a previous-release pod may exist**. A tombstone is one small row
+  per deleted installation and is kept indefinitely: it is the guard against re-creation, not a
+  record of the deletion, and holds no actor.
+- **Deletion records' retention.** `tenant_deletions` rows hold ids, counts and the requester's
+  `sub` and `iss`. Until NG6h-3c-2 they are kept indefinitely as a compliance record (the app role
+  has no `DELETE` on the table). User decision B4: retention is configurable, with a setting whose
+  default 0 keeps them forever and an owner-only purge function that NG6h-3c-2 adds; the tombstone
+  above is not affected by it.
 - **Identifiers that survive.** The tenant id, host and installation id remain in
   `tenant_deletions` and in the deletion's audit events until retention. They are treated as
   non-personal operational identifiers, not tenant content; this is a judgement call listed so

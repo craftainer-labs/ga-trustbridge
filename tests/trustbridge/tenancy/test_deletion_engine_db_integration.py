@@ -274,10 +274,15 @@ async def test_a_live_lease_lets_tb_delete_tenant_through_then_finish_makes_the_
     """A live lease lets tb delete tenant through then finish makes the tombstone."""
     tenant, deletion, row = await _in_database_step(db)
     lease = {**_lease(deletion, row)}
+    key = {"h": tenant.host, "i": tenant.installation}
+    tombstone = "SELECT tenant_id FROM tenant_tombstones WHERE host = :h AND installation_id = :i"
     with pytest.raises(DBAPIError, match="tenant row still exists"):
         await _app_rows(db, FINISH, {**lease, "counts": None})
     await _app_rows(db, DELETE, {"t": tenant.id, "h": row.holder, "f": row.fence})
+    assert await _admin_rows(db, tombstone, key) == []  # tb_delete_tenant alone writes none
     await _app_rows(db, FINISH, {**lease, "counts": '{"tenants": 1}'})
+    # the tombstone row is written in the transaction that marks the deletion `done`
+    assert [r.tenant_id for r in await _admin_rows(db, tombstone, key)] == [tenant.id]
     record = await _record(db, deletion)
     assert (record.state, record.holder, record.expires_at, record.counts) == (
         "done",

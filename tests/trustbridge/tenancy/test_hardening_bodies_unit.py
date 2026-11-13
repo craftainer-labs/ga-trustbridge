@@ -43,3 +43,31 @@ def test_the_new_bodies_differ_and_the_guards_hash_the_right_ones() -> None:
         assert after._body_md5(sql) in "".join(after._ASSERT_PREVIOUS)
     for sql in (after._ADVANCE_FN, after._DELETE_FN):
         assert after._body_md5(sql) in "".join(after._ASSERT_NEW)
+
+
+def test_the_tombstone_migration_restores_the_bodies_it_replaced() -> None:
+    """NG6h-3c-1: the copies are byte for byte what 5d7a2c8e1b94 and 3b8d6f2a4c17 install."""
+    finish = _load("5d7a2c8e1b94")
+    upsert = _load("3b8d6f2a4c17")
+    after = _load("4e9a1c7b5d23")
+    assert _body(after._PREVIOUS_FINISH_FN) == _body(finish._FINISH_FN)
+    assert _body(after._PREVIOUS_UPSERT_FN) == _body(upsert._UPSERT_FN)
+    # the restored upsert keeps pg_temp (6f3b9d2e4a85 pinned it on the live function)
+    assert "SET search_path = pg_catalog, public, pg_temp\n" in after._PINNED_PREVIOUS_UPSERT_FN
+
+
+def test_the_tombstone_bodies_differ_and_the_guards_hash_the_right_ones() -> None:
+    """The finish function writes the tombstone, the upsert reads it, and both hashes differ."""
+    after = _load("4e9a1c7b5d23")
+    assert "INSERT INTO public.tenant_tombstones" in after._FINISH_FN
+    assert "tenant_tombstones" not in after._PREVIOUS_FINISH_FN
+    assert "FROM public.tenant_tombstones s" in after._UPSERT_FN
+    assert "d.state = 'done'" not in after._UPSERT_FN  # the `done` rows no longer decide
+    assert "d.state = 'database'" in after._UPSERT_FN  # the in-flight rule stays
+    for old, new in (
+        (after._PREVIOUS_FINISH_FN, after._FINISH_FN),
+        (after._PREVIOUS_UPSERT_FN, after._UPSERT_FN),
+    ):
+        assert _body(old) != _body(new)
+        assert after._body_md5(old) in "".join(after._ASSERT_PREVIOUS)
+        assert after._body_md5(new) in "".join(after._ASSERT_NEW)
