@@ -73,6 +73,6 @@ schema="values don't meet the specifications of the schema"
 expect_failure "$schema" "additional properties 'nonsense' not allowed" -- -f "$minimal" --set nonsense=1
 expect_failure "$schema" "at '/mode': value must be one of 'production', 'dev'" -- \
     -f "$minimal" --set mode=mock
-expect_failure "$schema" "at '/worker/health/port'" "65535" -- \
+expect_failure "$schema" "at '/worker/health/port': maximum: got 70,000, want 65,535" -- \
     -f "$minimal" --set worker.health.port=70000
 echo "helm chart checks passed"
