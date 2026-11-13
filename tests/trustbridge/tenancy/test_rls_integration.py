@@ -201,6 +201,9 @@ async def _provision(*, enforce: bool) -> AsyncIterator[Db]:
         async with admin.begin() as conn:
             for t in SIX:
                 await conn.execute(text(f"ALTER TABLE {t} OWNER TO {OWNER_ROLE}"))
+            # `tb_delete_tenant` (owned by the owner role in the tests that run it) reads this
+            # table; in a deployment the migrate Job runs as the owner role, which owns it.
+            await conn.execute(text(f"ALTER TABLE webhook_deliveries OWNER TO {OWNER_ROLE}"))
             for function in FUNCTIONS:
                 await conn.execute(text(f"ALTER FUNCTION {function} OWNER TO {OWNER_ROLE}"))
             if enforce:
