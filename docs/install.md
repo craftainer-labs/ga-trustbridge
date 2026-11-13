@@ -12,7 +12,7 @@ no subcharts. The architecture is in
 ## Prerequisites
 
 - Kubernetes 1.30 or later and Helm.
-- **Postgres** (17 or later recommended: earlier versions lack `transaction_timeout`, see
+- **Postgres** (17 or later required in production: earlier versions lack `transaction_timeout`, see
   [upgrade.md](upgrade.md)) reachable over TLS (`database.sslmode` is `verify-full` by
   default; production needs at least `require`). Create the two roles
   before the first install; migrations only `GRANT`

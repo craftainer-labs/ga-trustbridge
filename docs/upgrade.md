@@ -38,10 +38,11 @@ which must be below `exportLagSeconds`, default 30) and checks at start-up that 
 applies it: in production a failing check keeps the pod not ready and then exits after
 `SCHEMA_WAIT_SECONDS`.
 
-`transaction_timeout` exists from **PostgreSQL 17**. On an older server the app sets
-`statement_timeout` and `idle_in_transaction_session_timeout` to the same value instead and logs a
-warning at start-up: each statement and each idle gap is bounded, but a transaction of many short
-statements is not, so the lag guarantee is weaker. Plan the move to PostgreSQL 17 or later. The
+`transaction_timeout` exists from **PostgreSQL 17**, which production requires: on an older server
+the check fails closed (not ready, then exit after `SCHEMA_WAIT_SECONDS`). Outside production the
+app sets `statement_timeout` and `idle_in_transaction_session_timeout` to the same value instead
+and logs a warning: each statement and each idle gap is bounded, but a transaction of many short
+statements is not, so the lag guarantee is weaker. The
 migrate Job is not bounded (it runs as the owner role on its own connection).
 
 ## If the migration fails

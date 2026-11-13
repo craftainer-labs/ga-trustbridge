@@ -189,9 +189,11 @@ The transport is user decision 2 below. The export is:
   ADR 0034 B8): the `after_begin` hook runs `SET LOCAL transaction_timeout` from its own setting
   `TRANSACTION_TIMEOUT_SECONDS` (default 15, validated below the lag), and a start-up and
   readiness check compares `SHOW transaction_timeout` with the lag, failing closed in production
-  and warning elsewhere (the role safety precedent). Before PostgreSQL 17 the hook sets
-  `statement_timeout` and `idle_in_transaction_session_timeout` instead, which the check accepts
-  with a warning (a weaker bound: many short statements can still outlive the lag).
+  and warning elsewhere (the role safety precedent). Production requires
+  PostgreSQL 17+ (the check fails closed without `transaction_timeout`). Outside production, before
+  PostgreSQL 17 the hook sets `statement_timeout` and `idle_in_transaction_session_timeout`
+  instead, which the check accepts with a warning (a weaker bound: many short statements can still
+  outlive the lag).
 - **Filtered by scope** (the reader's tenants) and by a time or `seq` range.
 - Itself audited.
 

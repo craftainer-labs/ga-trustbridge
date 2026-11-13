@@ -137,6 +137,16 @@ def test_before_17_the_statement_and_idle_fallback_passes_with_a_warning() -> No
     assert "PostgreSQL 17" in verdict.warning
 
 
+def test_in_production_the_fallback_is_refused_and_17_is_required() -> None:
+    """Production fails closed before 17, even with a tight statement and idle fallback."""
+    verdict = evaluate_timeouts(_facts(None, 15_000, 15_000, 160004), LAG, production=True)
+    assert not verdict.ok
+    assert verdict.reason is not None
+    assert "requires PostgreSQL 17" in verdict.reason
+    assert "160004" in verdict.reason
+    assert evaluate_timeouts(_facts(15_000), LAG, production=True).ok
+
+
 @pytest.mark.parametrize(("statement", "idle"), [(0, 15_000), (15_000, 0), (30_000, 15_000)])
 def test_before_17_a_missing_or_loose_fallback_is_unsafe(statement: int, idle: int) -> None:
     """16: either timeout off, or not below the lag, fails closed."""
@@ -211,6 +221,14 @@ async def test_the_fallback_is_ready_and_logs_a_warning(caplog: pytest.LogCaptur
     with caplog.at_level(logging.WARNING):
         assert await gate.refresh()
     assert "has no transaction_timeout" in caplog.text
+
+
+async def test_the_production_gate_fails_closed_on_the_fallback() -> None:
+    """A production gate on PostgreSQL 16 is not ready, naming the 17 requirement."""
+    gate = TimeoutGate(_Session(FALLBACK), LAG, production=True)  # type: ignore[arg-type]
+    assert not await gate.refresh()
+    assert gate.reason is not None
+    assert "requires PostgreSQL 17" in gate.reason
 
 
 async def test_an_unreadable_row_fails_closed() -> None:

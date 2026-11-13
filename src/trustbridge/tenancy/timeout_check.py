@@ -10,9 +10,10 @@ setting cannot go unnoticed.
 
 The decision is the pure function `evaluate`. With `transaction_timeout` (PostgreSQL 17 and
 later) the effective value must be above 0 and below the lag. Without it (earlier servers have no
-such parameter) the documented fallback applies: `statement_timeout` and
-`idle_in_transaction_session_timeout`, both above 0 and below the lag, are accepted with a warning,
-because a transaction of many short statements can still outlive the lag. A value of 0 means
+such parameter) **production fails closed** (PostgreSQL 17+ is required); elsewhere the fallback
+applies: `statement_timeout` and `idle_in_transaction_session_timeout`, both above 0 and below the
+lag, are accepted with a warning, because a transaction of many short statements can still outlive
+the lag. A value of 0 means
 "off" in PostgreSQL and is refused. `TimeoutGate`, `TimeoutCheck` and `register_timeout_check`
 mirror `role_check`: a failing process reports not ready with the reason; **in production** it
 exits non-zero once the shared `SCHEMA_WAIT_SECONDS` budget has passed; **elsewhere** the worker
@@ -69,8 +70,14 @@ def _bounded(value_ms: int, lag_ms: float) -> bool:
     return 0 < value_ms < lag_ms
 
 
-def evaluate(facts: TimeoutFacts, lag_seconds: float) -> TimeoutVerdict:
-    """Unsafe unless a timeout below `lag_seconds` bounds the transaction (or the fallback does)."""
+def evaluate(
+    facts: TimeoutFacts, lag_seconds: float, *, production: bool = False
+) -> TimeoutVerdict:
+    """Unsafe unless a timeout below `lag_seconds` bounds the transaction.
+
+    Production needs `transaction_timeout` (PostgreSQL 17+); the statement and idle fallback is
+    accepted, with a warning, only elsewhere.
+    """
     lag_ms = lag_seconds * 1000
     lag = f"AUDIT_EXPORT_LAG_SECONDS ({lag_seconds:g} s)"
     if facts.transaction_timeout_ms is not None:
@@ -81,6 +88,15 @@ def evaluate(facts: TimeoutFacts, lag_seconds: float) -> TimeoutVerdict:
             reason=(
                 f"transaction_timeout is {facts.transaction_timeout_ms} ms (0 is off); "
                 f"it must be above 0 and below {lag}"
+            ),
+        )
+    if production:
+        return TimeoutVerdict(
+            ok=False,
+            reason=(
+                f"PostgreSQL {facts.server_version} has no transaction_timeout; production "
+                "requires PostgreSQL 17 or later (the statement and idle fallback does not bound "
+                "a transaction's total time)"
             ),
         )
     if _bounded(facts.statement_timeout_ms, lag_ms) and _bounded(
@@ -119,10 +135,15 @@ class TimeoutGate:
         lag_seconds: float,
         *,
         mock: bool = False,
+        production: bool = False,
     ) -> None:
-        """`mock` (MODE=mock) is always ready and never opens a session."""
+        """`mock` (MODE=mock) is always ready and never opens a session.
+
+        `production` makes PostgreSQL 17+ with `transaction_timeout` applied mandatory.
+        """
         self._sf = session_factory
         self._lag = lag_seconds
+        self._production = production
         self._mock = mock
         self.current: bool = mock
         self.reason: str | None = None
@@ -153,7 +174,7 @@ class TimeoutGate:
         verdict = (
             TimeoutVerdict(ok=False, reason=UNREADABLE_REASON)
             if facts is None
-            else evaluate(facts, self._lag)
+            else evaluate(facts, self._lag, production=self._production)
         )
         self.current, self.reason = verdict.ok, verdict.reason
         if not verdict.ok:

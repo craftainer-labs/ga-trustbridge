@@ -170,7 +170,10 @@ def build_core(
         gate=SchemaGate(session_factory, mock=settings.mode == "mock"),
         roles=RoleGate(session_factory, mock=settings.mode == "mock"),
         timeouts=TimeoutGate(
-            session_factory, settings.audit_export_lag_seconds, mock=settings.mode == "mock"
+            session_factory,
+            settings.audit_export_lag_seconds,
+            mock=settings.mode == "mock",
+            production=settings.production,
         ),
         runtime=runtime,
         queue=queue,

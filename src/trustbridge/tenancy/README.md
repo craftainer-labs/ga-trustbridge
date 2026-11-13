@@ -191,10 +191,11 @@ application, for every `Session` of the api, the worker and the reconciler:
 | otherwise | not ready with the reason, a warning is logged, polling continues, never exits | one check, a warning is logged, processing continues |
 
 - **Before PostgreSQL 17** there is no `transaction_timeout` (the hook cannot set it; it would be an
-  unknown parameter). The documented fallback is `statement_timeout` plus
-  `idle_in_transaction_session_timeout` (ADR 0032 allows either): the hook sets both to the same
-  value with `SET LOCAL`, and the check accepts them when both are above 0 and below the lag,
-  **with a warning**, because a transaction of many short statements can still outlive the lag. If
-  either is off or not below the lag, it fails as above (closed in production). The server version
+  unknown parameter). **Production requires
+  PostgreSQL 17 or later: the check fails closed there.** Outside production the fallback is
+  `statement_timeout` plus `idle_in_transaction_session_timeout` (ADR 0032 allows either): the hook
+  sets both to the same value with `SET LOCAL`, and the check accepts them when both are above 0
+  and below the lag, **with a warning**, because a transaction of many short statements can still
+  outlive the lag. If either is off or not below the lag, it fails as above. The server version
   is the one the dialect read on connect (`server_version_info`); an unknown version takes the
   fallback. Upgrade to PostgreSQL 17 or later for the full guarantee (`docs/upgrade.md`).
