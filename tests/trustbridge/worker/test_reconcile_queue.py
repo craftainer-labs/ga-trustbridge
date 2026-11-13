@@ -633,3 +633,25 @@ def test_the_settings_enable_the_reconcile_by_default_with_a_bounded_attempt_cou
     for bad in (0, 101):
         with pytest.raises(ValidationError):
             make_settings(tenant_reconcile_max_attempts=bad)
+
+
+async def test_a_refused_request_whose_ack_was_lost_leaves_no_attempts_behind() -> None:
+    """Nothing ran here; the run that took over acked and cleared the count."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, body = uuid4(), Body()
+    body.error = RuntimeError("once")
+    await _request(h.valkey, tenant)
+    assert await _duty(h, Refusals(), body).tenant_reconcile() == 0
+    assert h.valkey.hashes[ATTEMPTS_HASH] == {str(tenant): "1"}
+    h.advance(TTL + 1)
+    other = _duty(h, Refusals(), Body())
+
+    class TakeOver(Refusals):
+        async def refusal_of(self, tenant_id: UUID) -> str | None:
+            h.advance(TTL + 1)
+            await other.tenant_reconcile()  # reclaims, claims and runs the request again
+            return "disabled"
+
+    assert await _duty(h, TakeOver(), body).tenant_reconcile() == 1
+    assert h.valkey.sets == {}
+    assert ATTEMPTS_HASH not in h.valkey.hashes or not h.valkey.hashes[ATTEMPTS_HASH]

@@ -413,6 +413,7 @@ class Reconciler:
     ) -> bool:
         """Settle one claim; True when it was acknowledged, False when it was left pending."""
         tenant = str(claim.tenant_id)
+        ran = False
         refusal = await refusals.refusal_of(claim.tenant_id)
         if refusal is not None:
             logger.info(
@@ -424,18 +425,19 @@ class Reconciler:
             await queue.release(claim)
             return False
         else:
-            await self._run_body(queue, body, claim)  # a poison request returns, to be acked
-        if not await queue.ack(claim):
+            ran = await self._run_body(queue, body, claim)  # a poison request returns, to be acked
+        acked = await queue.ack(claim)
+        if not acked:
             logger.warning(
                 "reconcile claim was reclaimed while it ran; the request runs again",
                 extra={"tenant": tenant},
             )
-        else:
+        if acked or ran:  # a body that succeeded but lost its ack is not a failure to count
             await queue.clear_attempts(claim)
         return True
 
-    async def _run_body(self, queue: ReconcileQueue, body: TenantReconciler, claim: Claim) -> None:
-        """Run the body for a claim; a poison request is logged and left for the caller to ack.
+    async def _run_body(self, queue: ReconcileQueue, body: TenantReconciler, claim: Claim) -> bool:
+        """Run the body for a claim; False for a poison request, which is logged and left to ack.
 
         Each run counts first (a crash counts too). The request is dropped, at ERROR, when it has
         already run `TENANT_RECONCILE_MAX_ATTEMPTS` times without success; a failure leaves the
@@ -449,7 +451,7 @@ class Reconciler:
                 limit,
                 extra={"tenant": str(claim.tenant_id), "attempts": limit},
             )
-            return
+            return False
 
         async def extend() -> None:
             self._beat("tenant-reconcile")
@@ -457,6 +459,7 @@ class Reconciler:
                 raise ClaimLostError(str(claim.tenant_id))
 
         await body.reconcile(claim.tenant_id, extend)
+        return True
 
     async def trim_streams(self) -> None:
         """Trim `tb:events` below what the group acknowledged, the dead letter by age, set lag."""

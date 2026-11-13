@@ -140,7 +140,7 @@ class CredentialReconciler:
                         tenant_id,
                         f"{adapter} sweep_orphans",
                     )
-            failed += await self._sweep_parked(tenant_id, extend)
+            await self._sweep_parked(tenant_id, extend)
         except TenantDisabledError:
             logger.info(
                 "tenant reconcile stopped: tenant is disabled", extra={"tenant": str(tenant_id)}
@@ -150,17 +150,19 @@ class CredentialReconciler:
             msg = f"{failed} reconcile step(s) failed"
             raise ReconcileIncompleteError(msg)
 
-    async def _sweep_parked(self, tenant_id: UUID, extend: Extend) -> int:
-        """The global parked-value sweep, at most once per interval; the number that failed."""
+    async def _sweep_parked(self, tenant_id: UUID, extend: Extend) -> None:
+        """The global parked-value sweep, at most once per interval.
+
+        Housekeeping for the instance, not for this tenant: a failure is logged and retried by the
+        next request, and does not fail (or, after the attempts, drop) this tenant's request.
+        """
         if not self._sweep.due():
-            return 0
+            return
         await extend()
-        failed = await self._guarded(
+        if not await self._guarded(
             self._core.sweep_parked_values(), tenant_id, "sweep_parked_values"
-        )
-        if not failed:
+        ):
             self._sweep.done()
-        return failed
 
     async def _resume(self, tenant_id: UUID, extend: Extend) -> int:
         """Resume the tenant's open operations; the number that failed."""

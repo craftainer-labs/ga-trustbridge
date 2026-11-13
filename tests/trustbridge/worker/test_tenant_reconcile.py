@@ -198,7 +198,7 @@ async def test_a_failing_step_does_not_stop_the_others_but_fails_the_run(
     w = build_world(fake_capabilities(oidc=False))
     core = StubCore(resume=error, ensure=error, orphans=error, parked=error)
     body = await _stubbed(w, core)
-    with caplog.at_level(logging.WARNING), pytest.raises(ReconcileIncompleteError, match="4 "):
+    with caplog.at_level(logging.WARNING), pytest.raises(ReconcileIncompleteError, match="3 "):
         await body.reconcile(w.tenant.id, Extender())
     assert core.steps == ["resume", "ensure", "orphans", "parked"]
     assert caplog.text.count("tenant reconcile step failed") == 4
