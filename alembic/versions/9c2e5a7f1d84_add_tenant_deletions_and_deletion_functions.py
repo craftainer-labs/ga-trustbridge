@@ -35,7 +35,7 @@ function body replaced under the same signature and return type.
   ``NULL`` and creates nothing (an open, ``failed`` or ``cancelled`` deletion is not a tombstone,
   and another installation id of the host is unaffected). The lookup uses a partial index on
   ``state = 'done'``. The function and ``tb_delete_tenant`` first take a transaction-level
-  advisory lock on the installation (see ``_lock``), so a concurrent delete and upsert are
+  advisory lock on the installation (see ``_lock``; ``tb_request_tenant_deletion`` takes it too), so a concurrent delete and upsert are
   serialised and a deleted tenant cannot be recreated by an upsert that checked just before the
   delete committed.
 * ``tb_request_tenant_deletion(...)``: a ``SECURITY DEFINER`` function that, under the tenant row
@@ -289,11 +289,20 @@ DECLARE
     v_row public.tenants%ROWTYPE;
     v_open public.tenant_deletions%ROWTYPE;
     v_new public.tenant_deletions%ROWTYPE;
+    v_host text;
+    v_inst bigint;
 BEGIN
     IF p_by_sub IS NULL OR length(p_by_sub) NOT BETWEEN 1 AND 255
        OR p_by_iss IS NULL OR length(p_by_iss) NOT BETWEEN 1 AND 2048
        OR p_delete_platform IS NULL THEN
         RAISE EXCEPTION 'invalid deletion request' USING ERRCODE = '22023';
+    END IF;
+    -- Advisory lock first (as tb_upsert_tenant and tb_delete_tenant take it), so an upsert that
+    -- read "not deleting" cannot interleave with this request; then the row lock.
+    SELECT t.host, t.installation_id INTO v_host, v_inst FROM public.tenants t
+     WHERE t.id = p_tenant;
+    IF FOUND THEN
+        {_lock("v_host", "v_inst")}
     END IF;
     SELECT * INTO v_row FROM public.tenants WHERE id = p_tenant FOR UPDATE;
     IF NOT FOUND THEN

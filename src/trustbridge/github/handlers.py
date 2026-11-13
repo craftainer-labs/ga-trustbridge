@@ -157,6 +157,7 @@ class InstallationHandlers:
                 installation_id,
                 refused.reason,
             )
+            self._notify(ctx.host, installation_id)  # cached tokens must not outlive a suspend
             return
         if ctx.action == "created":
             await self._store.apply_repository_changes(

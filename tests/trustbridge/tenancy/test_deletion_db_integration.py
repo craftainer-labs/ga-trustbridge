@@ -436,6 +436,20 @@ async def test_a_delete_and_an_upsert_never_recreate_the_tenant(db: Db) -> None:
     assert not await _exists(db, other)
 
 
+async def test_a_request_waits_for_the_installation_advisory_lock(db: Db) -> None:
+    """A deletion request queues behind an upsert holding the installation lock."""
+    tenant = await _tenant(db)
+    key = f"tb_tenant:{tenant.host}:{tenant.installation}"
+    async with db.app() as holder, holder.begin():
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": key}
+        )
+        waiting = asyncio.create_task(_request(db, tenant))
+        await asyncio.sleep(0.5)
+        assert not waiting.done()
+    assert (await waiting).outcome == "created"
+
+
 async def test_tb_delete_tenant_refuses_while_any_tenant_keyed_row_remains(db: Db) -> None:
     """One row in any of the five tables blocks it, and removing it lets the delete through."""
     tenant = await _tenant(db)
