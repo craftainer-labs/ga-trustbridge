@@ -17,6 +17,11 @@ holds `SELECT` on `tenant_deletions` and `EXECUTE` on the functions named.
 The admin API routes that wrap cancel and operator-fail arrive with the
 request endpoint (NG6h-7); the functions are the break-glass path after that.
 
+**Cancel and operator-fail are unaudited until NG6h-7's admin routes exist.**
+The SQL functions below write no audit event, so record each use in your
+change log. Once the routes exist, prefer them: they audit the action, and the
+functions stay as the break-glass path.
+
 ## 1. Watch a deletion
 
 ```sql

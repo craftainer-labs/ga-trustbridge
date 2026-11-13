@@ -10,6 +10,10 @@ Protocols and the tests use doubles, and nothing composes a `DeletionEngine` in 
 reconciler runs the duty only when it is given a `DeletionDriver` (`ReconcilerDeps.deletion`,
 `ProcessOverrides.deletion`).
 
+The duty is inert in production until the steps exist: no deletion can run with a step missing. The composition
+root that builds the `DeletionEngine` with the real steps and hands it to the reconciler lives outside the worker
+package and comes in NG6h-7, once 4b, 5 and 6 have landed.
+
 - `ports.py`: `DeletionDriver` (`run_once() -> bool`). The only module the worker and reconciler
   may import (import-linter contract 3, which fails if that import ever disappears); it imports
   nothing from the package, and `__init__` re-exports nothing, so depending on it loads no engine
