@@ -250,6 +250,9 @@ existing Secret. A null or empty value is not set, so the application default ap
 {{- $_ := set $c "AWS_CA_BUNDLE" $bundle -}}
 {{- $_ := set $c "PGSSLROOTCERT" $bundle -}}
 {{- end -}}
+{{- if and (or $v.proxy.httpProxyKey $v.proxy.httpsProxyKey) (not $v.proxy.existingSecret) -}}
+{{- fail "proxy.existingSecret is required when proxy.httpProxyKey or proxy.httpsProxyKey is set" -}}
+{{- end -}}
 {{- if not $v.proxy.httpProxyKey -}}
 {{- $_ := set $c "HTTP_PROXY" $v.proxy.httpProxy -}}
 {{- $_ := set $c "http_proxy" $v.proxy.httpProxy -}}

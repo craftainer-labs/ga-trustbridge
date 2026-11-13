@@ -50,5 +50,7 @@ expect_failure "trustedProxies is required" -f "$minimal" --set trustbridge.trus
 expect_failure "database.runtime.existingSecret is required" -f "$minimal" --set database.runtime.existingSecret=
 expect_failure "valkey.existingSecret is required" -f "$minimal" --set valkey.existingSecret=
 expect_failure "trustbridge.signers is required" -f "$minimal" --set trustbridge.signers=null
+expect_failure "proxy.existingSecret is required" -f "$minimal" --set proxy.httpsProxyKey=https-proxy
+expect_failure "nonsense" -f "$minimal" --set nonsense=1 # values.schema.json: unknown top-level key
 expect_failure "mode" -f "$minimal" --set mode=mock # values.schema.json
 echo "helm chart checks passed"

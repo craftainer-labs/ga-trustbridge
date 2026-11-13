@@ -78,9 +78,12 @@ api:
   probes:
     startup:
       path: /health/live
+      ## periodSeconds x failureThreshold (450 s) must exceed
+      ## trustbridge.schema.waitSeconds (300 s) plus boot time, or the kubelet
+      ## kills a pod that is still legitimately waiting for the schema
       periodSeconds: 5
       timeoutSeconds: 5
-      failureThreshold: 60
+      failureThreshold: 90
     liveness:
       path: /health/live
       periodSeconds: 20
@@ -164,6 +167,8 @@ ingress:
 
 ## Optional NetworkPolicy (off by default)
 networkPolicy:
+  ## Selects the api, worker and reconciler pods only; the migrate hook Job
+  ## is not covered (it needs the owner-role database and runs for minutes)
   enabled: false
   ## `from` peers allowed to reach the api port; empty allows any source
   apiIngressFrom: []
@@ -202,7 +207,7 @@ database:
     passwordKey: password
     ## MIGRATE_EXPECTED_ROLE: the Job refuses to run as any other role
     expectedRole: trustbridge_owner
-    backoffLimit: 1
+    backoffLimit: 3
     activeDeadlineSeconds: 900
     resources:
       requests:
