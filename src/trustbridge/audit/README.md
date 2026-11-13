@@ -5,7 +5,7 @@ The append-only audit log ([ADR 0032](../../../docs/adrs/0032-audit-log.md), Acc
 deferred table below): the storage layer (NG6c), event value validation, redaction and the
 emitters at the call sites that exist today (NG6f). Out of scope
 here: the mutating endpoints' events (NG6e)
-and tenant deletion (NG6h). SIEM push is a follow-up.
+and the deletion's request path (NG6h-7). SIEM push is a follow-up.
 
 - `model.py`: `AuditEvent` (what to write; validates every value at construction), `AuditRecord`
   (what is read; `to_json` and `to_ndjson_line` are the export shape), `AuditQuery` (filters and
@@ -69,6 +69,7 @@ null `tenant_id` (`authz.denied`, instance-level events) is written with no cont
 | `credential.rotate` (admin call, success) | `credentials.CredentialAuditObserver.saved`, for the call that finishes a rotation (`join_call_event` / `JoinedCallEvent`); otherwise `admin.credentials` after the core returns | the caller | Appended in the finishing save's own transaction, so a finished rotation never commits without it (invariant 9, NG6i); if the append fails the save rolls back and the call fails. |
 | `credential.orphan.delete` | `adapters.core.CredentialCore.sweep_orphans` through `CoreDeps.orphans` | as above | Own; one event per platform credential deleted. If the write fails the sweep still finishes, logs each unaudited orphan at error level, then raises. `resource_id` is the platform name. |
 | `audit.purge` | written by `tb_audit_purge` itself (actor `reconciler`) | | The purge's. |
+| `tenant.deletion.step`, `tenant.deletion.skipped`, `tenant.deletion.completed`, `tenant.deletion.failed` | `trustbridge.deletion` (`deletion/audit.py`), through `SqlDeletionStore` | `reconciler`; `resource_type=tenant_deletion`, `resource_id` the deletion id | The transition's own: each definer transition (`tb_advance`, `tb_finish`, `tb_fail`) and its events are in ONE session transaction, opened inside `tenant_context(tenant_id)` (the `completed` event inserts after the tenant row is gone). `before` and `after` use the `deletion` shape (ids, state and step names, a category, a count, a fixed code) plus `counts` through `deletion_counts`; never row content or the organisation login. |
 
 `CredentialCore` is not instantiated by any process yet (NG5/NG6), so the credential events are
 wired by whoever builds it: `SqlCredentialStore(session_factory, CredentialAuditObserver(writer,
@@ -142,7 +143,7 @@ ADR names them, with no emitter:
 | Event | Owner |
 | --- | --- |
 | (none left for the admin API.) The router walk `admin.guards.mutations_without_emitter` fails any mutating route without an `emits` marker. Emitted since NG6e-2 to NG6e-5: `credential.rotate`, `tenant.disable`, `tenant.enable`, `tenant.reconcile`, `delivery.requeue` and `host.registration.start`, `.manual`, `.complete` (the `host_registration` shape); the credential events of a rotation made through the API have the system actor `api` | done |
-| The deletion's own events (0034) | NG6h |
+| `tenant.deletion.requested` and `.cancelled` (0034) | NG6h-7 (the request path) |
 | The reconciler duty calling `purge_expired` (ADR 0032 "Retention") | done (NG6h-3a): the `audit-purge` job |
 | A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export"). No such timeout exists on main and the engine is the template's (`app.db`) | NG6h (api and deletion batches). Left out of NG6d: the read routes do not need it, and no connection on main sets a timeout to check against |
 

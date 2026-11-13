@@ -10,6 +10,7 @@ from trustbridge.audit.redact import (
     REDACTED,
     SECRET_WORDS,
     FailureReason,
+    deletion_counts,
     failure_after,
     has_secret_word,
     printable,
@@ -113,3 +114,59 @@ def test_failure_reason_for_status_maps_refusals_and_defaults_to_unavailable() -
     assert FailureReason.for_status(404) is FailureReason.NOT_FOUND
     assert FailureReason.for_status(409) is FailureReason.CONFLICT
     assert FailureReason.for_status(503) is FailureReason.UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("member", "value"),
+    [
+        (Action.TENANT_DELETION_STEP, "tenant.deletion.step"),
+        (Action.TENANT_DELETION_SKIPPED, "tenant.deletion.skipped"),
+        (Action.TENANT_DELETION_COMPLETED, "tenant.deletion.completed"),
+        (Action.TENANT_DELETION_FAILED, "tenant.deletion.failed"),
+    ],
+)
+def test_the_deletion_action_names_are_the_adr_ones(member: Action, value: str) -> None:
+    """ADR 0034 names the events; they are part of the export contract."""
+    assert member.value == value
+    assert Action(value) is member
+
+
+def test_the_deletion_shape_records_ids_states_and_codes_and_drops_the_rest() -> None:
+    """A row's content, the organisation login or a secret never reach a deletion event."""
+    out = project(
+        "deletion",
+        {
+            "deletion_id": "d-1",
+            "step": "platform",
+            "from_state": "platform",
+            "to_state": "github",
+            "category": "adapter_resources",
+            "reason": "operator_owned",
+            "count": 3,
+            "attempts": 2,
+            "error_code": "bad_config",
+            "org": "acme-corp",
+            "token": CANARY,
+            "last_error": CANARY,
+        },
+    )
+    assert out == {
+        "attempts": 2,
+        "category": "adapter_resources",
+        "count": 3,
+        "deletion_id": "d-1",
+        "error_code": "bad_config",
+        "from_state": "platform",
+        "reason": "operator_owned",
+        "step": "platform",
+        "to_state": "github",
+    }
+
+
+def test_deletion_counts_are_category_to_count_and_nothing_else() -> None:
+    """The one non-scalar value: short printable names and non-negative integers."""
+    assert deletion_counts({"b": 2, "a": 0}) == {"a": 0, "b": 2}
+    assert list(deletion_counts({"b": 2, "a": 0})) == ["a", "b"]
+    for bad in ({"": 1}, {"x" * 65: 1}, {"a\nb": 1}, {"a": -1}, {"a": True}, {"a": "1"}, {1: 1}):
+        with pytest.raises(ValueError, match="deletion counts"):
+            deletion_counts(bad)  # type: ignore[arg-type]

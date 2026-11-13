@@ -195,6 +195,45 @@ forbidden_modules = [
     "trustbridge.main",
 ]
 
+# The deletion engine (ADR 0034, NG6h-4a-2) sits beside tenancy and audit: it may import them
+# (and the template's `app`), nothing above them. Nothing below imports it, and the worker and
+# reconciler reach it only through the `DeletionDriver` Protocol in `deletion.ports`.
+[[tool.importlinter.contracts]]
+name = "deletion never imports the worker, the GitHub core, adapters, webhooks, the admin API or main"
+type = "forbidden"
+source_modules = ["trustbridge.deletion"]
+forbidden_modules = [
+    "trustbridge.worker",
+    "trustbridge.github",
+    "trustbridge.adapters",
+    "trustbridge.webhooks",
+    "trustbridge.admin",
+    "trustbridge.rbac",
+    "trustbridge.signer",
+    "trustbridge.main",
+]
+
+[[tool.importlinter.contracts]]
+name = "tenancy, audit, adapters and the GitHub core never import deletion"
+type = "forbidden"
+source_modules = [
+    "trustbridge.tenancy",
+    "trustbridge.audit",
+    "trustbridge.adapters",
+    "trustbridge.github",
+    "trustbridge.rbac",
+]
+forbidden_modules = ["trustbridge.deletion"]
+
+[[tool.importlinter.contracts]]
+name = "the worker reaches deletion only through its ports Protocol"
+type = "forbidden"
+source_modules = ["trustbridge.worker"]
+forbidden_modules = ["trustbridge.deletion"]
+# Nothing imports the Protocol yet (the reconciler wiring is NG6h-4a-3).
+unmatched_ignore_imports_alerting = "none"
+ignore_imports = ["trustbridge.worker.** -> trustbridge.deletion.ports"]
+
 [[tool.importlinter.contracts]]
 name = "signers never import the GitHub core"
 type = "forbidden"

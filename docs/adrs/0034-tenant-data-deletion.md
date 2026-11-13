@@ -240,7 +240,11 @@ adapter fakes.
   fail, cancel, finish), each guarded by the live lease (`TB003`) and a valid transition (`TB004`); `tb_delete_tenant`
   checks holder and fence. `failed` is written only for an explicit non-retryable error (with the lease) or by an operator
   (`tb_operator_fail_tenant_deletion`, refused while a live lease is held); transient
-  errors retry with capped backoff. The engine package, reconciler duty, settings, gate and runbook are NG6h-4a-2 and -3.
+  errors retry with capped backoff. The engine package (`src/trustbridge/deletion/`, NG6h-4a-2) is built: each definer transition and its
+  audit events are one session transaction (the functions write no `audit_events`), a run ends after about half
+  the lease TTL, `TB003` and `TB004` both stop the run, the `tenants` row is removed by the engine's finish
+  transaction (after the `DatabaseStep`'s batches), and a step that fails is retried with capped backoff while
+  `failed` needs a `NonRetryableError`. The reconciler duty, settings, gate and runbook are NG6h-4a-3.
 - **Re-creation (decided, NG6h-1).** A `done` row in `tenant_deletions` for `(host, installation_id)`
   (or a `database`-step row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` creates nothing (NG6h-1 returned NULL; NG6h-2 raises, below), and `SqlTenants` and
   `MemoryTenants` raise `TenantDeletedError`. A reinstall gets a new installation id and is not

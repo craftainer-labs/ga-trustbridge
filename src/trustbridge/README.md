@@ -32,13 +32,17 @@ The instance package of the trustbridge GitHub App, a sibling of the template's 
   its `README.md`.
 - `tenancy/`: the per-session tenant context and the Postgres hook that sets it (ADR 0031). See its
   `README.md`.
+- `deletion/`: the tenant deletion engine (ADR 0034): state machine, lease and fence loop, failure
+  policy, drain step and audit events; the steps are Protocols filled by later items. See its
+  `README.md`.
 - `reconciler/`, `migrations/`: one-line `__main__` shims so the commands keep the names in the
   ADR (`python -m trustbridge.reconciler`, `python -m trustbridge.migrations upgrade`).
 
 Import rules (import-linter, `pyproject.toml`): `main` > `webhooks` and `admin` (independent) >
 `worker` > `ratelimit` > `settings`; `app` never imports `trustbridge`; `adapters` and `signer`
 never import `github`; `audit` never imports `rbac` or `admin`; `rbac` never imports `tenancy`,
-`admin`, `webhooks` or `main`.
+`admin`, `webhooks` or `main`; `deletion` imports only `tenancy`, `audit` and the template's `app`, nothing
+below imports it, and the worker reaches it only through `deletion.ports`.
 
 ## How the pieces are wired
 
