@@ -119,7 +119,7 @@ app as the owner. It is cheap and the owner policy above keeps the Job working.
 **`tenants` and resolution: four narrow functions.** Resolution and tenant creation happen
 with no tenant in hand (Context 3). Rather than a `BYPASSRLS` role or a setting that any
 query can flip, four `SECURITY DEFINER` functions owned by `trustbridge_owner`, each with a
-fixed `search_path = pg_catalog, public`, are the only unscoped paths to `tenants`, and the app
+fixed `search_path = pg_catalog, public, pg_temp`, are the only unscoped paths to `tenants`, and the app
 role has `EXECUTE` on them and nothing else on that table outside its own row:
 
 | Function | Does |
@@ -244,7 +244,13 @@ app role (not the owner, not a superuser).
 9. `FORCE ROW LEVEL SECURITY` is set on the six tables, and the owner role, with the owner
    policy, can still read all rows (the migrate Job and the functions work).
 10. A `SECURITY DEFINER` function has a fixed `search_path`, and an unqualified object shadowed
-    in a schema on the caller's `search_path` is not used.
+    in a schema on the caller's `search_path` is not used. The path always ends with `pg_temp`
+    (`pg_catalog, public, pg_temp`): PostgreSQL searches a `pg_temp` that is not listed *first*
+    for relations, so a caller who can create temporary tables could otherwise shadow one. This
+    is the convention for every definer function, present and future. The older definers got it
+    from migration `6f3b9d2e4a85` (`ALTER FUNCTION ... SET search_path`, no body replaced), and an
+    integration test (`tests/trustbridge/tenancy/test_definer_search_path_integration.py`) reads
+    `pg_proc` and fails CI for any `SECURITY DEFINER` function whose `proconfig` does not carry it.
 
 **Iteration**
 
@@ -318,7 +324,8 @@ that `tb_upsert_tenant` never writes (invariant 7); tenant data deletion is in N
   `USING` vs `WITH CHECK`): https://www.postgresql.org/docs/current/ddl-rowsecurity.html
 - `set_config(setting, value, is_local)` and `current_setting(name, missing_ok)`:
   https://www.postgresql.org/docs/current/functions-admin.html
-- `CREATE FUNCTION ... SECURITY DEFINER` and the `search_path` guidance:
+- `CREATE FUNCTION ... SECURITY DEFINER` and the `search_path` guidance ("Writing SECURITY
+  DEFINER Functions Safely", which says to put `pg_temp` last):
   https://www.postgresql.org/docs/current/sql-createfunction.html
 - SQLAlchemy ORM events, `SessionEvents.after_begin(session, transaction, connection)` and
   listening on `AsyncSession.sync_session` (context7 `/websites/sqlalchemy_en_20_orm`):

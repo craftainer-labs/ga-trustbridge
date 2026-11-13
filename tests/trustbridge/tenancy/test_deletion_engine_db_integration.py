@@ -10,7 +10,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import Row, text
@@ -49,7 +49,7 @@ CANCEL = "SELECT tb_cancel_tenant_deletion(:d)"
 FINISH = "SELECT tb_finish_tenant_deletion(:d, :h, :f, CAST(:counts AS jsonb), NULL)"
 DELETE = "SELECT tb_delete_tenant(:t, :h, :f)"
 LOST = "deletion lease lost"
-OLDER_FUNCTIONS = NEW_FUNCTIONS[:3]  # tb_get_tenant, tb_set_tenant_disabled, tb_request_
+HARDENING = "6f3b9d2e4a85"  # pg_temp on every definer, retry reset on progress, delivery backstop
 CHAIN = ("requested", "draining", "platform", "github", "database")
 
 
@@ -177,10 +177,7 @@ async def test_the_app_role_may_execute_but_not_write_and_the_search_path_is_pin
 ) -> None:
     """The app role may execute but not write and the search path is pinned."""
     for function in NEW_FUNCTIONS:
-        # the older definers keep their path; this migration's functions add pg_temp last
-        path = (
-            "pg_catalog, public" if function in OLDER_FUNCTIONS else "pg_catalog, public, pg_temp"
-        )
+        path = "pg_catalog, public, pg_temp"  # the older definers gain pg_temp in HARDENING
         row = (
             await _admin_rows(
                 db,
@@ -304,6 +301,34 @@ async def test_a_live_lease_lets_tb_delete_tenant_through_then_finish_makes_the_
         await _app_rows(db, FINISH, {**lease, "counts": None})
 
 
+async def test_tb_delete_tenant_refuses_while_a_webhook_delivery_is_not_cleared(db: Db) -> None:
+    """An uncleared `webhook_deliveries` row blocks the delete; a `deleted` one does not."""
+    tenant, _, row = await _in_database_step(db)
+    delivery = (
+        "INSERT INTO webhook_deliveries (host, delivery_id, event, headers, status, tenant_id) "
+        "VALUES (:h, :d, 'push', CAST('{}' AS jsonb), :s, :t)"
+    )
+    params = {"h": tenant.host, "d": "wd-1", "t": tenant.id}
+    await _admin(db, delivery, {**params, "s": "pending"})
+    lease = {"t": tenant.id, "h": row.holder, "f": row.fence}
+    with pytest.raises(DBAPIError, match="tenant still has rows in: webhook_deliveries"):
+        await _app_rows(db, DELETE, lease)
+    assert await _admin_scalar(db, "SELECT count(*) FROM tenants WHERE id = :t", {"t": tenant.id})
+    await _admin(
+        db,
+        "UPDATE webhook_deliveries SET status = 'deleted', body = NULL "
+        "WHERE host = :h AND delivery_id = 'wd-1'",
+        {"h": tenant.host},
+    )
+    await _admin(
+        db, delivery, {**params, "d": "wd-2", "s": "pending", "t": uuid4()}
+    )  # another tenant
+    await _app_rows(db, DELETE, lease)
+    assert not await _admin_scalar(
+        db, "SELECT count(*) FROM tenants WHERE id = :t", {"t": tenant.id}
+    )
+
+
 # --- advance -------------------------------------------------------------------------------
 
 
@@ -394,26 +419,44 @@ async def test_leaving_requested_is_refused_when_the_tenant_row_is_missing(db: D
     assert (await _record(db, deletion)).state == "requested"
 
 
-async def test_a_same_state_advance_keeps_the_retry_state_and_a_step_change_resets_it(
-    db: Db,
-) -> None:
-    """A cursor save leaves attempts, retry_at and last_error alone; a real step change clears."""
+async def test_a_same_state_save_with_an_unchanged_cursor_keeps_the_retry_state(db: Db) -> None:
+    """No cursor, or the cursor it already has, is no progress: a poison step keeps counting."""
     await _drain(db)
     _, deletion = await _open(db)
     row = await _claim(db)
     assert row is not None
-    await _advance(db, deletion, row, "draining")
+    await _advance(db, deletion, row, "draining", cursor='{"page": 2}')
     await _app_rows(db, RETRY, {**_lease(deletion, row), "e": "boom", "delay": 0})
+    again = await _claim(db)
+    assert again is not None
+    for save in ({}, {"cursor": '{"page": 2}'}, {"cursor": '{"page":   2}', "counts": '{"n": 1}'}):
+        await _advance(db, deletion, again, "draining", **save)
+        record = await _record(db, deletion)
+        assert (record.attempts, record.last_error, record.state) == (1, "boom", "draining")
+        assert record.retry_at is not None
+        assert record.step_cursor == {"page": 2}
+    await _advance(db, deletion, again, "platform")  # a step change always clears
+    record = await _record(db, deletion)
+    assert (record.attempts, record.last_error, record.retry_at) == (0, None, None)
+
+
+async def test_a_same_state_save_with_a_changed_cursor_resets_the_retry_state(db: Db) -> None:
+    """A cursor that moved is real progress: attempts, retry_at and last_error are cleared."""
+    await _drain(db)
+    _, deletion = await _open(db)
+    row = await _claim(db)
+    assert row is not None
+    await _advance(db, deletion, row, "draining", cursor='{"page": 1}')
+    await _app_rows(db, RETRY, {**_lease(deletion, row), "e": "boom", "delay": 60})
+    again = await _claim(db)  # retry_at is in the future: the row is skipped until it passes
+    assert again is None
+    await _admin(db, "UPDATE tenant_deletions SET retry_at = now() - interval '1 second'")
     again = await _claim(db)
     assert again is not None
     await _advance(db, deletion, again, "draining", cursor='{"page": 2}', counts='{"n": 1}')
     record = await _record(db, deletion)
-    assert (record.attempts, record.last_error, record.state) == (1, "boom", "draining")
-    assert record.retry_at is not None
-    assert record.step_cursor == {"page": 2}
-    await _advance(db, deletion, again, "platform")
-    record = await _record(db, deletion)
     assert (record.attempts, record.last_error, record.retry_at) == (0, None, None)
+    assert (record.state, record.step_cursor, record.counts) == ("draining", {"page": 2}, {"n": 1})
 
 
 async def test_attempts_are_bigint_everywhere(db: Db) -> None:
@@ -661,3 +704,40 @@ async def test_downgrade_restores_the_previous_delete_function_and_drops_the_res
         )
         down = await _alembic(scratch.name, "downgrade", PREVIOUS)
         assert down.returncode == 0, down.stderr[-2000:]
+
+
+async def test_the_hardening_downgrade_refuses_while_a_deletion_is_open_then_restores() -> None:
+    """The downgrade refuses with an open deletion, then restores the bodies and the paths."""
+    async for scratch in _provision(enforce=False):
+        deletion = (await _request(scratch, await _tenant(scratch))).deletion_id
+        refused = await _alembic(scratch.name, "downgrade", REVISION)
+        assert refused.returncode != 0
+        assert "non-terminal tenant deletions exist" in refused.stderr
+        body = "SELECT pg_get_functiondef(CAST(:f AS regprocedure)) LIKE :m"
+        advance = "tb_advance_tenant_deletion(uuid, text, bigint, text, jsonb, jsonb, jsonb)"
+        assert await _admin_scalar(scratch, body, {"f": advance, "m": "%v_progress%"})
+        await _admin(
+            scratch,
+            "UPDATE tenant_deletions SET state = 'cancelled' WHERE id = :d",
+            {"d": deletion},
+        )
+        stepped = await _alembic(scratch.name, "downgrade", REVISION)
+        assert stepped.returncode == 0, stepped.stderr[-2000:]
+        assert not await _admin_scalar(scratch, body, {"f": advance, "m": "%v_progress%"})
+        delete = "tb_delete_tenant(uuid, text, bigint)"
+        assert not await _admin_scalar(scratch, body, {"f": delete, "m": "%webhook_deliveries%"})
+        paths = (
+            "SELECT array_agg(DISTINCT p.proconfig[1]) FROM pg_proc p WHERE p.prosecdef "
+            "AND p.pronamespace = 'public'::regnamespace AND p.proname = ANY(:n)"
+        )
+        older = ["tb_get_tenant", "tb_audit_list", "tb_upsert_tenant"]
+        assert await _admin_scalar(scratch, paths, {"n": older}) == [
+            "search_path=pg_catalog, public"
+        ]
+        restored = await _alembic(scratch.name, "upgrade", HARDENING)
+        assert restored.returncode == 0, restored.stderr[-2000:]
+        assert await _admin_scalar(scratch, body, {"f": advance, "m": "%v_progress%"})
+        assert await _admin_scalar(scratch, body, {"f": delete, "m": "%webhook_deliveries%"})
+        assert await _admin_scalar(scratch, paths, {"n": older}) == [
+            "search_path=pg_catalog, public, pg_temp"
+        ]

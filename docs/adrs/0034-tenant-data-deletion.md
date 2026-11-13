@@ -253,6 +253,15 @@ adapter fakes.
   transaction (after the `DatabaseStep`'s batches), and a step that fails is retried with capped backoff while
   `failed` needs a `NonRetryableError`. A `ValueError` while building the audit events of a step's output (a bad
   category name or count) is a programming error and ends as `failed` (code `invalid_step_output`), not a retry loop.
+- **Hardening (NG6h-4a follow-ups, migration `6f3b9d2e4a85`).** Expand-only, no signature changes. (1) Every older
+  definer gets `pg_temp` last in its `search_path` (ADR 0031 invariant 10). (2) `tb_advance_tenant_deletion`: a
+  same-state advance whose step cursor *changes* is real progress and also resets `attempts`, `retry_at` and
+  `last_error`, as a step change does; a same-state save with an unchanged (or no) cursor still leaves them alone, so a
+  poison step keeps counting. (3) `tb_delete_tenant` also refuses (55000, `webhook_deliveries` in the list of
+  non-empty tables) while a `webhook_deliveries` row of the tenant has a `status` other than `deleted`, before the delete
+  and in the re-check after it: an erasure backstop for the `DatabaseStep`. The lock order is unchanged (advisory lock,
+  deletion row, `tenants` row). The downgrade refuses (55000) while any non-terminal deletion exists and restores the
+  `5d7a2c8e1b94` bodies and paths.
 - **Database step (NG6h-4b).** `deletion/database.py`, `SqlDatabaseStep`: one bounded batch per pass in one transaction in
   the tenant's context, with a lease guard (holder, fence, unexpired, state `database`) as its first statement, then the
   tables in the order above and the delivery bodies. Inventory gaps found, none changed here: (1) the `tenant_id` of a

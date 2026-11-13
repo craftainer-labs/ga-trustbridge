@@ -47,7 +47,7 @@ yet (release N+1), so the app role behaves as before.
 ## Database side (migration `d4b8f1e60a27`)
 
 `tb_current_tenant()`, the `SECURITY DEFINER` functions `tb_resolve_tenant`, `tb_upsert_tenant`
-and `tb_list_tenants` (fixed `search_path = pg_catalog, public`, `EXECUTE` revoked from `PUBLIC` and
+and `tb_list_tenants` (fixed `search_path = pg_catalog, public, pg_temp` since `6f3b9d2e4a85`, `EXECUTE` revoked from `PUBLIC` and
 granted to `trustbridge_app` and `trustbridge_owner`), and the inert `tenant_isolation` and
 `owner_all` policies. `tb_delete_tenant` arrives with tenant data deletion (NG6h-1, migration
 `9c2e5a7f1d84`, below), and
@@ -83,13 +83,20 @@ same row lock as enable and disable, validates the confirmation before returning
 and stores an optional `not_before` (default NULL: no delay). `tb_delete_tenant(uuid, text, bigint)`
 (holder and fence, NG6h-4a-1, migration `5d7a2c8e1b94`) refuses (55000) unless the tenant is
 admin-disabled, has a deletion in its `database` step whose `not_before` has passed, and has no
-rows left in the five other tables, and raises `TB003` (`deletion lease lost`) unless the caller
+rows left in the five other tables or an uncleared `webhook_deliveries` row (`status <> 'deleted'`, migration
+`6f3b9d2e4a85`), and raises `TB003` (`deletion lease lost`) unless the caller
 holds that deletion's live lease (holder, fence and an unexpired `expires_at`). Because those tables have no
 foreign key, a writer is not blocked by the row lock; `tb_delete_tenant` checks again after the
 delete and rolls it back if a row committed in between, and the engine must stop writing for a
 deleting tenant first. The downgrade is refused while any `tenant_deletions` row or `deleted`
 delivery exists. N-1 safe: only additions and same-signature function bodies; the previous release
 never reads or writes the new column, status or table.
+
+Every `SECURITY DEFINER` function pins `search_path = pg_catalog, public, pg_temp` (`pg_temp` last, ADR 0031
+invariant 10; `6f3b9d2e4a85` added it to the older ones with `ALTER FUNCTION ... SET search_path`);
+`tests/trustbridge/tenancy/test_definer_search_path_integration.py` fails CI for a definer without it, so a new
+definer must carry it. In `tb_advance_tenant_deletion` a same-state advance whose cursor changes also resets
+`attempts`, `retry_at` and `last_error` (a step change always does); an unchanged cursor leaves them alone.
 
 The engine's writes to `tenant_deletions` are `SECURITY DEFINER` functions of `5d7a2c8e1b94` (the
 app role keeps `SELECT` only, `search_path` pinned to `pg_catalog, public, pg_temp`): `tb_claim_tenant_deletion` (lease, fence bump,

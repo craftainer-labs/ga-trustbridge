@@ -569,7 +569,7 @@ async def test_rls_is_forced_and_the_owner_with_its_policy_still_reads_everythin
 async def test_definer_functions_have_a_fixed_search_path_and_ignore_a_shadowing_schema(
     enforced_db: Db,
 ) -> None:  # inv. 10
-    """Each definer function pins `pg_catalog, public`; a shadow `tenants` table is not used."""
+    """Each definer pins `pg_catalog, public, pg_temp`; a shadow `tenants` table is not used."""
     db = enforced_db
     rows = await _admin_rows(
         db,
@@ -579,7 +579,7 @@ async def test_definer_functions_have_a_fixed_search_path_and_ignore_a_shadowing
     assert len(rows) == 3
     for row in rows:
         assert row.prosecdef is True
-        assert "search_path=pg_catalog, public" in row.proconfig
+        assert "search_path=pg_catalog, public, pg_temp" in row.proconfig
     async with db.admin.begin() as conn:
         for statement in (
             "CREATE SCHEMA evil",
