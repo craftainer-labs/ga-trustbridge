@@ -71,13 +71,32 @@ cursor leaves them alone.
 `SqlDatabaseStep(factory, batch_size=500)` deletes the tenant's rows in `PLAN` order (`credential_operations`,
 `adapter_credentials`, `adapter_resources`, `scope_leases`, `tenant_repositories`, then clears `webhook_deliveries`
 bodies), never the `tenants` row. One pass is one batch of one table in one transaction inside
-`tenant_context(tenant_id)`; a short batch moves the cursor (`{"table", "removed"}`) to the next table, a full one asks
+`tenant_context(tenant_id)`; a short batch with nothing of the tenant left in the table moves the cursor (`{"table", "removed"}`) to the next table, a full one asks
 for another pass on the same table. A cursor it cannot read starts over, which is safe because each pass deletes whatever
 is left.
 
-- **No definer functions.** The app role already holds `DELETE` on the five tenant tables and `UPDATE` on
-  `webhook_deliveries`, and the `tenant_isolation` policies (ADR 0031) admit the context tenant, so the step adds no
-  privilege. Every pass starts with a lease guard in the same transaction (a `SELECT` on `tenant_deletions` for this
+- **Primary-key batches (NG6h-4c).** A batch is `DELETE FROM t WHERE (pk) IN (SELECT pk FROM t WHERE tenant_id = :tenant
+  ORDER BY pk LIMIT :limit FOR UPDATE SKIP LOCKED)` (the `webhook_deliveries` UPDATE adds `status <> 'deleted'`; the keys are picked in a `MATERIALIZED` CTE so the limit holds), with the
+  key from `database.PRIMARY_KEYS` (composite for most tables; an integration test compares it with `pg_index`). It is not
+  keyed on `ctid`, which a concurrent update changes, so an updated row could be skipped. `SKIP LOCKED` passes over rows
+  another transaction holds instead of waiting, so a pass can remove fewer rows than the batch while rows are left; a short
+  pass therefore checks, in the same transaction, whether the tenant still has a row in the table (for deliveries, one not
+  yet `deleted`) and, if so, keeps the cursor on the table: the next pass takes the rows once their holder commits. The
+  step moves to the next table only when the table holds nothing of the tenant's. A holder that never lets go keeps the
+  step on that table until the run budget ends the run (each pass is cheap); `tb_delete_tenant`'s emptiness check stays the
+  backstop for a row written after the step passed the table.
+- **No definer functions.** The app role already holds `SELECT, INSERT, UPDATE, DELETE` on the five tenant tables
+  (`tenant_repositories`, `scope_leases`, `adapter_resources`, `adapter_credentials`, `credential_operations`:
+  `KEYED_TABLES` in `d4b8f1e60a27`, granted in `5d1f3a7c9e24` and `c3a5e7d91f42`) and on `webhook_deliveries`
+  (`c3a5e7d91f42`), and each keyed table's `tenant_isolation` policy is `FOR ALL` with `USING (tenant_id = (SELECT
+  tb_current_tenant()))` and the same `WITH CHECK` (`d4b8f1e60a27`), so the step adds no privilege. The `UPDATE` grant
+  and a policy that covers `UPDATE` are load-bearing, not only `DELETE`: `SELECT ... FOR UPDATE` requires `UPDATE`
+  privilege (PostgreSQL `SELECT`, "The Locking Clause"), and under RLS the `UPDATE` policies apply to the rows it
+  locks (`ddl-rowsecurity`), so without them the `picked` CTE would return no rows and the step would stall.
+  Preconditions: the migrations grant and create the policies only if the `trustbridge_app` role exists when they run
+  (roles are created outside migrations), and RLS is created inert (no `ENABLE`/`FORCE ROW LEVEL SECURITY` until
+  release N+1), so the integration test, which enables and forces it itself, is what exercises this path today.
+  `webhook_deliveries` is outside RLS and has no policy. Every pass starts with a lease guard in the same transaction (a `SELECT` on `tenant_deletions` for this
   deletion's holder, fence and an unexpired lease, state `database`; the app role cannot lock that table, so it is a
   check, not a lock): a stale holder gets `LeaseLost` and touches nothing. A holder that loses the lease just after the
   check deletes at most one more batch of the same rows the new holder would delete, and `tb_delete_tenant` re-checks

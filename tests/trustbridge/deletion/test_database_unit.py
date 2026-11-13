@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.trustbridge.deletion.fakes import TENANT, record
 from trustbridge.audit.redact import deletion_counts, has_secret_word
-from trustbridge.deletion.database import PLAN, SqlDatabaseStep
+from trustbridge.deletion.database import PLAN, PRIMARY_KEYS, SqlDatabaseStep
 from trustbridge.deletion.model import Lease, LeaseLost, StepContext
 from trustbridge.tenancy import current_tenant
 
@@ -29,8 +29,10 @@ class _Result:
 
 
 class _Log:
-    def __init__(self, *, held: bool = True, removed: int = 0, unresolved: int = 0) -> None:
-        self.held, self.removed, self.unresolved = held, removed, unresolved
+    def __init__(
+        self, *, held: bool = True, removed: int = 0, unresolved: int = 0, left: bool = False
+    ) -> None:
+        self.held, self.removed, self.unresolved, self.left = held, removed, unresolved, left
         self.statements: list[tuple[str, dict[str, Any], Any]] = []
         self.committed = 0
         self.rolled_back = 0
@@ -74,6 +76,8 @@ class _Session:
             return _Result(1 if self.log.held else 0)
         if "tenant_id IS NULL" in sql:
             return _Result(self.log.unresolved)
+        if sql.endswith("LIMIT 1"):
+            return _Result(1 if self.log.left else 0)
         return _Result(self.log.removed)
 
 
@@ -177,12 +181,13 @@ async def test_each_pass_checks_the_lease_first_and_runs_in_the_tenants_context(
     """Guard, then one delete, in one transaction inside `tenant_context(tenant_id)`."""
     log = _Log(removed=1)
     await _step(log).run(_ctx())
-    guard, delete = log.statements
+    guard, delete, pending = log.statements
     assert guard[1] == {"id": REC.id, "holder": "h-1", "fence": 7}
     assert "FROM tenant_deletions" in guard[0]
     assert "DELETE FROM credential_operations" in delete[0]
     assert delete[1] == {"tenant": TENANT, "limit": 3}
-    assert guard[2] == delete[2] == TENANT
+    assert pending[1] == {"tenant": TENANT}
+    assert guard[2] == delete[2] == pending[2] == TENANT
     assert log.committed == 1
     assert current_tenant.get() is None
 
@@ -210,3 +215,52 @@ def test_a_batch_size_below_one_is_refused() -> None:
     """A zero batch would never finish."""
     with pytest.raises(ValueError, match="batch_size"):
         _step(_Log(), batch_size=0)
+
+
+def test_every_plan_table_has_its_primary_key() -> None:
+    """A batch needs the key of each table it clears."""
+    assert set(PRIMARY_KEYS) == {table for table, _ in PLAN}
+    assert all(PRIMARY_KEYS.values())
+
+
+@pytest.mark.parametrize("table", [table for table, _ in PLAN if table != "webhook_deliveries"])
+async def test_a_delete_batch_is_keyed_on_the_primary_key_and_skips_locked_rows(table: str) -> None:
+    """Not `ctid`: the key is stable when a concurrent update moves a row."""
+    log = _Log(removed=1)
+    await _step(log).run(_ctx({"table": table}))
+    sql = log.statements[1][0]
+    cols = ", ".join(PRIMARY_KEYS[table])
+    assert f"WITH picked AS MATERIALIZED (SELECT {cols} FROM {table} WHERE" in sql  # noqa: S608 -- a test constant
+    assert f"ORDER BY {cols} LIMIT :limit FOR UPDATE SKIP LOCKED" in sql
+    assert f"DELETE FROM {table} WHERE ({cols}) IN (SELECT {cols} FROM picked)" in sql  # noqa: S608 -- a test constant
+    assert "ctid" not in sql
+
+
+async def test_the_webhook_batch_is_keyed_on_its_primary_key_and_takes_only_live_rows() -> None:
+    """The same pattern for the UPDATE, over rows not yet `deleted`."""
+    log = _Log(removed=1)
+    await _step(log).run(_ctx({"table": "webhook_deliveries"}))
+    sql = log.statements[1][0]
+    assert "SELECT host, delivery_id FROM webhook_deliveries WHERE" in sql
+    assert "tenant_id = :tenant AND status <> 'deleted' ORDER BY host, delivery_id" in sql
+    assert "WHERE (host, delivery_id) IN (SELECT host, delivery_id FROM picked)" in sql
+    assert "FOR UPDATE SKIP LOCKED" in sql
+    assert "ctid" not in sql
+    assert "status <> 'deleted'" in log.statements[2][0]
+
+
+async def test_a_short_batch_with_rows_left_stays_on_the_table() -> None:
+    """`SKIP LOCKED` passed over a locked row: the next pass takes it; the cursor stays."""
+    log = _Log(removed=1, left=True)
+    outcome = await _step(log).run(_ctx({"table": "scope_leases", "removed": 2}))
+    assert outcome.done is False
+    assert outcome.counts == {"scope_leases": 1}
+    assert outcome.cursor == {"table": "scope_leases", "removed": 3}
+
+
+async def test_the_last_table_with_rows_left_does_not_finish() -> None:
+    """No unresolved count and no `done` while a delivery of the tenant is still live."""
+    log = _Log(removed=0, left=True, unresolved=4)
+    outcome = await _step(log).run(_ctx({"table": "webhook_deliveries"}))
+    assert outcome.done is False
+    assert not any("tenant_id IS NULL" in s[0] for s in log.statements)
