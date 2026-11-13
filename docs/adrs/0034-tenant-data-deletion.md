@@ -100,14 +100,19 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    role has no `DELETE` on `tenants`), each batch its own transaction (bounded by the
    `transaction_timeout` the `after_begin` hook sets, B8, so a batch must be sized to finish inside
    `TRANSACTION_TIMEOUT_SECONDS`, below the audit export lag) and
-   counted. Webhook bodies are cleared for deliveries recorded for the tenant: an expand
+   counted (NG6h-4b: the `DatabaseStep` runs as the app role in the tenant's context, where the
+   `tenant_isolation` policies admit `DELETE`, so it needs no definer function; it removes everything above except the `tenants`
+   row, which the engine deletes in its finish transaction; counts are named `adapter_operations`, `access_grants`,
+   `adapter_resources`, `scope_leases`, `tenant_repositories` and `webhook_bodies`, because the table names `credential_*`
+   hold a secret word the audit view would hide). Webhook bodies are cleared for deliveries recorded for the tenant: an expand
    migration adds a nullable `tenant_id` to `webhook_deliveries`, set by the worker when it
    resolves the delivery (NG6h-2: before it defers or handles it; an event with no registered
-   handler, or a payload naming no installation, is not resolved); deletion nulls `body` and sets the row terminal with status `deleted`, which the relay, the
+   handler, or a payload naming no installation, is not resolved); deletion nulls `body`, `headers` (to `{}`) and `last_error` and sets the row terminal with status `deleted`, which the relay, the
    re-relay sweep and the worker skip (the row stays for deduplication, as the retention purge
    keeps rows, 0028 item 5), so a held, body-less row is never re-relayed. Rows with no `tenant_id` (never resolved, or older than
    the column) fall to the normal retention and are counted under `skipped` as
-   `retention_only`.
+   `retention_only`: the last pass counts the deliveries on the deletion's host that have no `tenant_id` and still hold a body
+   (`webhook_bodies_unresolved`), a host-wide upper bound because such a row cannot be attributed to the tenant.
 6. **Done.** The record's `state` becomes `done` with its counts. The audit trail of the
    deletion is written throughout (below).
 
@@ -248,6 +253,15 @@ adapter fakes.
   transaction (after the `DatabaseStep`'s batches), and a step that fails is retried with capped backoff while
   `failed` needs a `NonRetryableError`. A `ValueError` while building the audit events of a step's output (a bad
   category name or count) is a programming error and ends as `failed` (code `invalid_step_output`), not a retry loop.
+- **Database step (NG6h-4b).** `deletion/database.py`, `SqlDatabaseStep`: one bounded batch per pass in one transaction in
+  the tenant's context, with a lease guard (holder, fence, unexpired, state `database`) as its first statement, then the
+  tables in the order above and the delivery bodies. Inventory gaps found, none changed here: (1) the `tenant_id` of a
+  delivery is set only when the worker resolves it, so an event with no registered handler that names the tenant's
+  installation keeps its body until retention and appears only as the host-wide `retention_only` count; (2) a cleared
+  delivery keeps only its dedupe key (`host`, `delivery_id`, `body_sha256`), `event`, timestamps and counters: `body`,
+  `headers` (NOT NULL, so `{}`) and `last_error` (handler error text, may name tenant data) are cleared, since erasure
+  covers every field that can hold personal or tenant data; (3) the inventory has no tenant-keyed table beyond the six,
+  and the integration test fails if one is added without a decision.
 - **Wiring (NG6h-4a-3).** The reconciler runs the engine as a singleton duty (`tenant-deletion`, under a lease like
   the audit purge) through the `DeletionDriver` Protocol only: at most `DELETION_BATCH_SIZE` claims per poll of
   `DELETION_POLL_SECONDS`, a liveness beat per pass, and a store error that escapes `run_once` is logged and ends that
