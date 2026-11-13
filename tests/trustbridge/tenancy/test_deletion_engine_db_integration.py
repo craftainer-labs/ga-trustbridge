@@ -790,7 +790,8 @@ async def test_the_hardening_upgrade_refuses_a_drifted_body_and_changes_nothing(
         )
         paths = (
             "SELECT count(*) FROM pg_proc WHERE prosecdef "
-            "AND pronamespace = 'public'::regnamespace AND NOT proconfig @> ARRAY['search_path=pg_catalog, public, pg_temp']"
+            "AND pronamespace = 'public'::regnamespace "
+            "AND NOT proconfig @> ARRAY['search_path=pg_catalog, public, pg_temp']"
         )
         assert await _admin_scalar(scratch, paths) > 0  # the transaction rolled back
 
