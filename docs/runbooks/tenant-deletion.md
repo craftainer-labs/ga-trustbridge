@@ -31,14 +31,16 @@ WHERE state NOT IN ('done', 'failed', 'cancelled')
 ORDER BY updated_at;
 ```
 
-- `attempts` counts failed attempts at the current step. It resets when the
-  step advances (a saved cursor within the same step leaves it alone). A
+- `attempts` counts failed attempts at the current step. It resets (together
+  with `retry_at` and `last_error`) when the step advances and when a save within
+  the same step moves the cursor, which is real progress; a save that leaves the
+  cursor unchanged leaves it alone. A
   deletion with a rising `attempts` and a `last_error` is blocked: the engine
   keeps retrying with a capped backoff (`DELETION_BACKOFF_BASE_SECONDS`,
   `DELETION_BACKOFF_CAP_SECONDS`, both at least 1) and never advances past a
   blocked step on its own. Alert on `attempts` and on the
   `trustbridge.deletion.attempts` counter. Because a step that flaps between
-  failing and advancing keeps `attempts` low, also alert on a non-terminal
+  failing and advancing (or that fails after each cursor move) keeps `attempts` low, also alert on a non-terminal
   deletion whose `updated_at` is older than your expected step duration.
 - `trustbridge.deletion.failed` counts deletions the engine ended as `failed`
   itself (a non-retryable error, for example a step output the audit shapes

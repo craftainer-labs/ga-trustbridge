@@ -34,7 +34,9 @@ package and comes in NG6h-7, once 4b, 5 and 6 have landed.
 `not_before` and `retry_at` passed, fence bumped) and walks it `requested > draining > platform >
 github > database > done`. Before every pass it renews the lease. A step returns a `StepOutcome`:
 `counts` are added to the record's, `skipped` entries (`category`, `reason`, `count`) are appended,
-and `done=False` with a `cursor` saves progress in the same state and runs the step again.
+and `done=False` with a `cursor` saves progress in the same state and runs the step again. A save whose cursor
+changed also clears `attempts`, `retry_at` and `last_error` in the database (migration `6f3b9d2e4a85`); an unchanged
+cursor leaves them alone.
 
 - **Lease and fence.** Every write goes through a definer function carrying `(id, holder, fence)`.
   `TB003` (lease lost) and `TB004` (terminal or invalid) both raise `LeaseLost`: the engine stops
@@ -79,7 +81,10 @@ is left.
   deletion's holder, fence and an unexpired lease, state `database`; the app role cannot lock that table, so it is a
   check, not a lock): a stale holder gets `LeaseLost` and touches nothing. A holder that loses the lease just after the
   check deletes at most one more batch of the same rows the new holder would delete, and `tb_delete_tenant` re-checks
-  that nothing is left.
+  that nothing is left (including any `webhook_deliveries` row of the tenant not yet `deleted`).
+- **A late delivery** (a webhook accepted for the tenant after the step cleared its rows) makes
+  `tb_delete_tenant` refuse with `55000`; the engine retries the database step, which marks it `deleted`, so the deletion
+  converges. NG6h-7's end-to-end test must cover a delivery that arrives during a deletion.
 - **Webhook deliveries** recorded for the tenant keep their row with status `deleted` and the dedupe key (`host`, `delivery_id`, `body_sha256`) and the
   non-personal `event`; `body`, `headers` (allow-listed request headers; NOT NULL, so `{}`) and `last_error` (handler
   error text, which may name tenant data) are cleared. Nothing reads the headers of a `deleted` row.

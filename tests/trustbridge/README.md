@@ -15,6 +15,8 @@ Tests for the instance package `src/trustbridge/` (instance-added files under th
   coverage gate counts the SQL stores through them).
 - `tenancy/test_rls_integration.py` is marked `integration` (it needs the stack's Postgres, with the
   owner and app roles); `tenancy/test_tenancy_unit.py` needs no service.
+- `tenancy/test_definer_search_path_integration.py` is marked `integration`: it reads `pg_proc` and fails for any
+  `SECURITY DEFINER` function without `pg_temp` last in its `search_path` (ADR 0031).
 - `audit/test_audit_integration.py` is marked `integration` (it needs the stack's Postgres, with the
   owner and app roles); `audit/test_audit_unit.py` needs no service.
 - `audit/test_validation_unit.py`, `test_emit_unit.py` and `test_credentials_unit.py` need no

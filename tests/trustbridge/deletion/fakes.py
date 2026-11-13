@@ -78,6 +78,9 @@ class FakeStore:
         self.calls.append(("retry", (error, delay_seconds)))
         self._guard("retry")
         self.last_error, self.delay = error, delay_seconds
+        if self.rec is not None:
+            self.rec = replace(self.rec, attempts=self.rec.attempts + 1)
+            return self.rec.attempts
         return 1
 
     async def advance(  # noqa: PLR0913
@@ -97,7 +100,19 @@ class FakeStore:
         self._guard("advance")
         assert self.rec is not None
         assert to_state in {self.rec.state, NEXT_STATE[self.rec.state]}
-        self.rec = replace(self.rec, state=to_state, counts=counts, skipped=skipped)
+        progressed = to_state != self.rec.state or (
+            cursor is not None and cursor != self.rec.step_cursor
+        )
+        self.rec = replace(
+            self.rec,
+            state=to_state,
+            counts=counts,
+            skipped=skipped,
+            step_cursor=cursor
+            if cursor is not None
+            else ({} if to_state != self.rec.state else self.rec.step_cursor),
+            attempts=0 if progressed else self.rec.attempts,
+        )
         self.events.extend(events)
 
     async def finish(
