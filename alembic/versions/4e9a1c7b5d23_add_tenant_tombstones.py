@@ -38,9 +38,10 @@ after this one is fully rolled out). A deletion cannot finish between this revis
 the function replacement (the lock), so no `done` row is left without its tombstone.
 
 Both replaced bodies are checked before they are replaced: ``md5(prosrc)`` of the live function must
-equal the md5 of the exact expected body (``5d7a2c8e1b94`` for the finish function, ``3b8d6f2a4c17``
-for the upsert on upgrade; this revision's on downgrade), or the migration fails (``55000``) instead
-of overwriting a drifted function. The downgrade refuses (``55000``) while a tombstone has no
+equal the md5 of the exact expected body, computed from this file's text of the body that revisions
+``5d7a2c8e1b94`` (the finish function) and ``3b8d6f2a4c17`` (the upsert) left on upgrade, and of this
+revision's own bodies on downgrade, or the migration fails (``55000``) instead of overwriting a
+drifted function. The downgrade refuses (``55000``) while a tombstone has no
 matching ``done`` deletion (the tombstone would be lost), restores both bodies and drops the
 table; with the ``done`` rows kept (they are, until NG6h-3c-2) nothing is lost.
 """
@@ -193,10 +194,9 @@ def _replaced(body: str, old: str, new: str) -> str:
 
 def _spliced(body: str, start: str, end: str, new: str) -> str:
     """`body` with the text from `start` up to (not including) `end` replaced by `new`."""
-    first = body.index(start)
     if body.count(start) != 1 or body.count(end) != 1:
         raise ValueError(f"expected anchors not found exactly once: {start[:40]!r}")
-    return body[:first] + new + body[body.index(end) :]
+    return body[: body.index(start)] + new + body[body.index(end) :]
 
 
 _PREVIOUS_UPSERT_FN = _PREVIOUS_UPSERT_BODY  # the text of 3b8d6f2a4c17
