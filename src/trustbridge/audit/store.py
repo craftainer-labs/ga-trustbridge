@@ -10,7 +10,8 @@
 """
 
 import json
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -31,6 +32,7 @@ from trustbridge.audit.model import (
 _MAX_SEQ = 9223372036854775807
 DEFAULT_PURGE_BATCH = 1000
 MAX_PURGE_BATCH = 10000  # the ceiling `tb_audit_purge` enforces
+DEFAULT_PURGE_MAX_BATCHES = 1000  # per call: bounds the loop (1M rows at the default batch)
 DEFAULT_EXPORT_PAGE = 500
 _COLUMNS = (
     "id, seq, occurred_at, recorded_at, tenant_id, actor_type, actor_sub, actor_iss, "
@@ -276,30 +278,54 @@ async def purge_batch(
     return int(result.scalar_one())
 
 
-async def purge_expired(
+async def purge_expired(  # noqa: PLR0913 -- every bound is a distinct, keyword-only knob
     factory: async_sessionmaker[AsyncSession],
     *,
     retention_days: int,
     min_days: int,
     batch_size: int = DEFAULT_PURGE_BATCH,
+    max_batches: int = DEFAULT_PURGE_MAX_BATCHES,
+    on_batch: Callable[[int], None] | None = None,
+    budget_seconds: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
     now: datetime | None = None,
 ) -> int:
     """Purge everything older than `retention_days` in short transactions, one per batch.
 
-    `retention_days == 0` means never purge (nothing is touched). Returns the total deleted.
-    The reconciler runs it as a singleton duty (EB-6).
+    `retention_days == 0` means never purge (nothing is touched). Fails closed with
+    `ValueError` before any transaction for a negative retention, a non-zero retention below
+    `min_days`, a `batch_size` outside 1..`MAX_PURGE_BATCH` or a `max_batches` below 1. At most
+    `max_batches` batches run per call, so one call is bounded to `max_batches * batch_size`
+    rows; the next call continues. `budget_seconds` (optional) stops the loop from starting a new
+    batch once that much `monotonic` time has elapsed, so a caller holding a lease ends before
+    it could lapse. `on_batch(deleted)` is called after each committed batch with that batch's
+    count (the reconciler beats and accounts rows there, so a later failure loses none).
+    Returns the total deleted. The reconciler runs it as
+    a singleton duty (EB-6).
     """
+    if retention_days < 0:
+        raise ValueError("retention_days must not be negative (0 means never purge)")
     if retention_days == 0:
         return 0
+    if retention_days < min_days:
+        raise ValueError(f"retention_days must be 0 or at least min_days ({min_days})")
     if not 1 <= batch_size <= MAX_PURGE_BATCH:
         raise ValueError(f"batch_size must be between 1 and {MAX_PURGE_BATCH}")
+    if max_batches < 1:
+        raise ValueError("max_batches must be at least 1")
     cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
     total = 0
-    while True:
+    started = monotonic()
+    for _ in range(max_batches):
+        if budget_seconds is not None and monotonic() - started > budget_seconds:
+            break
         async with factory() as session, session.begin():
             deleted = await purge_batch(
                 session, before=cutoff, min_days=min_days, batch_size=batch_size
             )
         total += deleted
+        if on_batch is not None:
+            on_batch(deleted)
         if deleted < batch_size:
-            return total
+            break
+    return total

@@ -3,11 +3,18 @@
 import asyncio
 from collections.abc import Sequence
 from datetime import timedelta
+from typing import Any, cast
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.trustbridge.fakes import FakeHookClient
 from tests.trustbridge.helpers import host
 from tests.trustbridge.worker.harness import Harness, key
+from trustbridge.worker import metrics
+from trustbridge.worker import reconciler as reconciler_module
 from trustbridge.worker.deliveries import DeliveryKey
+from trustbridge.worker.health import Heartbeat
 from trustbridge.worker.models import NIL_TENANT
 from trustbridge.worker.reconciler import (
     DeliveryReconciler,
@@ -179,3 +186,131 @@ async def test_run_executes_each_job_and_stops_on_the_event() -> None:
     stop.set()
     await asyncio.wait_for(task, timeout=2)
     assert set(h.valkey.ids_of("tb:events")) == {"d1"}  # the relay tick ran on start
+
+
+SESSIONS = cast(async_sessionmaker[AsyncSession], object())
+
+
+def _purger(
+    h: Harness, sessions: async_sessionmaker[AsyncSession] | None = SESSIONS
+) -> tuple[Reconciler, Heartbeat]:
+    beat = Heartbeat()
+    beat.register("audit-purge", 60)
+    recon = Reconciler(
+        h.settings,
+        ReconcilerDeps(
+            store=h.store,
+            queue=h.queue,
+            relay=h.relay,
+            hosts=h.hosts,
+            leases=h.leases,
+            deliveries=None,
+            clock=h.clock,
+            heartbeat=beat,
+            audit_sessions=sessions,
+        ),
+    )
+    return recon, beat
+
+
+def _patch_purge(monkeypatch: pytest.MonkeyPatch, batches: int, per_batch: int) -> list[Any]:
+    calls: list[Any] = []
+
+    async def fake(factory: object, **kw: Any) -> int:  # noqa: ANN401
+        calls.append(kw)
+        for _ in range(batches):
+            kw["on_batch"](per_batch)
+        return batches * per_batch
+
+    monkeypatch.setattr(reconciler_module, "purge_expired", fake)
+    return calls
+
+
+async def test_audit_purge_passes_the_settings_and_beats_per_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The job hands the retention bounds to `purge_expired` and beats once per batch."""
+    h = await Harness(
+        {}, audit_retention_days=200, audit_purge_batch_size=7, audit_purge_max_batches=4
+    ).start()
+    calls = _patch_purge(monkeypatch, batches=3, per_batch=7)
+    recon, beat = _purger(h)
+    seen: list[str] = []
+    monkeypatch.setattr(beat, "beat", seen.append)
+    assert await recon.audit_purge() == 21
+    (kw,) = calls
+    assert (kw["retention_days"], kw["min_days"], kw["batch_size"], kw["max_batches"]) == (
+        200,
+        h.settings.audit_retention_min_days,
+        7,
+        4,
+    )
+    assert kw["now"] == h.clock()
+    assert seen == ["audit-purge"] * 4  # one at the start, one per batch
+    assert kw["budget_seconds"] == h.settings.lease_ttl_seconds / 2
+
+
+async def test_audit_purge_accounts_each_batch_even_when_the_run_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rows deleted before a mid-run failure are already counted and logged."""
+    h = await Harness({}, audit_retention_days=200).start()
+    added: list[int] = []
+    monkeypatch.setattr(metrics.audit_purged, "add", added.append)
+
+    async def failing(factory: object, **kw: Any) -> int:  # noqa: ANN401
+        kw["on_batch"](7)
+        kw["on_batch"](5)
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(reconciler_module, "purge_expired", failing)
+    recon, _ = _purger(h)
+    with caplog.at_level("INFO"), pytest.raises(RuntimeError):
+        await recon.audit_purge()
+    assert added == [7, 5]
+    assert caplog.text.count("audit purge batch") == 2
+
+
+async def test_run_logs_once_that_the_audit_purge_is_disabled_without_a_store(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No audit store: one info line at startup, and the job still skips."""
+    h = await Harness({}).start()
+    recon, _ = _purger(h, None)
+    stop = asyncio.Event()
+    stop.set()
+    with caplog.at_level("INFO"):
+        await recon.run(stop)
+    assert caplog.text.count("audit purge disabled: no audit store") == 1
+
+
+async def test_audit_purge_is_a_no_op_for_zero_retention_and_without_a_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retention 0 never purges; mock mode has no session factory."""
+    calls = _patch_purge(monkeypatch, batches=1, per_batch=1)
+    zero = await Harness({}, audit_retention_days=0).start()
+    assert await _purger(zero)[0].audit_purge() == 0
+    mock = await Harness({}).start()
+    assert await _purger(mock, None)[0].audit_purge() == 0
+    assert calls == []
+
+
+async def test_audit_purge_is_a_singleton_duty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While another replica holds the `audit-purge` lease, the job does nothing."""
+    h = await Harness({}).start()
+    calls = _patch_purge(monkeypatch, batches=1, per_batch=1)
+    async with h.leases.hold(NIL_TENANT, "_core", "audit-purge"):
+        assert await _purger(h)[0].audit_purge() == 0
+    assert calls == []
+    assert await _purger(h)[0].audit_purge() == 1  # lease free again
+
+
+async def test_run_schedules_the_audit_purge() -> None:
+    """The job is registered with its own interval."""
+    h = await Harness({}).start()
+    recon, beat = _purger(h)
+    stop = asyncio.Event()
+    stop.set()
+    await recon.run(stop)
+    assert "audit-purge" in beat._limits

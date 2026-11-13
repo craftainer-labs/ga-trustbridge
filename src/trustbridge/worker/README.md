@@ -13,7 +13,7 @@ The runtime core of trustbridge, shared by the api, the worker and the reconcile
 | `queue.py` | `StreamQueue`: `tb:events` (`{id, host}` keys only), `tb:events:dead` (`{host, delivery_id, error}`), consumer group `tb-workers`, safe trimming, lag. redis-py `redis.asyncio` against Valkey (ADR 0013). |
 | `relay.py` | Adds delivery ids from the outbox to the stream (tick, re-relay sweep, host-ready). |
 | `worker.py` | The consumer; dispatches through the GitHub core's `HandlerRegistry` (`EventContext`). |
-| `reconciler.py` | The reconciler process: relay tick, sweep, delivery reconciliation (`HookDeliveryClient`), retention, trimming. |
+| `reconciler.py` | The reconciler process: relay tick, sweep, delivery reconciliation (`HookDeliveryClient`), retention, the audit purge (`audit-purge`, a singleton under a lease, bounded per run, a heartbeat per batch), trimming. |
 | `lease.py` | Fenced scope leases (`LeaseManager`, `guarded_execute`, `guarded_insert`, `bounded_call`); `LeaseManager` and `Lease.guard()` are the adapter core's `LeaseProvider` and `Lease`. |
 | `secrets.py` | `LocalSecrets` (`file:` / `env:` refs to read, `store:` refs under `SECRET_STORE_DIR` to read, write, delete and list) and its in-memory twin; the `SecretReader` / `SecretWriter` of the GitHub core. |
 | `ports.py` | The ports of the GitHub and adapter cores over these components: `SqlTenants` / `MemoryTenants` (installation store, installation resolver, tenant resolver), `ParkedValues` (value store, in the secret store), `ConnectionData` (tenant connection store, config resolver), `ReconcileRequests` (the Valkey set `tb:reconcile`; the api records admin reconcile requests in it too, and its consumer is NG5r). |
@@ -68,6 +68,7 @@ effective defaults are logged at startup.
 | `LEASE_TTL_SECONDS` / `ADAPTER_CALL_TIMEOUT_SECONDS` | 120 / 30 | The timeout must be shorter than the TTL (validated). |
 | `BODY_RETENTION_PROCESSED_DAYS` / `_DEAD_DAYS` / `DELIVERY_ID_RETENTION_DAYS` | 7 / 30 / 30 | Bodies are purged after these; the row stays until the id retention elapses. |
 | `RELAY_RECHECK_SECONDS` | 900 | The re-relay sweep. |
+| `AUDIT_PURGE_INTERVAL_SECONDS` / `AUDIT_PURGE_BATCH_SIZE` / `AUDIT_PURGE_MAX_BATCHES` | 3600 / 1000 / 100 | The reconciler's audit purge: run interval, rows per transaction (1 to 10000) and batches per run (1 to 10000; a run also stops starting batches after half `LEASE_TTL_SECONDS`). Retention itself is `AUDIT_RETENTION_DAYS` (audit README). |
 | `SCHEMA_WAIT_SECONDS` | 300 | How long a process waits for the schema before it exits non-zero. |
 | `HEALTH_PORT` | unset (no endpoint) | Port of the worker's and reconciler's health endpoints, 1 to 65535. The api ignores it (it serves `/health/*` on its own port). A loop is stale after its interval plus `LEASE_TTL_SECONDS` without progress (each finished entry or job step counts). Readiness is evaluated one at a time and cached for 2 s. |
 | `HOST_RECHECK_SECONDS` | 60 | Recheck of `unavailable` and `unregistered` hosts. |

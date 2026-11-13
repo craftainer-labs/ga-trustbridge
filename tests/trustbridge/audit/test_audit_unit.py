@@ -25,6 +25,7 @@ from trustbridge.audit import (
     list_events,
     purge_expired,
 )
+from trustbridge.audit import store as store_module
 
 COLUMNS = [
     "id",
@@ -207,3 +208,124 @@ async def test_purge_expired_rejects_an_out_of_range_batch_size(batch_size: int)
     factory = cast(async_sessionmaker[AsyncSession], None)
     with pytest.raises(ValueError, match="batch_size"):
         await purge_expired(factory, retention_days=365, min_days=90, batch_size=batch_size)
+
+
+class _FakeSession:
+    """An `AsyncSession` stand-in: `async with factory() as s, s.begin()` and nothing else."""
+
+    async def __aenter__(self) -> _FakeSession:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    def begin(self) -> _FakeSession:
+        return self
+
+
+def _scripted_purge(monkeypatch: pytest.MonkeyPatch, counts: list[int]) -> list[int]:
+    """Replace `purge_batch` with one that returns `counts` in turn; returns the call log."""
+    calls: list[int] = []
+    it = iter(counts)
+
+    async def fake(_session: object, *, before: datetime, min_days: int, batch_size: int) -> int:
+        calls.append(batch_size)
+        return next(it)
+
+    monkeypatch.setattr(store_module, "purge_batch", fake)
+    return calls
+
+
+def _fake_factory() -> async_sessionmaker[AsyncSession]:
+    return cast(async_sessionmaker[AsyncSession], _FakeSession)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"retention_days": -1}, "negative"),
+        ({"retention_days": 30}, "min_days"),
+        ({"retention_days": 365, "max_batches": 0}, "max_batches"),
+    ],
+)
+async def test_purge_expired_fails_closed_before_any_transaction(
+    kwargs: dict[str, Any], message: str
+) -> None:
+    """A bad bound raises ValueError; the factory is `None`, so no transaction could open."""
+    factory = cast(async_sessionmaker[AsyncSession], None)
+    with pytest.raises(ValueError, match=message):
+        await purge_expired(factory, min_days=90, **kwargs)
+
+
+async def test_purge_expired_with_zero_retention_touches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retention 0 never purges."""
+    calls = _scripted_purge(monkeypatch, [])
+    assert await purge_expired(_fake_factory(), retention_days=0, min_days=90) == 0
+    assert calls == []
+
+
+async def test_purge_expired_stops_at_a_short_batch_and_beats_per_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full batches continue, the first short one ends the run; `on_batch` runs per batch."""
+    calls = _scripted_purge(monkeypatch, [5, 5, 2])
+    beats: list[int] = []
+    total = await purge_expired(
+        _fake_factory(),
+        retention_days=365,
+        min_days=90,
+        batch_size=5,
+        on_batch=beats.append,
+    )
+    assert (total, calls, beats) == (12, [5, 5, 5], [5, 5, 2])
+
+
+async def test_purge_expired_is_bounded_by_max_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Endless full batches stop at the cap; the next call continues."""
+    calls = _scripted_purge(monkeypatch, [5] * 10)
+    total = await purge_expired(
+        _fake_factory(), retention_days=365, min_days=90, batch_size=5, max_batches=3
+    )
+    assert (total, len(calls)) == (15, 3)
+
+
+async def test_purge_expired_stops_starting_batches_past_the_time_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the budget has elapsed no new batch starts; the next call continues."""
+    calls = _scripted_purge(monkeypatch, [5] * 10)
+    ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])  # start, then one reading per loop pass
+    total = await purge_expired(
+        _fake_factory(),
+        retention_days=365,
+        min_days=90,
+        batch_size=5,
+        budget_seconds=2.5,
+        monotonic=lambda: next(ticks),
+    )
+    assert (total, len(calls)) == (10, 2)  # passes at t=1, 2 run; t=3 exceeds 2.5
+
+
+def test_the_purge_settings_have_defaults_and_bounds() -> None:
+    """The interval is positive, the batch size is the function's 1..10000, the cap at least 1."""
+    s = make_settings([host()])
+    assert (
+        s.audit_purge_interval_seconds,
+        s.audit_purge_batch_size,
+        s.audit_purge_max_batches,
+    ) == (
+        3600.0,
+        1000,
+        100,
+    )
+    for bad in (
+        {"audit_purge_interval_seconds": 0},
+        {"audit_purge_batch_size": 0},
+        {"audit_purge_batch_size": 10001},
+        {"audit_purge_max_batches": 0},
+        {"audit_purge_max_batches": 10001},
+    ):
+        with pytest.raises(ValidationError):
+            make_settings([host()], **bad)
