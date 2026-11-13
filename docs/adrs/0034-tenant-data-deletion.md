@@ -338,7 +338,7 @@ adapter fakes.
     and `failed` records are never purged: an operator may still resume or cancel a `failed` one, so
     it stays until it reaches a terminal state. A `done` record
     without a tombstone is skipped and counted (`unprotected`); the duty logs it at WARNING. The purge
-    does not re-run the backfill and never removes the last tombstone record. The tombstones are
+    does not re-run the backfill and never deletes a `done` record whose tombstone is missing. The tombstones are
     never purged, so B2 holds at any retention.
   - **The composition hook.** `ReconcilerDeps.record_purger` (a `RecordPurger`, `deletion.ports`;
     `deletion.purge.SqlRecordPurger` is the implementation) is filled by NG6h-7's composition

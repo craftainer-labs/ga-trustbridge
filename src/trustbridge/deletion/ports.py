@@ -28,7 +28,7 @@ class PurgeResult:
     """The outcome of one purge run: records removed, and eligible records left unprotected.
 
     `unprotected` counts finished records past the cut-off that have no tombstone: they are never
-    deleted (the purge cannot remove the last tombstone record) and the duty logs them.
+    deleted (the purge never deletes a `done` record whose tombstone is missing) and the duty logs them.
     """
 
     purged: int = 0

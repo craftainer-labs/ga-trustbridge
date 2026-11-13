@@ -168,6 +168,8 @@ hands it to `ReconcilerDeps.record_purger`, and with none the duty does nothing.
   tombstone needed: a cancelled deletion left the tenant standing). A `done` record without a
   tombstone is never deleted: it is counted as `unprotected` and logged at WARNING. Open and `failed`
   records are never purged (an operator may still resume or cancel a `failed` one).
+- The cut-off is the retention plus a 5-minute margin (`CLOCK_SKEW_MARGIN`), so a retention equal to the
+  floor survives a worker clock that leads the database's.
 - The tombstones (`tenant_tombstones`) are never purged, so a still-installed App stays refused (B2).
 - **Upgrade order.** The previous release reads `done` records and no schema mechanism can say "no
   previous-release pod exists" (`schema_compat` only guards new code on an old schema), so leave the

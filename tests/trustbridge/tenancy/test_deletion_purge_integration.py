@@ -135,7 +135,7 @@ async def test_cancelled_records_follow_the_retention_without_a_tombstone(db: Db
 
 
 async def test_a_done_record_without_a_tombstone_is_never_deleted_and_is_counted(db: Db) -> None:
-    """The guard: the purge cannot remove the last tombstone record; it reports it instead."""
+    """The guard: the purge never deletes a done record whose tombstone is missing; it reports it."""
     _, bare_id = await _finished(db, days=200, tombstone=False)
     _, safe_id = await _finished(db, days=200)
     purged, unprotected = await _purge(db)
