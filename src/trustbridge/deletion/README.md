@@ -85,9 +85,13 @@ is left.
   step moves to the next table only when the table holds nothing of the tenant's. A holder that never lets go keeps the
   step on that table until the run budget ends the run (each pass is cheap); `tb_delete_tenant`'s emptiness check stays the
   backstop for a row written after the step passed the table.
-- **No definer functions.** The app role already holds `DELETE` on the five tenant tables and `UPDATE` on
-  `webhook_deliveries`, and the `tenant_isolation` policies (ADR 0031) admit the context tenant, so the step adds no
-  privilege. Every pass starts with a lease guard in the same transaction (a `SELECT` on `tenant_deletions` for this
+- **No definer functions.** The app role already holds `SELECT, INSERT, UPDATE, DELETE` on the five tenant tables and
+  on `webhook_deliveries` (migrations `5d1f3a7c9e24` and `c3a5e7d91f42`), and each tenant table's `tenant_isolation`
+  policy is `FOR ALL` with a `USING` of `tenant_id = tb_current_tenant()` (`d4b8f1e60a27`), so the step adds no
+  privilege. The `UPDATE` grant and a policy that covers `UPDATE` are load-bearing, not only `DELETE`: `SELECT ... FOR
+  UPDATE` requires `UPDATE` privilege (PostgreSQL `SELECT`, "The Locking Clause"), and under RLS the `UPDATE` policies
+  apply to the rows it locks (`ddl-rowsecurity`), so without them the `picked` CTE would return no rows and the step
+  would stall. `webhook_deliveries` is outside RLS. Every pass starts with a lease guard in the same transaction (a `SELECT` on `tenant_deletions` for this
   deletion's holder, fence and an unexpired lease, state `database`; the app role cannot lock that table, so it is a
   check, not a lock): a stale holder gets `LeaseLost` and touches nothing. A holder that loses the lease just after the
   check deletes at most one more batch of the same rows the new holder would delete, and `tb_delete_tenant` re-checks
