@@ -32,6 +32,11 @@ Tests for the instance package `src/trustbridge/` (instance-added files under th
   and `test_admin_integration.py` (marked `integration`, reuses `tenancy/test_rls_integration.py`'s scratch
   database): the tenant context under the async-generator dependency, denial rows and the export
   against real RLS. `audit/test_throttle_unit.py` covers the denial throttle.
+- `deletion/` covers the deletion engine: `test_engine_unit.py`, `test_drain_unit.py` and
+  `test_audit_unit.py` over the fakes in `deletion/fakes.py` (an in-memory store applying the
+  definer functions' transition rules), `test_sql_unit.py` (the SQL sent and the transaction
+  boundaries over a scripted session) and `test_sql_integration.py` (marked `integration`: the
+  engine over the real functions and RLS, including `completed` after the tenant row is gone).
 - `test_main.py` runs the real `trustbridge.main:app` in a subprocess (the entrypoint mutates the
   template app at import, which must not leak into the template's own tests).
 

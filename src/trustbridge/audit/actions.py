@@ -23,7 +23,13 @@ class Action(StrEnum):
     OIDC_TRUST_REMOVE = "oidc_trust.remove"
     # Written by the database's own purge function (migration e5c9a37d2b18).
     AUDIT_PURGE = "audit.purge"
-    # Deferred: the admin API (NG6d, NG6e), host registration, deletion (NG6h).
+    # The deletion engine's own events (ADR 0034, NG6h-4a-2). `tenant.deletion.requested` and
+    # `.cancelled` belong to the request path (NG6h-7).
+    TENANT_DELETION_STEP = "tenant.deletion.step"
+    TENANT_DELETION_SKIPPED = "tenant.deletion.skipped"
+    TENANT_DELETION_COMPLETED = "tenant.deletion.completed"
+    TENANT_DELETION_FAILED = "tenant.deletion.failed"
+    # Deferred: the admin API (NG6d, NG6e), host registration.
     AUDIT_EXPORT = "audit.export"
     TENANT_DISABLE = "tenant.disable"
     CREDENTIAL_ROTATE = "credential.rotate"

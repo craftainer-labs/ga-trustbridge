@@ -86,6 +86,22 @@ ALLOW_LISTS: Mapping[str, frozenset[str]] = {
     "host_registration": frozenset({"kind", "app_id", "app_slug", "webhook_secret_ref"}),
     # NG6e-6: the reason code of a failure event (`FailureReason`, never free text).
     "failure": frozenset({"reason"}),
+    # NG6h-4a-2: a tenant deletion's step, skipped category, completion or failure (ADR 0034).
+    # Ids, state names, the step name, a category, a count and a fixed code; never row content
+    # or the organisation login. The per-category counts go through `deletion_counts`.
+    "deletion": frozenset(
+        {
+            "deletion_id",
+            "step",
+            "from_state",
+            "to_state",
+            "category",
+            "reason",
+            "count",
+            "attempts",
+            "error_code",
+        }
+    ),
     "authz_denial": frozenset(
         {"reason", "required_role", "scope", "suppressed", "window_seconds", "window", "sample"}
     ),
@@ -157,6 +173,10 @@ def _scalar(key: str, value: Any) -> Any:  # noqa: ANN401 -- a JSON scalar of an
     raise ValueError(f"{key} has a value of a type that is not recorded")
 
 
+MAX_COUNT_KEY = 64
+"""The longest category name `deletion_counts` accepts."""
+
+
 def project(shape: str, source: Mapping[str, Any]) -> dict[str, Any]:
     """The allow-listed fields of `source` for `shape`, as JSON scalars, in sorted key order.
 
@@ -178,3 +198,28 @@ def failure_after(reason: FailureReason) -> dict[str, Any]:
     if not isinstance(reason, FailureReason):
         raise ValueError("a failure reason must be a FailureReason")
     return project("failure", {"reason": reason.value})
+
+
+def deletion_counts(counts: Mapping[str, Any]) -> dict[str, int]:
+    """`counts` (rows or resources removed per category) as a `{category: count}` object.
+
+    A deletion's counts are the one non-scalar value a shape records, so they have their own
+    check: printable category names within 64 characters and non-negative integers (no bool),
+    in sorted order. Anything else raises `ValueError`, so nothing unreviewed is stored.
+    """
+    out: dict[str, int] = {}
+    if not all(isinstance(key, str) for key in counts):
+        raise ValueError("deletion counts must map a short category name to a count")
+    for key in sorted(counts):
+        value = counts[key]
+        if (
+            not key
+            or len(key) > MAX_COUNT_KEY
+            or printable(key) != key
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+        ):
+            raise ValueError("deletion counts must map a short category name to a count")
+        out[key] = value
+    return out
