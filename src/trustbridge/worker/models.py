@@ -169,6 +169,26 @@ class TenantDeletion(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
 
 
+class TenantTombstone(Base):
+    """The tombstone of a deleted installation (ADR 0034 user decision B2).
+
+    One row per `(host, installation_id)` whose deletion finished, written by
+    `tb_finish_tenant_deletion` in the transaction that marks the deletion `done`. While it exists
+    no tenant is created or revived for the key (`tb_upsert_tenant`, `SqlTenants`, the gate), so a
+    still-installed App's events are acknowledged and dropped. It holds ids only (no tenant
+    content), has no foreign key (the tenant row is gone), is outside RLS, and is kept apart from
+    `tenant_deletions` so the deletion records can be purged (NG6h-3c-2) without ending it. The app
+    role may only read it.
+    """
+
+    __tablename__ = "tenant_tombstones"
+
+    host: Mapped[str] = mapped_column(Text, primary_key=True)
+    installation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class TenantRepository(Base):
     """A repository the tenant's installation can see (identity is the numeric id)."""
 

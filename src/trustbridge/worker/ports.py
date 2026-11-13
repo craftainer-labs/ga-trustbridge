@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 
 from pydantic import SecretStr
 from redis.asyncio import Redis
-from sqlalchemy import Row, and_, case, delete, or_, select, text, update
+from sqlalchemy import Row, case, delete, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from trustbridge.adapters.interface import AdapterConfig, GitHubHost, IssuedSecret, Tenant
 from trustbridge.github.ports import TenantDeletedError
 from trustbridge.worker.models import Tenant as TenantRow
-from trustbridge.worker.models import TenantDeletion, TenantRepository
+from trustbridge.worker.models import TenantDeletion, TenantRepository, TenantTombstone
 from trustbridge.worker.secrets import SecretNotFound, SecretUnavailable
 
 PARKED_PREFIX = "parked/"
@@ -85,9 +85,9 @@ class SqlTenants:
 
         `TenantDeletedError` is raised, and nothing changes, for a tenant whose state is `deleted`
         (`reason` "deleted"), one with a non-terminal deletion ("deleting"), and a key with a
-        `done` deletion (or a `database`-step one whose tenant row is gone), a tombstone
-        ("tombstone"): a late or replayed event cannot revive or recreate it (ADR 0034). The
-        checks run under the same per-installation advisory lock as `tb_upsert_tenant` and
+        `tenant_tombstones` row (or a `database`-step deletion whose tenant row is gone), a
+        tombstone ("tombstone"): a late or replayed event cannot revive or recreate it (ADR 0034).
+        The checks run under the same per-installation advisory lock as `tb_upsert_tenant` and
         `tb_delete_tenant` (`tb_tenant:<host>:<installation_id>`, hashed with
         `hashtextextended`), so a concurrent delete cannot slip between check and insert.
         """
@@ -129,22 +129,29 @@ class SqlTenants:
     async def _standing(session: AsyncSession, host: str, installation_id: int) -> Row[Any] | None:
         """The tenant row's `(id, state)`, or None; a tombstoned or deleting key is refused.
 
-        Raises `TenantDeletedError` (`tombstone`: a `done` deletion of the key, or a
-        `database`-step one whose tenant row is gone; `deleting`: a non-terminal deletion). A
+        Raises `TenantDeletedError` (`tombstone`: a `tenant_tombstones` row for the key, or
+        a `database`-step deletion whose tenant row is gone; `deleting`: a non-terminal deletion). A
         tenant whose state is `deleted` is returned, and each caller decides what to do with it.
         """
-        tombstone = select(TenantDeletion.id).where(
-            TenantDeletion.host == host,
-            TenantDeletion.installation_id == installation_id,
+        tombstone = select(
             or_(
-                TenantDeletion.state == "done",
-                and_(
+                select(TenantTombstone.host)
+                .where(
+                    TenantTombstone.host == host,
+                    TenantTombstone.installation_id == installation_id,
+                )
+                .exists(),
+                select(TenantDeletion.id)
+                .where(
+                    TenantDeletion.host == host,
+                    TenantDeletion.installation_id == installation_id,
                     TenantDeletion.state == "database",
                     ~select(TenantRow.id)
                     .where(TenantRow.host == host, TenantRow.installation_id == installation_id)
                     .exists(),
-                ),
-            ),
+                )
+                .exists(),
+            )
         )
         existing = select(
             TenantRow.id,
@@ -157,7 +164,7 @@ class SqlTenants:
             .exists()
             .label("deleting"),
         ).where(TenantRow.host == host, TenantRow.installation_id == installation_id)
-        if (await session.execute(tombstone.limit(1))).first() is not None:
+        if (await session.execute(tombstone)).scalar():
             raise TenantDeletedError(host, installation_id, "tombstone")
         current = (await session.execute(existing)).first()
         if current is not None and current.deleting:
@@ -291,7 +298,7 @@ class MemoryTenants:
         self._by_key: dict[tuple[str, int], UUID] = {}
         self._rows: dict[UUID, dict[str, Any]] = {}
         self.repositories: dict[UUID, dict[int, str]] = {}
-        self.tombstones: set[tuple[str, int]] = set()  # keys whose deletion is `done`
+        self.tombstones: set[tuple[str, int]] = set()  # keys with a `tenant_tombstones` row
         self.deleting: set[tuple[str, int]] = set()  # keys with a non-terminal deletion
 
     async def upsert_installation(

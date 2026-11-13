@@ -18,15 +18,18 @@ _DISABLED_BY_INSTALLATION = text(
     "SELECT admin_disabled_at IS NOT NULL "
     "FROM tb_get_tenant(tb_resolve_tenant(CAST(:host AS text), CAST(:installation AS bigint)))"
 )
-# One statement, so the tenant row and the deletions are read from one snapshot (`tb_get_tenant` is
-# STABLE). A `done` deletion of the key, or a `database`-step one whose tenant row is already gone
-# (the same rule as `tb_upsert_tenant` and `SqlTenants`), is a tombstone. The outer `one` row makes
-# an unknown tenant come back as a row of nulls, so there is always exactly one row.
+# One statement, so the tenant row, the tombstones and the deletions are read from one snapshot
+# (`tb_get_tenant` is STABLE). A `tenant_tombstones` row for the key, or a `database`-step deletion
+# whose tenant row is already gone (the same rule as `tb_upsert_tenant` and `SqlTenants`), is a
+# tombstone. The outer `one` row makes an unknown tenant come back as a row of nulls, so there is
+# always exactly one row.
 _STANDING = text(
     "SELECT t.id, COALESCE(t.admin_disabled_at IS NOT NULL, false), COALESCE(t.deleting, false), "
-    "EXISTS (SELECT 1 FROM tenant_deletions d "
+    "(EXISTS (SELECT 1 FROM tenant_tombstones s "
+    "WHERE s.host = CAST(:host AS text) AND s.installation_id = CAST(:installation AS bigint)) "
+    "OR EXISTS (SELECT 1 FROM tenant_deletions d "
     "WHERE d.host = CAST(:host AS text) AND d.installation_id = CAST(:installation AS bigint) "
-    "AND (d.state = 'done' OR (d.state = 'database' AND t.id IS NULL))) "
+    "AND d.state = 'database' AND t.id IS NULL)) "
     "FROM (SELECT 1) one LEFT JOIN LATERAL "
     "tb_get_tenant(tb_resolve_tenant(CAST(:host AS text), CAST(:installation AS bigint))) t ON true"
 )

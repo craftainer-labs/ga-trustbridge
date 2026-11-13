@@ -72,7 +72,7 @@ every write goes through a `SECURITY DEFINER` function running as the owner role
 same signatures, `tb_list_tenants` and `tb_get_tenant` (`deleting` is now real),
 `tb_set_tenant_disabled` (`enable` is refused with SQLSTATE 55000 while a non-terminal deletion
 exists; the state is read after the tenant row lock) and `tb_upsert_tenant` (a `deleted` tenant is
-returned unchanged; a `done` deletion of `(host, installation_id)`, or a `database`-step deletion
+returned unchanged; a `done` deletion of `(host, installation_id)` (from `4e9a1c7b5d23`: a `tenant_tombstones` row), or a `database`-step deletion
 whose tenant row is already gone, is a tombstone, so the function creates nothing; it returned NULL here, and `3b8d6f2a4c17` raises instead).
 `SqlTenants` and `MemoryTenants` raise `TenantDeletedError` (reason `tombstone`, `deleting` or
 `deleted`) instead, and the installation handler drops the event; a new installation id is
@@ -105,8 +105,8 @@ skips terminal, future `not_before` and backed-off rows, `SKIP LOCKED`), `tb_ren
 `requested`, `draining`, `platform`, `github`, `database`), `tb_fail_` (`failed`, always with the lease),
 `tb_operator_fail_` (`failed` by an operator: no lease of its own, refused with `TB003` while a live
 one is held; the actor lands in `last_error`; granted to `trustbridge_app`, the only runtime role
-(ADR 0031), which also serves the admin API), `tb_cancel_` (`requested` only) and `tb_finish_` (`done`,
-the tombstone, only after the tenant row is gone). Every guarded call needs the live lease, judged by `clock_timestamp()` (`TB003`);
+(ADR 0031), which also serves the admin API), `tb_cancel_` (`requested` only) and `tb_finish_` (`done` and the
+`tenant_tombstones` row, only after the tenant row is gone). Every guarded call needs the live lease, judged by `clock_timestamp()` (`TB003`);
 a terminal or invalid move is `TB004`. None writes `audit_events`: the engine does, in the same
 session transaction.
 
@@ -124,12 +124,28 @@ errors. `tb_set_tenant_disabled` needs no change (a deletion needs a disabled te
 refused while one is open, and a repeated disable keeps the first values). The downgrade restores the
 `9c2e5a7f1d84` body (NULL for a tombstone).
 
+Migration `4e9a1c7b5d23` (NG6h-3c-1, user decisions B2 and B4) gives the tombstone its own table, so
+the deletion records can be purged (NG6h-3c-2) without ending it. `tenant_tombstones` has
+`(host, installation_id)` as its primary key, plus `tenant_id` and `deleted_at`; it is host-scoped,
+outside RLS, ids only, with no foreign key. The app role has `SELECT` only and the owner role
+`SELECT, INSERT` (no `UPDATE` or `DELETE`: a tombstone is final). Its only writer is
+`tb_finish_tenant_deletion`, which inserts the row in the transaction that marks the deletion
+`done` (`ON CONFLICT DO NOTHING`). The three readers (`tb_upsert_tenant`, `SqlTenants._standing`,
+`gate.py`) now look at that table; a `done` record no longer decides anything. The in-flight rule
+is unchanged and stays on `tenant_deletions`: a `database`-step deletion whose tenant row is already
+gone is also a tombstone (the tombstone row is only written by the finish step). The migration
+backfills one row per key from the existing `done` records (idempotent, under a `SHARE ROW
+EXCLUSIVE` lock on `tenant_deletions`). Expand-only and N-1 compatible: the previous release still
+reads the `done` rows, which are untouched. **While an N-1 pod may run, the `done` rows must not
+be purged** (NG6h-3c-2 waits for that). The downgrade restores both bodies and drops the table; it
+refuses while a tombstone has no `done` record behind it (it would be lost).
+
 `gate.py`'s `SqlTenantGate.allows(tenant_id, kind, deletion_id=None)` (the adapter core's `OperationGate`) refuses every new adapter call for an
 admin-disabled tenant except an `OperationKind.DELETE` carrying the `deletion_id` of a non-terminal deletion of the same tenant
 (`tenant_deletions`, read in the same statement as the disable flag; a user's delete has no id; ADR 0034 B10, NG6h-4a-3). `SqlTenantGate.standing(host, installation_id)` returns `TenantStanding` (`standing.py`, kept here so `tenancy` never imports the worker: tenant id,
-disable flag, and a `deleting` or `tombstone` refusal) from `tb_get_tenant` and `tenant_deletions` in
+disable flag, and a `deleting` or `tombstone` refusal) from `tb_get_tenant`, `tenant_tombstones` and `tenant_deletions` in
 one statement (`tb_get_tenant` is `STABLE`, so it reads the statement's snapshot and the three
-answers agree). The tombstone rule exists in three places (`tb_upsert_tenant`, `SqlTenants._standing`
+answers agree). The tombstone rule (a `tenant_tombstones` row, or a `database`-step deletion with no tenant row) exists in three places (`tb_upsert_tenant`, `SqlTenants._standing`
 and `gate.py`); an integration test asserts they agree for every deletion state.
 
 ## Grants
