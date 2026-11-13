@@ -490,12 +490,12 @@ def upgrade() -> None:
     op.execute("SET statement_timeout = '120s'")
     # Catalog-only (constant defaults): the backoff state of a step.
     op.execute(
-        "ALTER TABLE tenant_deletions ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0"
+        "ALTER TABLE tenant_deletions ADD COLUMN IF NOT EXISTS attempts bigint NOT NULL DEFAULT 0"
     )
     op.execute("ALTER TABLE tenant_deletions ADD COLUMN IF NOT EXISTS retry_at timestamptz")
     op.execute(_ASSERT_PREVIOUS)
     # No release calls tb_delete_tenant (the engine does not exist yet): the signature may change.
-    op.execute(f"DROP FUNCTION {OLD_DELETE}")
+    op.execute(f"-- squawk-ignore ban-drop-function\nDROP FUNCTION {OLD_DELETE}")
     for statement in (
         _CLAIM_FN,
         _RENEW_FN,
