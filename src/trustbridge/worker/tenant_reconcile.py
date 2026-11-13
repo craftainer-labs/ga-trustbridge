@@ -7,7 +7,8 @@ For one tenant, in this order (option A: it reconciles what exists and creates n
 2. `ensure_scope` for each stored `adapter_credentials` row, with the tenant's stored scopes as the
    siblings, which re-evaluates the OIDC eligibility of each (a protected environment that
    changed, a scope that now shares its environment);
-3. `sweep_orphans` for each adapter the tenant has credentials for, then `sweep_parked_values`.
+3. `sweep_orphans` for each adapter the tenant has credentials for, then, at most once a minute
+   per process, the instance-wide `sweep_parked_values` (its failure is only logged).
 
 It is idempotent: a request can run twice (a reclaimed claim, ADR 0028 invariant 10) and a second
 run finds nothing to change. The admin-disable gate (`SqlTenantGate`, ADR 0033 invariant 19) is
@@ -18,8 +19,8 @@ audit event of its own.
 `extend` is called before each write step (it re-stamps the claim, see `ReconcileQueue.extend`);
 when the claim is gone it raises `ClaimLostError` and the body stops before that step. A scope whose
 step fails does not stop the others; the body raises `ReconcileIncompleteError` at the end so the
-request is retried after the claim TTL, up to `TENANT_RECONCILE_MAX_ATTEMPTS` times.
-"""
+request is retried after the claim TTL, up to `TENANT_RECONCILE_MAX_ATTEMPTS` times. The parked
+sweep is the exception: its failure is only logged (see `_sweep_parked`).
 
 import logging
 import time
@@ -87,7 +88,7 @@ class SweepThrottle:
         return self._last is None or self._monotonic() - self._last >= self._interval
 
     def done(self) -> None:
-        """Record a successful sweep."""
+        """Record a sweep attempt."""
         self._last = self._monotonic()
 
 
@@ -153,16 +154,16 @@ class CredentialReconciler:
     async def _sweep_parked(self, tenant_id: UUID, extend: Extend) -> None:
         """The global parked-value sweep, at most once per interval.
 
-        Housekeeping for the instance, not for this tenant: a failure is logged and retried by the
-        next request, and does not fail (or, after the attempts, drop) this tenant's request.
+        Housekeeping for the instance, not for this tenant: a failure is logged (a warning) and
+        does not fail, or after the attempts drop, this tenant's request. The interval counts from
+        the attempt, so an outage costs one sweep a minute, not one per request; the next interval
+        retries it.
         """
         if not self._sweep.due():
             return
         await extend()
-        if not await self._guarded(
-            self._core.sweep_parked_values(), tenant_id, "sweep_parked_values"
-        ):
-            self._sweep.done()
+        self._sweep.done()
+        await self._guarded(self._core.sweep_parked_values(), tenant_id, "sweep_parked_values")
 
     async def _resume(self, tenant_id: UUID, extend: Extend) -> int:
         """Resume the tenant's open operations; the number that failed."""

@@ -194,7 +194,7 @@ async def _stubbed(world: World, core: StubCore) -> CredentialReconciler:
 async def test_a_failing_step_does_not_stop_the_others_but_fails_the_run(
     error: Exception, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Every step runs; the failures are counted and reported at the end, by type only."""
+    """Every step runs; 3 failures count (the housekeeping sweep's does not), by type only."""
     w = build_world(fake_capabilities(oidc=False))
     core = StubCore(resume=error, ensure=error, orphans=error, parked=error)
     body = await _stubbed(w, core)
@@ -261,12 +261,24 @@ async def test_the_global_parked_sweep_runs_once_per_interval() -> None:
     assert core.steps.count("parked") == 2
 
 
-async def test_a_failing_parked_sweep_is_logged_retried_and_does_not_fail_the_tenant() -> None:
-    """The sweep is the instance's housekeeping: not marked done, so the next request retries."""
+async def test_a_failing_parked_sweep_is_logged_throttled_and_does_not_fail_the_tenant(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The sweep is the instance's housekeeping: one try per interval, whatever its outcome."""
     w = build_world(fake_capabilities(oidc=False))
     core = StubCore(parked=AdapterError(True, "store down"))
-    await _stubbed(w, core)
-    body = CredentialReconciler(cast("Any", core), w.store, w.deps.tenants, ["fake"])
-    await body.reconcile(w.tenant.id, Extender())  # no ReconcileIncompleteError
-    await body.reconcile(w.tenant.id, Extender())
-    assert core.steps.count("parked") == 2  # retried at once, not throttled
+    now = [0.0]
+    body = CredentialReconciler(
+        cast("Any", core),
+        w.store,
+        w.deps.tenants,
+        ["fake"],
+        sweep=SweepThrottle(60.0, lambda: now[0]),
+    )
+    with caplog.at_level(logging.WARNING):
+        await body.reconcile(w.tenant.id, Extender())  # no ReconcileIncompleteError
+        await body.reconcile(w.tenant.id, Extender())  # throttled
+        now[0] = 61.0
+        await body.reconcile(w.tenant.id, Extender())  # the next interval retries
+    assert core.steps.count("parked") == 2
+    assert caplog.text.count("tenant reconcile step failed: sweep_parked_values") == 2
