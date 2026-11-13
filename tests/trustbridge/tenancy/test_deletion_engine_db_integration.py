@@ -793,7 +793,7 @@ async def test_the_hardening_upgrade_refuses_a_drifted_body_and_changes_nothing(
             "AND pronamespace = 'public'::regnamespace "
             "AND NOT proconfig @> ARRAY['search_path=pg_catalog, public, pg_temp']"
         )
-        assert await _admin_scalar(scratch, paths) > 0  # the transaction rolled back
+        assert await _admin_scalar(scratch, paths) == 9  # all nine still unpinned: rolled back
 
 
 @pytest.mark.parametrize(
@@ -817,8 +817,9 @@ async def test_the_hardening_downgrade_refuses_a_drifted_body_and_changes_nothin
             "SELECT prosrc LIKE '%-- drifted%' FROM pg_proc WHERE oid = CAST(:f AS regprocedure)",
             {"f": signature},
         )
-        still = "SELECT count(*) FROM pg_proc WHERE proname = 'tb_get_tenant' AND proconfig @> :p"
-        assert (
-            await _admin_scalar(scratch, still, {"p": ["search_path=pg_catalog, public, pg_temp"]})
-            == 1
+        pinned = (
+            "SELECT count(*) FROM pg_proc WHERE prosecdef "
+            "AND pronamespace = 'public'::regnamespace "
+            "AND proconfig @> ARRAY['search_path=pg_catalog, public, pg_temp']"
         )
+        assert await _admin_scalar(scratch, pinned) == 19  # nothing was restored

@@ -250,9 +250,10 @@ app role (not the owner, not a superuser).
     is the convention for every definer function, present and future. The older definers got it
     from migration `6f3b9d2e4a85` (`ALTER FUNCTION ... SET search_path`, no body replaced), and an
     integration test (`tests/trustbridge/tenancy/test_definer_search_path_integration.py`) reads
-    `pg_proc` and fails CI for any `SECURITY DEFINER` function whose `proconfig` does not carry it. The downgrade of
-    `6f3b9d2e4a85` returns the nine older definers to `pg_catalog, public` and so reopens the `pg_temp`
-    shadowing risk on them: it is for rollback only, and the upgrade is re-run once the cause is fixed.
+    `pg_proc` and fails CI for any `SECURITY DEFINER` function whose `proconfig` does not carry it. The downgrade
+    of `6f3b9d2e4a85` returns the nine older definers to `pg_catalog, public` and so reopens the
+    `pg_temp` shadowing risk on them: it is for rollback only, and the upgrade is re-run once the
+    cause is fixed.
 
 **Iteration**
 
