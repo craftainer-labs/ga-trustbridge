@@ -225,6 +225,10 @@ class TrustbridgeSettings(Settings):
     deletion_drain_max_passes: int = Field(default=30, ge=2, le=10000)
     deletion_drain_poll_seconds: float = Field(default=2.0, ge=0)
     deletion_step_pass_seconds: float = Field(default=30.0, gt=0)
+    # The database step deletes at most this many rows of one table per pass, one transaction
+    # (NG6h-7a). A batch must finish inside `transaction_timeout_seconds`, so lower it for a slow
+    # database rather than raise the timeout.
+    deletion_step_batch_size: int = Field(default=500, ge=1, le=10000)
     # Retention of finished deletion records (ADR 0034, user decision B4, NG6h-3c-2). `0` (the
     # default) keeps them for ever; a non-zero value is at least `deletion_retention_min_days`, as
     # for the audit log. The purge runs every `deletion_purge_interval_seconds`, at most

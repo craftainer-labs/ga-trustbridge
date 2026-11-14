@@ -233,6 +233,7 @@ existing Secret. A null or empty value is not set, so the application default ap
 {{- $_ := set $c "DELETION_DRAIN_MAX_PASSES" $tb.deletion.drainMaxPasses -}}
 {{- $_ := set $c "DELETION_DRAIN_POLL_SECONDS" $tb.deletion.drainPollSeconds -}}
 {{- $_ := set $c "DELETION_STEP_PASS_SECONDS" $tb.deletion.stepPassSeconds -}}
+{{- $_ := set $c "DELETION_STEP_BATCH_SIZE" $tb.deletion.stepBatchSize -}}
 {{- $_ := set $c "DELETION_RETENTION_DAYS" $tb.deletion.retentionDays -}}
 {{- $_ := set $c "DELETION_RETENTION_MIN_DAYS" $tb.deletion.retentionMinDays -}}
 {{- $_ := set $c "DELETION_PURGE_INTERVAL_SECONDS" $tb.deletion.purgeIntervalSeconds -}}

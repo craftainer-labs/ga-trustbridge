@@ -15,9 +15,9 @@ admin-disabled the whole time, and for good after `failed` or `cancelled`.
 The statements below run as the application role (`trustbridge_app`), which
 holds `SELECT` on `tenant_deletions` and `EXECUTE` on the functions named.
 The admin API routes that wrap cancel and operator-fail arrive with the
-request endpoint (NG6h-7); the functions are the break-glass path after that.
+request endpoint (NG6h-7b); the functions are the break-glass path after that.
 
-**Cancel and operator-fail are unaudited until NG6h-7's admin routes exist.**
+**Cancel and operator-fail are unaudited until NG6h-7b's admin routes exist.**
 The SQL functions below write no audit event, so record each use in your
 change log. Once the routes exist, prefer them: they audit the action, and the
 functions stay as the break-glass path.
@@ -125,7 +125,7 @@ not stay restored, so replay those deletions before the system takes traffic.
    A deletion that was still running at the backup is in `tenant_deletions`
    with its saved state and resumes by itself when the reconciler starts
    (each step is idempotent).
-4. For each tenant that came back, with only the api running (until NG6h-7
+4. For each tenant that came back, with only the api running (until NG6h-7b
    adds the request route, run the SQL functions instead:
    `tb_set_tenant_disabled` and `tb_request_tenant_deletion(tenant, host,
    installation id, org, by_sub, by_iss, delete_platform, not_before)` as the

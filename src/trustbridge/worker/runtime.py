@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from trustbridge.adapters.interface import GitHubHost
 from trustbridge.adapters.loader import load_adapter_classes
 from trustbridge.audit.emit import AuditWriter, TenantSyncAudit
-from trustbridge.deletion.ports import DeletionDriver
+from trustbridge.deletion.ports import DeletionDriver, DeletionWiring
 from trustbridge.github.availability import HostChecker
 from trustbridge.github.hosts import GitHubHostConfig
 from trustbridge.github.models import SqlRegistrationStore
@@ -191,6 +191,11 @@ def consumer_name() -> str:
     return f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 
 
+DeletionComposer = Callable[[Core, async_sessionmaker[AsyncSession] | None], DeletionWiring]
+"""Builds the deletion engine and the record purger from the process's `Core` (the composition
+root, `trustbridge.composition`; the worker cannot import the engine, so it is handed in)."""
+
+
 @dataclass(slots=True)
 class ProcessOverrides:
     """Collaborators a test can substitute for `run_process`."""
@@ -199,7 +204,9 @@ class ProcessOverrides:
     session_factory: async_sessionmaker[AsyncSession] | None = None
     checker: HostChecker | None = None
     stop: asyncio.Event | None = None
-    deletion: DeletionDriver | None = None  # the reconciler's tenant deletion engine
+    deletion: DeletionDriver | None = None  # the reconciler's tenant deletion engine (tests)
+    # builds the engine and the record purger; not called when `deletion` is set (tests)
+    composer: DeletionComposer | None = None
     tenant_reconciler: TenantReconciler | None = None  # the reconciler's tenant reconcile body
 
 
@@ -285,6 +292,8 @@ async def run_process(
                 )
                 await Worker(settings, deps, consumer_name()).run(stop)
             else:
+                compose = chosen.composer if chosen.deletion is None else None
+                wiring = compose(core, sessions) if compose else DeletionWiring()
                 rdeps = ReconcilerDeps(
                     store=core.store,
                     queue=core.queue,
@@ -294,7 +303,8 @@ async def run_process(
                     deliveries=core.runtime.deliveries,
                     heartbeat=heartbeat,
                     audit_sessions=sessions,
-                    deletion=chosen.deletion,
+                    deletion=chosen.deletion or wiring.driver,
+                    record_purger=wiring.record_purger,
                     reconcile_requests=ReconcileQueue(client),
                     refusals=core.tenant_gate,
                     tenant_reconciler=chosen.tenant_reconciler
@@ -322,7 +332,15 @@ def _install_signal_handlers(stop: asyncio.Event) -> None:
             logger.debug("cannot install a handler for %s", sig)
 
 
-def main(kind: ProcessKind, runner: Callable[[Coroutine[Any, Any, int]], int] = asyncio.run) -> int:
-    """Synchronous entry for `python -m trustbridge.worker [worker|reconciler]`."""
+def main(
+    kind: ProcessKind,
+    runner: Callable[[Coroutine[Any, Any, int]], int] = asyncio.run,
+    composer: DeletionComposer | None = None,
+) -> int:
+    """Synchronous entry for `python -m trustbridge.worker [worker|reconciler]`.
+
+    `composer` is the deletion composition root (`python -m trustbridge.reconciler` passes it);
+    without one the reconciler has no deletion engine and logs that the duties are disabled.
+    """
     configure_logging()
-    return runner(run_process(kind))
+    return runner(run_process(kind, overrides=ProcessOverrides(composer=composer)))

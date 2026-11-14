@@ -4,8 +4,8 @@
 
 Proposed. The user decided on 2026-11-03 (G-api) that tenant data deletion is **in NG6**,
 overriding the earlier lean to defer it; this ADR holds its design and the user's answers on
-the remaining items ("User decisions"). No code is written yet. It becomes Accepted when the
-implementation merges. Builds on
+the remaining items ("User decisions"). The engine, its steps and their composition are implemented (NG6h-1 to NG6h-7a); it becomes Accepted when
+the admin routes (NG6h-7b) and the end-to-end test (NG6h-7c) merge. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (write-ahead operations, leases,
 parked values, retention),
 [0029](0029-adapter-plugin-interface.md) (adapter `delete` operations),
@@ -327,9 +327,20 @@ adapter fakes.
   elsewhere). The gate (B10): `SqlTenantGate.allows`, the adapter core's `OperationGate`, admits a `delete` operation
   through a disabled tenant only when it carries the id of a non-terminal deletion of that same tenant (checked in the
   gate's one statement; `CredentialCore.delete_scope(..., deletion_id=)`, which only the deletion engine's steps set).
-  A user-initiated delete on a deleting tenant, every other kind, a refresh and an orphan sweep stay refused. Composing the engine with its steps is left to the items that build them (4b, 5, 6).
+  A user-initiated delete on a deleting tenant, every other kind, a refresh and an orphan sweep stay refused. The engine is composed with its steps by NG6h-7a (below).
   The runbook (cancel, operator-fail, and replaying `tenant.deletion.completed` after a restore) is
   [`docs/runbooks/tenant-deletion.md`](../runbooks/tenant-deletion.md).
+- **Composition (NG6h-7a).** `trustbridge/composition.py` is the composition root, outside `deletion/` and
+  `worker/` (the engine imports neither, the worker only `deletion.ports`). `python -m trustbridge.reconciler`
+  (the Helm chart's reconciler command) runs the reconciler with `compose_deletion`, which builds the
+  `DeletionEngine` over `SqlDeletionStore` with the drain (`SqlWritersPort`: it resumes the tenant's open
+  credential operations under the normal rules, then counts what is still open and its held `scope_leases`),
+  the platform step (`build_platform_port`), the GitHub step (`build_github_port`) and `SqlDatabaseStep`
+  (`DELETION_STEP_BATCH_SIZE`, default 500), and the `SqlRecordPurger` (budget half `LEASE_TTL_SECONDS`).
+  Mock mode composes nothing and logs one line. Webhook deliveries are not scanned by the drain: a disabled
+  tenant's handlers skip them and `tb_delete_tenant` refuses while one is left. The admin routes (request,
+  reads, cancel, skip-step, operator-fail) are NG6h-7b and the late-delivery end-to-end test is NG6h-7c;
+  until they land this ADR stays Proposed.
 - **Re-creation (decided, NG6h-1; the table moved in NG6h-3c-1).** A row in `tenant_tombstones` for
   `(host, installation_id)` (until NG6h-3c-1 a `done` row in `tenant_deletions`; or a
   `database`-step deletion row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` creates nothing (NG6h-1 returned NULL; NG6h-2 raises, below), and `SqlTenants` and
@@ -387,8 +398,8 @@ adapter fakes.
     does not re-run the backfill and never deletes a `done` record whose tombstone is missing. The tombstones are
     never purged, so B2 holds at any retention.
   - **The composition hook.** `ReconcilerDeps.record_purger` (a `RecordPurger`, `deletion.ports`;
-    `deletion.purge.SqlRecordPurger` is the implementation) is filled by NG6h-7's composition
-    root; until then the duty is inert, like the deletion duty.
+    `deletion.purge.SqlRecordPurger` is the implementation) is filled by the composition root (`trustbridge/composition.py`, NG6h-7a), with
+    `budget_seconds` half `LEASE_TTL_SECONDS`; without it (mock mode) the duty does nothing.
   - **The one-way door and the upgrade order.** The previous release (N-1) reads `done` records, and
     the repo's `schema_compat` integer only stops new code on an old schema, so nothing in the schema
     can say "no N-1 pods". The guard is the default: roll the release out fully, then set a

@@ -5,14 +5,17 @@ the state machine, the lease and fence loop, the failure policy, the drain step 
 events. The database half is migration `5d7a2c8e1b94` (`tenancy/README.md`). The reconciler duty
 (`worker/reconciler.py`, `tenant_deletion`), the `DELETION_*` settings, the B10 gate
 (`tenancy/gate.py`) and the [runbook](../../../docs/runbooks/tenant-deletion.md) are NG6h-4a-3; the
-three steps are filled by NG6h-4b (database), -5 (platform, done) and -6 (GitHub, done). Until then the steps are
-Protocols and the tests use doubles, and nothing composes a `DeletionEngine` in a process: the
-reconciler runs the duty only when it is given a `DeletionDriver` (`ReconcilerDeps.deletion`,
-`ProcessOverrides.deletion`).
+three steps are NG6h-4b (database), -5 (platform) and -6 (GitHub), and the drain's port is
+`worker/drain_deletion.py` (NG6h-7a).
 
-The duty is inert in production until the steps exist: no deletion can run with a step missing. The composition
-root that builds the `DeletionEngine` with the real steps and hands it to the reconciler lives outside the worker
-package and comes in NG6h-7, once 4b, 5 and 6 have landed.
+The composition root (NG6h-7a) is `trustbridge/composition.py`, outside both this package and the worker
+(import-linter: this package never imports the worker, and the worker reaches it only through `ports.py`).
+`python -m trustbridge.reconciler` runs the reconciler with `compose_deletion` as its composer: it builds the
+`DeletionEngine` with the four real steps over the Postgres record store (`DELETION_*` settings, the database
+step's `DELETION_STEP_BATCH_SIZE`) and the `SqlRecordPurger` (run budget half `LEASE_TTL_SECONDS`), and hands
+both to the reconciler as a `DeletionWiring` (`ports.py`). Mock mode composes nothing and logs one line.
+`python -m trustbridge.worker reconciler` composes no engine, so its deletion duties log that they are
+disabled; the Helm chart runs `python -m trustbridge.reconciler`.
 
 - `ports.py`: `DeletionDriver` (`run_once() -> bool`), `RecordPurger` and `PurgeResult` (NG6h-3c-2). The only module the worker and reconciler
   may import (import-linter contract 3, which fails if that import ever disappears); it imports
@@ -53,7 +56,7 @@ cursor leaves them alone.
   sets `retry_at = now + min(cap, base * 2**attempts)` and frees the lease; the engine increments
   `trustbridge.deletion.attempts` (tag `step`), and `tenant_deletions.attempts` is the alertable
   value. `failed` is written only for a `NonRetryableError(code, message)` (`tb_fail`, with the
-  lease) or by an operator (`tb_operator_fail`, NG6h-7). An invalid step output (a `ValueError`
+  lease) or by an operator (`tb_operator_fail`, whose admin route is NG6h-7b). An invalid step output (a `ValueError`
   while the audit events are built, including a bad `counts` value, checked on every pass so it is
   never saved) is a step bug and becomes `NonRetryableError("invalid_step_output")`. A blocked step holds the deletion; it
   never advances on its own. An error recording the retry or the failure itself (the database
@@ -106,7 +109,7 @@ is left.
   that nothing is left (including any `webhook_deliveries` row of the tenant not yet `deleted`).
 - **A late delivery** (a webhook accepted for the tenant after the step cleared its rows) makes
   `tb_delete_tenant` refuse with `55000`; the engine retries the database step, which marks it `deleted`, so the deletion
-  converges. NG6h-7's end-to-end test must cover a delivery that arrives during a deletion.
+  converges. `tests/trustbridge/deletion/test_flow_integration.py` (NG6h-7a) covers a delivery recorded after the last table was cleared; the delivery that arrives after the deletion started or completed through the worker is NG6h-7c.
 - **Webhook deliveries** recorded for the tenant keep their row with status `deleted` and the dedupe key (`host`, `delivery_id`, `body_sha256`) and the
   non-personal `event`; `body`, `headers` (allow-listed request headers; NOT NULL, so `{}`) and `last_error` (handler
   error text, which may name tenant data) are cleared. Nothing reads the headers of a `deleted` row.
@@ -118,7 +121,7 @@ is left.
   `github_environments`, `tenant_repositories` and `webhook_bodies`: the tables `credential_operations` and `adapter_credentials` contain a
   secret word, so their counts take other names. A new tenant-keyed table is added to `database.PLAN`; an integration
   test fails when a table with a `tenant_id` column is in neither `PLAN` nor the retained set.
-- The batch size is a constructor argument; the composition root (NG6h-7) chooses it.
+- The batch size is a constructor argument; the composition root sets it from `DELETION_STEP_BATCH_SIZE` (default 500, 1 to 10000).
 
 ## The platform step
 
@@ -212,7 +215,7 @@ the transaction that removed the `tenants` row, and a rolled-back transition lea
 `deletion` shape allows ids, state and step names, a category, a count and a fixed code; `counts`
 go through `deletion_counts`. Free text (`NonRetryableError.message`, an exception message) reaches
 only `last_error`, scrubbed and cut, never the audit trail. `tenant.deletion.requested` and the
-cancel event are written by the request path (NG6h-7). Leaving `requested` writes a `step` event too (draining is the first destructive step, so every
+cancel event are written by the request path (the admin routes, NG6h-7b). Leaving `requested` writes a `step` event too (draining is the first destructive step, so every
 transition is audited); `counts` on a step event are cumulative.
 
 ## Writing step output
@@ -245,8 +248,8 @@ step (checked at startup).
 duty (`worker/reconciler.py`, `deletion_record_purge`, every `DELETION_PURGE_INTERVAL_SECONDS`) remove
 finished records through the definer `tb_purge_tenant_deletions` (migration `7b2d4f8a1c36`), in at
 most `DELETION_PURGE_MAX_BATCHES` batches of `DELETION_PURGE_BATCH_SIZE` per run, stopping after half
-the lease TTL. `SqlRecordPurger` (`purge.py`) is the `RecordPurger`; the composition root (NG6h-7)
-hands it to `ReconcilerDeps.record_purger`, and with none the duty does nothing.
+the lease TTL. `SqlRecordPurger` (`purge.py`) is the `RecordPurger`; the composition root (`trustbridge/composition.py`)
+hands it to `ReconcilerDeps.record_purger` with `budget_seconds` half `LEASE_TTL_SECONDS`, and with none the duty does nothing.
 
 - `done` records past the cut-off **whose tombstone exists** go, and so do `cancelled` records (no
   tombstone needed: a cancelled deletion left the tenant standing). A `done` record without a

@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 
+from trustbridge import composition
 from trustbridge.worker import __main__ as commands
 from trustbridge.worker import migrate, runtime
 
@@ -13,7 +14,6 @@ from trustbridge.worker import migrate, runtime
 @pytest.mark.parametrize(
     ("module", "expected"),
     [
-        ("trustbridge.reconciler", ["reconciler", "x"]),
         ("trustbridge.migrations", ["migrate", "x"]),
     ],
 )
@@ -52,9 +52,26 @@ def test_runtime_main_runs_the_process_and_returns_its_code(
 ) -> None:
     """Runtime main runs the process and returns its code."""
     monkeypatch.setattr(runtime, "configure_logging", lambda: None)
-    monkeypatch.setattr(runtime, "run_process", lambda kind: kind)
+    monkeypatch.setattr(runtime, "run_process", lambda kind, overrides=None: kind)
 
     def run(coro: Coroutine[Any, Any, int]) -> int:
         return 5 if cast("Any", coro) == "worker" else 6
 
     assert runtime.main("worker", runner=run) == 5
+
+
+def test_the_reconciler_shim_runs_the_composed_reconciler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`python -m trustbridge.reconciler` runs the reconciler with the deletion composer."""
+    seen: list[tuple[str, object]] = []
+
+    def fake_main(kind: str, runner: object = None, composer: object = None) -> int:
+        seen.append((kind, composer))
+        return 4
+
+    monkeypatch.setattr(runtime, "main", fake_main)
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_module("trustbridge.reconciler", run_name="__main__")
+    assert exit_info.value.code == 4
+    assert seen == [("reconciler", composition.compose_deletion)]

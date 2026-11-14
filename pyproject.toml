@@ -236,6 +236,15 @@ forbidden_modules = ["trustbridge.deletion"]
 # The reconciler imports the Protocol (NG6h-4a-3), so an ignore that matches no import is an alert.
 ignore_imports = ["trustbridge.worker.** -> trustbridge.deletion.ports"]
 
+# The composition root (NG6h-7a) joins the worker and the deletion engine; only the reconciler's
+# entry point may import it, or a layer would reach the engine through it.
+[[tool.importlinter.contracts]]
+name = "only the reconciler entry point imports the composition root"
+type = "forbidden"
+source_modules = ["trustbridge"]
+ignore_imports = ["trustbridge.reconciler.__main__ -> trustbridge.composition"]
+forbidden_modules = ["trustbridge.composition"]
+
 [[tool.importlinter.contracts]]
 name = "signers never import the GitHub core"
 type = "forbidden"

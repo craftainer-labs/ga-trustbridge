@@ -174,7 +174,7 @@ class ReconcilerDeps:
     heartbeat: Heartbeat | None = None
     audit_sessions: async_sessionmaker[AsyncSession] | None = None  # None: mock mode, no purge
     deletion: DeletionDriver | None = None  # None: no deletion engine composed, no duty
-    record_purger: RecordPurger | None = None  # None: not composed (NG6h-7), no purge duty
+    record_purger: RecordPurger | None = None  # None: not composed (mock mode), no purge duty
     reconcile_requests: ReconcileQueue | None = None  # None: no Valkey (mock mode), no duty
     refusals: TenantRefusals | None = None  # None: no database, no duty
     tenant_reconciler: TenantReconciler | None = None  # None: mock mode, no body
@@ -489,14 +489,21 @@ class Reconciler:
             beat.register(name, limit)
         if self._d.audit_sessions is None:
             logger.info("audit purge disabled: no audit store")
+        # `audit_sessions` is None only in mock mode (no database); with a database a missing
+        # engine or purger is a wrong entry point (the chart runs `python -m
+        # trustbridge.reconciler`), so deletion requests would stay pending: say so loudly.
+        report = logger.info if self._d.audit_sessions is None else logger.warning
         if self._d.deletion is None:
-            logger.info("tenant deletion disabled: no deletion engine")
+            report(
+                "tenant deletion disabled: no deletion engine"
+                " (run the reconciler as `python -m trustbridge.reconciler`)"
+            )
         if self._d.reconcile_requests is None or self._d.refusals is None:
             logger.info("tenant reconcile disabled: no Valkey or database")
         elif not (s.tenant_reconcile_enabled and self._d.tenant_reconciler is not None):
             logger.info("tenant reconcile requests stay pending: no reconcile body is enabled")
         if self._d.record_purger is None:
-            logger.info("deletion record purge disabled: no record purger")
+            report("deletion record purge disabled: no record purger")
         await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop
         jobs = [periodic(name, interval, job, stop, beat.beat) for name, interval, job in schedule]
         await asyncio.gather(*jobs)

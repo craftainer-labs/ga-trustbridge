@@ -6,7 +6,7 @@ image's default entrypoint serves the template app, so `command` is always set
 {{- $commands := dict
   "api" (list "uvicorn" "trustbridge.main:app" "--no-proxy-headers" "--host" "0.0.0.0" "--port" (toString .Values.api.port))
   "worker" (list "python" "-m" "trustbridge.worker" "worker")
-  "reconciler" (list "python" "-m" "trustbridge.worker" "reconciler") }}
+  "reconciler" (list "python" "-m" "trustbridge.reconciler") }}
 {{- range $name := list "api" "worker" "reconciler" }}
 {{- $cfg := index $.Values $name }}
 {{- if $cfg.enabled }}

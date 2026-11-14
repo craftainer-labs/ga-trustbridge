@@ -410,6 +410,21 @@ async def test_tenant_deletion_without_a_driver_is_a_no_op() -> None:
     assert await _deleter(h, None)[0].tenant_deletion() == 0
 
 
+async def test_a_database_without_the_engine_warns_loudly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With a database, "no engine" is a wrong entry point (not mock mode), so it is a WARNING."""
+    h = await Harness({}).start()
+    recon, _ = _purger(h)
+    stop = asyncio.Event()
+    stop.set()
+    with caplog.at_level("INFO"):
+        await recon.run(stop)
+    warned = {r.getMessage() for r in caplog.records if r.levelname == "WARNING"}
+    assert any("tenant deletion disabled: no deletion engine" in m for m in warned)
+    assert any("deletion record purge disabled: no record purger" in m for m in warned)
+
+
 async def test_run_schedules_tenant_deletion_with_a_limit_covering_its_lease_budget(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -422,6 +437,7 @@ async def test_run_schedules_tenant_deletion_with_a_limit_covering_its_lease_bud
         await recon.run(stop)
     assert beat._limits["tenant-deletion"] == h.settings.deletion_poll_seconds + 600
     assert caplog.text.count("tenant deletion disabled: no deletion engine") == 1
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]  # mock mode: INFO only
 
 
 async def test_run_logs_nothing_about_deletion_when_a_driver_is_present(

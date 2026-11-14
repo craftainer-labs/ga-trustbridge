@@ -165,7 +165,7 @@ reconciler:
     limits:
       cpu: 500m
       memory: 384Mi
-  ## Health endpoint of the process (HEALTH_PORT, python -m trustbridge.worker reconciler).
+  ## Health endpoint of the process (HEALTH_PORT, python -m trustbridge.reconciler).
   ## null turns the endpoint, its probes and the container port off.
   health:
     port: 8081
@@ -420,6 +420,9 @@ trustbridge:
     drainPollSeconds: 2
     # The longest one step pass may take between two lease renewals.
     stepPassSeconds: 30
+    # Rows the database step deletes per pass and table, 1..10000; one transaction, so a batch must
+    # finish inside the transaction timeout.
+    stepBatchSize: 500
     # Retention of FINISHED deletion records (done and cancelled; failed ones stay for an operator;
     # they hold the requester's sub and iss), in days (ADR 0034, B4). 0 keeps them for ever; otherwise at least retentionMinDays. The tombstones that stop a
     # still-installed App from re-creating a deleted tenant are never purged. Upgrade order: the
