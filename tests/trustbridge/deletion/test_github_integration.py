@@ -361,3 +361,31 @@ async def test_releasing_an_environment_clears_the_outputs_scoped_to_it(
     await rig.port.release_environment(rig.tenant, env)
     assert ("secret", "FOO") not in await rig.outputs()
     assert ("environment", "legacy") in await rig.outputs()
+
+
+async def test_releasing_an_environment_leaves_another_repositorys_same_named_one_alone(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """The match is on the repository too: `prod` of repository 11 is not ours to clear here."""
+    rig = Rig(sessions)
+    await rig.seed()
+    other = {"kind": "secret", "name": "OTHER", "repository_id": 11, "environment": "prod"}
+    async with sessions() as session, session.begin():
+        row = (await session.scalars(select(AdapterCredentialRow))).first()
+        assert row is not None
+        row.outputs = [*row.outputs, other]
+    (env,) = await rig.port.environments(rig.tenant)
+    await rig.port.release_environment(rig.tenant, env)
+    assert ("secret", "OTHER") in await rig.outputs()
+
+
+async def test_removing_an_output_that_is_already_cleared_is_harmless(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """A repeat after a crash: the row exists, the entry is gone, nothing changes."""
+    rig = Rig(sessions)
+    await rig.seed()
+    (first, *rest) = await rig.port.outputs(rig.tenant)
+    assert await rig.port.remove_output(rig.tenant, first) is True
+    assert await rig.port.remove_output(rig.tenant, first) is True
+    assert await rig.port.outputs(rig.tenant) == rest
