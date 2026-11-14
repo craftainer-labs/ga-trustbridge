@@ -1,5 +1,6 @@
-"""`AdapterPlatformStep` over a fake port (NG6h-5, ADR 0034 step 2): order, flag, skips, errors."""
+"""`AdapterPlatformStep` over a fake port (NG6h-5/5b, ADR 0034 step 2): order, flag, skips, pass."""
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -7,13 +8,21 @@ from uuid import UUID
 import pytest
 
 from tests.trustbridge.deletion.fakes import TENANT, record
-from trustbridge.deletion.model import Lease, StepContext, StepOutcome
+from trustbridge.deletion.model import (
+    Lease,
+    LeaseLost,
+    RunBudgetExhausted,
+    StepContext,
+    StepOutcome,
+)
 from trustbridge.deletion.platform import (
     COUNT_CATEGORY,
     KEPT_REASON,
+    MAX_TRIES_PER_PASS,
     OPERATOR_OWNED_CATEGORY,
     OPERATOR_OWNED_REASON,
     AdapterPlatformStep,
+    PlatformStepHeldError,
 )
 from trustbridge.deletion.ports import PlatformItem
 
@@ -29,6 +38,8 @@ class FakePort:
     items: list[PlatformItem]
     removed: list[tuple[UUID, UUID, PlatformItem]] = field(default_factory=list)
     boom: Exception | None = None
+    fail: dict[str, Exception] = field(default_factory=dict)
+    tried: list[str] = field(default_factory=list)
 
     async def pending(self, tenant_id: UUID) -> Sequence[PlatformItem]:
         """The items still recorded."""
@@ -37,8 +48,11 @@ class FakePort:
 
     async def remove(self, tenant_id: UUID, deletion_id: UUID, item: PlatformItem) -> None:
         """Remove one item, or raise."""
+        self.tried.append(item.key)
         if self.boom is not None:
             raise self.boom
+        if item.key in self.fail:
+            raise self.fail[item.key]
         self.removed.append((tenant_id, deletion_id, item))
         self.items.remove(item)
 
@@ -57,11 +71,15 @@ class FakeNames:
         return self._names
 
 
-def _ctx(*, flag: bool, cursor: dict[str, int] | None = None) -> tuple[StepContext, list[int]]:
+def _ctx(
+    *, flag: bool, cursor: dict[str, int] | None = None, budget: int | None = None
+) -> tuple[StepContext, list[int]]:
     rec = record(state="platform", delete_platform_resources=flag, step_cursor=cursor or {})
     renewals: list[int] = []
 
     async def renew() -> None:
+        if budget is not None and len(renewals) >= budget:
+            raise RunBudgetExhausted
         renewals.append(1)
 
     return StepContext(rec, Lease(rec.id, "h", 1), renew), renewals
@@ -82,8 +100,8 @@ async def _drain(step: AdapterPlatformStep, *, flag: bool) -> tuple[list[StepOut
         cursor = dict(out.cursor or {})
 
 
-async def test_removes_one_item_per_pass_in_the_ruled_order() -> None:
-    """Credentials, then webhooks, repositories, projects; each pass carries a new cursor."""
+async def test_one_pass_removes_everything_in_the_ruled_order() -> None:
+    """Credentials, webhooks, repositories, projects; the cursor counts removals."""
     port = FakePort(
         [
             _item("project", key="p"),
@@ -102,19 +120,15 @@ async def test_removes_one_item_per_pass_in_the_ruled_order() -> None:
         "repository",
         "project",
     ]
-    assert [o.cursor for o in outcomes[:-1]] == [{"removed": n} for n in range(1, 6)]
-    assert outcomes[-1].done and outcomes[-1].counts == {} and outcomes[-1].skipped == []
-    assert len(renewals) == 5
-    total: dict[str, int] = {}
-    for out in outcomes:
-        for key, value in out.counts.items():
-            total[key] = total.get(key, 0) + value
-    assert total == {
+    assert [o.cursor for o in outcomes[:-1]] == [{"removed": 5}]
+    assert outcomes[0].counts == {
         "platform_access_grants": 2,
         "platform_webhooks": 1,
         "platform_repositories": 1,
         "platform_projects": 1,
     }
+    assert outcomes[-1].done and outcomes[-1].counts == {} and outcomes[-1].skipped == []
+    assert len(renewals) == 5
 
 
 async def test_every_removal_carries_the_deletions_own_origin() -> None:
@@ -173,15 +187,119 @@ async def test_a_crash_after_a_removal_converges() -> None:
     """The work list is re-read each pass: an item already gone is not removed again."""
     port = FakePort([_item("credential", key="a"), _item("credential", key="b")])
     step = AdapterPlatformStep(port, FakeNames())
-    await step.run(_ctx(flag=False)[0])  # removed `a`; the engine never saved the cursor
+    port.items.remove(_item("credential", key="a"))  # removed, but the engine never saved it
     outcomes, _ = await _drain(step, flag=False)
-    assert [i.key for _, _, i in port.removed] == ["a", "b"]
+    assert [i.key for _, _, i in port.removed] == ["b"]
     assert outcomes[-1].done and port.items == []
 
 
-async def test_a_failing_removal_propagates_and_changes_nothing() -> None:
-    """Any error is the engine's to retry; the step holds in `platform`."""
-    port = FakePort([_item("credential")], boom=RuntimeError("platform down"))
-    with pytest.raises(RuntimeError):
+async def test_a_failing_head_does_not_hold_the_items_behind_it() -> None:
+    """The failed item is skipped for the pass; the tail is removed and progress is reported."""
+    port = FakePort(
+        [_item("credential", "off", "a"), _item("credential", key="b"), _item("webhook", key="w")],
+        fail={"a": RuntimeError("adapter off")},
+    )
+    step = AdapterPlatformStep(port, FakeNames())
+    out = await step.run(_ctx(flag=False, cursor={"removed": 3})[0])
+    assert port.tried == ["a", "b", "w"]  # each item once: no retry of `a` within the pass
+    assert not out.done and out.cursor == {"removed": 5}
+    assert out.counts == {"platform_access_grants": 1, "platform_webhooks": 1}
+    assert port.items == [_item("credential", "off", "a")]
+
+
+async def test_a_pass_where_nothing_is_removed_holds_with_type_only_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """All failed: the transient error for the engine; no key, message or value leaks."""
+    port = FakePort(
+        [_item("credential", key="k-secret"), _item("webhook", key="w")],
+        fail={"k-secret": RuntimeError("tok=hunter2"), "w": ValueError("tok=hunter2")},
+    )
+    with caplog.at_level(logging.WARNING), pytest.raises(PlatformStepHeldError) as held:
         await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False)[0])
-    assert port.items == [_item("credential")]
+    assert str(held.value) == "2 of 2 removable items failed (RuntimeError x1, ValueError x1)"
+    assert "hunter2" not in caplog.text and "k-secret" not in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert len(port.items) == 2
+
+
+async def test_held_pass_leaves_the_cursor_unchanged_so_attempts_keep_counting() -> None:
+    """Progress (a changed cursor) is what resets the engine's attempts; a hold gives none."""
+    port = FakePort([_item("credential", key="a")], boom=RuntimeError("down"))
+    ctx, _ = _ctx(flag=False, cursor={"removed": 2})
+    with pytest.raises(PlatformStepHeldError):
+        await AdapterPlatformStep(port, FakeNames()).run(ctx)
+    assert ctx.record.step_cursor == {"removed": 2}  # nothing returned, nothing to save
+    port.boom = None
+    out = await AdapterPlatformStep(port, FakeNames()).run(
+        _ctx(flag=False, cursor={"removed": 2})[0]
+    )
+    assert out.cursor == {"removed": 3}
+
+
+async def test_a_project_is_not_tried_while_one_of_its_repositories_remains() -> None:
+    """A failing repository keeps its project; another project's repositories do not matter."""
+    port = FakePort(
+        [
+            _item("repository", key="p1/r"),
+            _item("repository", key="p2/r"),
+            _item("project", key="p1"),
+            _item("project", key="p2"),
+            _item("project", key="p"),  # `p` is not a prefix match for `p1/r`
+        ],
+        fail={"p1/r": RuntimeError("x")},
+    )
+    out = await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=True)[0])
+    assert port.tried == ["p1/r", "p2/r", "p2", "p"]
+    assert out.counts == {"platform_repositories": 1, "platform_projects": 2}
+    assert {i.key for i in port.items} == {"p1/r", "p1"}
+
+
+async def test_only_failing_repositories_hold_with_their_project_untried() -> None:
+    """The project is never tried, so it does not count as a failure."""
+    port = FakePort(
+        [_item("repository", key="p/r"), _item("project", key="p")],
+        fail={"p/r": RuntimeError("x")},
+    )
+    with pytest.raises(PlatformStepHeldError, match="1 of 2 removable"):
+        await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=True)[0])
+    assert port.tried == ["p/r"]
+
+
+async def test_budget_exhaustion_mid_pass_reports_what_was_removed() -> None:
+    """The removed items are saved; the engine's next renew stops the run."""
+    port = FakePort([_item("credential", key="a"), _item("credential", key="b")])
+    out = await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False, budget=1)[0])
+    assert out.cursor == {"removed": 1} and out.counts == {"platform_access_grants": 1}
+    assert port.tried == ["a"]
+
+
+async def test_budget_exhaustion_before_any_removal_propagates() -> None:
+    """Nothing to report: the engine releases the lease."""
+    port = FakePort([_item("credential")])
+    with pytest.raises(RunBudgetExhausted):
+        await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False, budget=0)[0])
+    assert port.tried == []
+
+
+async def test_a_lost_lease_is_not_an_item_failure() -> None:
+    """`LeaseLost` from the port stops the pass at once."""
+    port = FakePort([_item("credential", key="a"), _item("credential", key="b")], boom=LeaseLost())
+    with pytest.raises(LeaseLost):
+        await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False)[0])
+    assert port.tried == ["a"]
+
+
+async def test_a_budget_error_from_the_port_is_not_an_item_failure() -> None:
+    """`RunBudgetExhausted` raised by a removal propagates as it does from `renew`."""
+    port = FakePort([_item("credential")], boom=RunBudgetExhausted())
+    with pytest.raises(RunBudgetExhausted):
+        await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False)[0])
+
+
+async def test_a_pass_is_bounded_in_items() -> None:
+    """At most `MAX_TRIES_PER_PASS` tries; the rest wait for the next pass."""
+    port = FakePort([_item("credential", key=f"k{n}") for n in range(MAX_TRIES_PER_PASS + 5)])
+    out = await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False)[0])
+    assert out.cursor == {"removed": MAX_TRIES_PER_PASS} and len(port.items) == 5
+    assert not out.done
