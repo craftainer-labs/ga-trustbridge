@@ -13,9 +13,10 @@ An item that fails is skipped for the rest of the pass and the pass moves on, so
 its repositories remains (removed or not, in this pass or before). The pass stops at
 `MAX_TRIES_PER_PASS` tries or when the engine's run budget is spent (`ctx.renew` raises
 `RunBudgetExhausted`; with failures and no removal that holds the step instead of releasing the
-lease, so the attempt is counted). The pass starts at item `attempts % len(items)` and wraps, so
-items stuck at the head cannot starve the ones behind them across retries; the cursor is never
-used for this, because a changed cursor resets the attempts. It reports progress (a changed
+lease, so the attempt is counted). The order above is the order of a first pass (attempts 0).
+After held attempts the pass starts at item `attempts % len(items)` of that list and wraps, trading the kind
+order for liveness (only the project-after-repository rule is kept), so items stuck at the head
+cannot starve the ones behind them across retries; the cursor is never used for this, because a changed cursor resets the attempts. It reports progress (a changed
 cursor, which resets the engine's attempts) only when something was removed; when every remaining
 item failed it raises `PlatformStepHeldError` (the engine retries with backoff, counts the attempt
 and raises the alert). Repositories and
