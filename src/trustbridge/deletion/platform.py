@@ -22,8 +22,9 @@ and raises the alert). Repositories and
 projects hold customer artifacts, so they are removed only when the request set
 `delete_platform_resources` (user decision 1); otherwise they stay and are recorded as skipped
 (`kept_by_request`). The work list is re-read from the recorded rows on every pass, so a crash
-between a removal and the saved cursor converges: a removed item is no longer listed. (The count
-of that one item can be missed, which makes `counts` a lower bound after a crash.)
+between a removal and the saved cursor converges: a removed item is no longer listed. (The counts
+of a pass are saved only when it ends, so a crash can lose that pass's counts: `counts` is a
+lower bound.)
 
 The adapters' connection data (`store:tenants/<uuid>/<adapter>`, which includes the per-tenant
 Argo CD token) is operator-owned (user decision 4): it is never touched; the last pass records
@@ -42,7 +43,13 @@ from collections.abc import Sequence
 from typing import Protocol
 from uuid import UUID
 
-from trustbridge.deletion.model import LeaseLost, RunBudgetExhausted, StepContext, StepOutcome
+from trustbridge.deletion.model import (
+    LeaseLost,
+    NonRetryableError,
+    RunBudgetExhausted,
+    StepContext,
+    StepOutcome,
+)
 from trustbridge.deletion.ports import ItemKind, PlatformItem
 
 logger = logging.getLogger(__name__)
@@ -148,43 +155,59 @@ class AdapterPlatformStep:
         failures: Counter[str] = Counter()
         left = set(removable)
         tries = 0
+        spent = False
         # Start where the engine's attempt count points, so items stuck at the head cannot keep
         # the run budget from ever reaching the ones behind them. The cursor is not touched: it
         # resets the attempts. A pass with progress resets them to 0 (start at the head again).
         start = record.attempts % len(removable)
-        for item in [*removable[start:], *removable[:start]]:
-            if tries >= MAX_TRIES_PER_PASS or _blocked(item, left):
-                continue
-            try:
-                await ctx.renew()
-            except RunBudgetExhausted:
-                if counts:
+        work = [*removable[start:], *removable[:start]]
+        for _ in range(2):  # a second sweep takes the projects that waited for a repository
+            deferred: list[PlatformItem] = []
+            for item in work:
+                if tries >= MAX_TRIES_PER_PASS:
                     break
-                if failures:
-                    # Spent on failures: hold (counts the attempt, which rotates the start)
-                    # instead of releasing the lease, which would retry the same head items.
-                    raise _held(failures, len(removable)) from None
-                raise
-            tries += 1
-            try:
-                await self._platform.remove(record.tenant_id, record.id, item)
-            except LeaseLost, RunBudgetExhausted:
-                raise
-            except Exception as error:
-                failures[type(error).__name__] += 1
-                logger.warning(
-                    "tenant deletion %s: platform %s removal failed (%s), skipping it this pass",
-                    record.id,
-                    item.kind,
-                    type(error).__name__,
-                )
-                continue
-            left.discard(item)
-            counts[COUNT_CATEGORY[item.kind]] += 1
+                if _blocked(item, left):
+                    deferred.append(item)
+                    continue
+                try:
+                    await ctx.renew()
+                    tries += 1
+                    removed_it = await self._remove(ctx, item, failures)
+                except RunBudgetExhausted:
+                    spent = True
+                    break
+                if removed_it:
+                    left.discard(item)
+                    counts[COUNT_CATEGORY[item.kind]] += 1
+            if spent or not deferred or not counts:
+                break
+            work = deferred
         if not counts:
+            if spent and not failures:
+                raise RunBudgetExhausted
+            # Held, also when the budget went on failures: the attempt is counted, which rotates
+            # the next start, where releasing the lease would retry the same head items.
             raise _held(failures, len(removable))
         removed = int(record.step_cursor.get("removed", 0)) + sum(counts.values())
         return StepOutcome(counts=dict(counts), cursor={"removed": removed}, done=False)
+
+    async def _remove(self, ctx: StepContext, item: PlatformItem, failures: Counter[str]) -> bool:
+        """Remove one item; False (counted, logged by class only) when it failed."""
+        record = ctx.record
+        try:
+            await self._platform.remove(record.tenant_id, record.id, item)
+        except LeaseLost, RunBudgetExhausted, NonRetryableError:
+            raise
+        except Exception as error:
+            failures[type(error).__name__] += 1
+            logger.warning(
+                "tenant deletion %s: platform %s removal failed (%s), skipping it this pass",
+                record.id,
+                item.kind,
+                type(error).__name__,
+            )
+            return False
+        return True
 
 
 def _held(failures: Counter[str], total: int) -> PlatformStepHeldError:

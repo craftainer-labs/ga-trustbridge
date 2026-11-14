@@ -153,13 +153,14 @@ from the same collaborators as the reconcile body, plus a `ResourceCore`) is the
   reason and count only (`adapter` is in the record's `skipped`, not the event).
 - **Failures** are the engine's. Each failed item is logged by exception class only (no message,
   key or value). When every remaining item failed in a pass the step raises `PlatformStepHeldError`
-  (counts and class names): the attempts count and alert apply. (Transient: retry with backoff,
-  the attempts alert, held in `platform`; `failed` only for a `NonRetryableError`, which this step never raises). Blocking
-  cases: the platform is down; the adapter is not enabled in this process or the tenant has no
+  (counts and class names): retry with backoff, the attempts alert, held in `platform`. A
+  `NonRetryableError` from the port is not an item failure: it propagates and the engine writes
+  `failed` (the port does not raise one today). Blocking cases: the platform is down; the adapter is not enabled in this process or the tenant has no
   connection data for it (the registry cannot open it); a delete leaves an operation waiting for a
   manual action (`PlatformDeleteIncompleteError`); an `adapter_resources` key of an unknown kind
   (`UnknownResourceKindError`). The operator fixes the cause or acknowledges it with `skip-step`.
-- Counts after a crash between a removal and the saved cursor miss that one item (a lower bound).
+- Counts are saved when a pass ends, so after a crash they miss that pass's removals, at most
+  `MAX_TRIES_PER_PASS` items (a lower bound).
 
 ## Audit (ADR 0034 "The audit trail", inv. 12, 14)
 

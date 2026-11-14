@@ -11,6 +11,7 @@ from tests.trustbridge.deletion.fakes import TENANT, record
 from trustbridge.deletion.model import (
     Lease,
     LeaseLost,
+    NonRetryableError,
     RunBudgetExhausted,
     StepContext,
     StepOutcome,
@@ -357,3 +358,32 @@ async def test_a_held_pass_does_not_depend_on_a_project_prefix_edge() -> None:
     )
     out = await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=True)[0])
     assert out.counts == {"platform_projects": 1}
+
+
+async def test_a_budget_error_from_a_removal_after_removals_reports_them() -> None:
+    """What the pass already removed is saved, as it is when `renew` ends the pass."""
+
+    class _Port(FakePort):
+        async def remove(self, tenant_id: UUID, deletion_id: UUID, item: PlatformItem) -> None:
+            if item.key == "b":
+                raise RunBudgetExhausted
+            await super().remove(tenant_id, deletion_id, item)
+
+    port = _Port([_item("credential", key="a"), _item("credential", key="b")])
+    out = await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False)[0])
+    assert out.cursor == {"removed": 1} and out.counts == {"platform_access_grants": 1}
+
+
+async def test_a_non_retryable_error_from_the_port_is_not_an_item_failure() -> None:
+    """The engine decides what a `NonRetryableError` means; the pass does not swallow it."""
+    port = FakePort([_item("credential")], boom=NonRetryableError("code"))
+    with pytest.raises(NonRetryableError):
+        await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False)[0])
+
+
+async def test_a_project_that_waited_for_its_repository_is_tried_in_the_same_pass() -> None:
+    """A rotated start can put a project before its repository: a second sweep takes it."""
+    port = FakePort([_item("repository", key="p/r"), _item("project", key="p")])
+    out = await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=True, attempts=1)[0])
+    assert port.tried == ["p/r", "p"]
+    assert out.counts == {"platform_repositories": 1, "platform_projects": 1}

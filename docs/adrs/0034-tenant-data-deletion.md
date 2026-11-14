@@ -97,7 +97,7 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    `credential_operations`): a crash between the adapter call and forgetting the row repeats the
    adapter's idempotent `delete`. The work list is re-read from the rows on every pass, so a restart
    converges; a removed item is not removed twice, and after a crash `counts` is a lower bound by
-   at most one. Repositories and projects stay, and are recorded under `skipped` as
+   at most one pass's removals (50). Repositories and projects stay, and are recorded under `skipped` as
    `kept_by_request`, unless the request set `delete_platform_resources`. The GitHub outputs of a
    deleted credential stay recorded for step 3 (`remove_outputs=False`): step 2 makes no GitHub call,
    so an uninstalled App cannot block it. Nothing is read from the platform: only recorded rows are
