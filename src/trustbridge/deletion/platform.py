@@ -22,10 +22,10 @@ resets the engine's attempts) only when something was removed; when every remain
 raises `PlatformStepHeldError` (the engine retries with backoff, counts the attempt and raises the
 alert). Repositories and projects hold customer artifacts, so they are removed only when the
 request set `delete_platform_resources` (user decision 1); otherwise they stay and are recorded as
-skipped (`kept_by_request`). The work list is re-read from the recorded rows on every pass, so a crash
-between a removal and the saved cursor converges: a removed item is no longer listed. (The counts
-of a pass are saved only when it ends, so a crash can lose that pass's counts: `counts` is a
-lower bound.)
+skipped (`kept_by_request`). The work list is re-read from the recorded rows on every pass, so a
+crash between a removal and the saved cursor converges: a removed item is no longer listed. (The
+counts of a pass are saved only when it ends, so a crash can lose that pass's counts: `counts` is
+a lower bound.)
 
 The adapters' connection data (`store:tenants/<uuid>/<adapter>`, which includes the per-tenant
 Argo CD token) is operator-owned (user decision 4): it is never touched; the last pass records
