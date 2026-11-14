@@ -67,6 +67,8 @@ async def db() -> AsyncIterator[Db]:
             await conn.execute(text(f"ALTER TABLE github_environments OWNER TO {OWNER_ROLE}"))
             await conn.execute(text("ALTER TABLE github_environments ENABLE ROW LEVEL SECURITY"))
             await conn.execute(text("ALTER TABLE github_environments FORCE ROW LEVEL SECURITY"))
+            for seeded in (provisioned.a, provisioned.b):  # one row each, as `_provision` seeds
+                await conn.execute(text(ENVIRONMENT_INSERT), {"t": seeded, "k": "seed", "n": 1})
         yield provisioned
 
 
