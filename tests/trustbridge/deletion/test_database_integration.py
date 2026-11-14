@@ -41,6 +41,12 @@ pytestmark = pytest.mark.integration
 
 ROWS = 5
 BATCH = 2
+ENVIRONMENT_INSERT = (
+    "INSERT INTO github_environments (tenant_id, host, repository_id, environment_name) "
+    "VALUES (:t, 'tb.test', :n, :k)"
+)
+"""`github_environments` (NG6h-6a) is not in the shared `INSERTS`: a seeded row there would block
+every migration downgrade test that steps past its revision."""
 TENANT_TABLES = tuple(table for table, _ in PLAN if table != "webhook_deliveries")
 DELIVERY = (
     "INSERT INTO webhook_deliveries "
@@ -57,6 +63,10 @@ async def db() -> AsyncIterator[Db]:
         async with provisioned.admin.begin() as conn:
             for function in NEW_FUNCTIONS:
                 await conn.execute(text(f"ALTER FUNCTION {function} OWNER TO {OWNER_ROLE}"))
+            # `_provision` enforces RLS on the six tables only; this one is enforced here too.
+            await conn.execute(text(f"ALTER TABLE github_environments OWNER TO {OWNER_ROLE}"))
+            await conn.execute(text("ALTER TABLE github_environments ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text("ALTER TABLE github_environments FORCE ROW LEVEL SECURITY"))
         yield provisioned
 
 
@@ -64,7 +74,8 @@ async def _seed(db: Db, tenant: Tenant, rows: int = ROWS) -> None:
     """`rows` rows in each tenant-keyed table; deliveries: `rows` recorded, two with no tenant."""
     for table in TENANT_TABLES:
         for number in range(rows):
-            await _admin(db, INSERTS[table], {"t": tenant.id, "k": f"k{number}", "n": 10 + number})
+            insert = ENVIRONMENT_INSERT if table == "github_environments" else INSERTS[table]
+            await _admin(db, insert, {"t": tenant.id, "k": f"k{number}", "n": 10 + number})
     statuses = ("pending", "processed", "dead")
     for number in range(rows):
         await _delivery(db, tenant.host, f"d{number}", statuses[number % 3], tenant.id)
@@ -155,6 +166,7 @@ async def test_the_step_clears_every_inventoried_table_in_batches_and_resumes_fr
         "access_grants": ROWS,
         "adapter_resources": ROWS,
         "scope_leases": ROWS,
+        "github_environments": ROWS,
         "tenant_repositories": ROWS,
         "webhook_bodies": ROWS,
     }
@@ -260,6 +272,7 @@ async def test_the_engine_runs_the_step_to_done_and_removes_the_tenant_row_last(
         "access_grants": ROWS,
         "adapter_resources": ROWS,
         "scope_leases": ROWS,
+        "github_environments": ROWS,
         "tenant_repositories": ROWS,
         "webhook_bodies": ROWS,
     }

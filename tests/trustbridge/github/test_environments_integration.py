@@ -19,7 +19,7 @@ from tests.trustbridge.tenancy.test_deletion_db_integration import (
     _admin_scalar,
     _alembic,
 )
-from tests.trustbridge.tenancy.test_rls_integration import RLS_ERROR, Db, _provision
+from tests.trustbridge.tenancy.test_rls_integration import OWNER_ROLE, RLS_ERROR, Db, _provision
 from trustbridge.adapters.interface import GitHubOutput
 from trustbridge.github.environments import SqlEnvironmentStore
 from trustbridge.github.writer import GitHubOutputWriter
@@ -43,6 +43,10 @@ def _hook() -> None:
 async def db() -> AsyncIterator[Db]:
     """A scratch database with RLS enabled and forced on the tenant tables."""
     async for provisioned in _provision(enforce=True):
+        async with provisioned.admin.begin() as conn:  # `_provision` enforces the six tables only
+            await conn.execute(text(f"ALTER TABLE github_environments OWNER TO {OWNER_ROLE}"))
+            await conn.execute(text("ALTER TABLE github_environments ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text("ALTER TABLE github_environments FORCE ROW LEVEL SECURITY"))
         yield provisioned
 
 
@@ -61,7 +65,7 @@ async def test_a_created_environment_is_recorded_and_a_found_one_is_not(db: Db, 
     script_repo(env)
     env.gh.route("GET", PATH, 404, {})
     env.gh.route("PUT", PATH, 200, {})
-    tenant = db.a
+    tenant = uuid4()
     store = SqlEnvironmentStore(db.app)
     writer = GitHubOutputWriter(env.gateway, store)
     scoped = type(env.tenant)(id=tenant, github_host=env.tenant.github_host, org="acme")

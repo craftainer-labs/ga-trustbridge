@@ -71,7 +71,6 @@ KEYED = (
     "adapter_resources",
     "adapter_credentials",
     "credential_operations",
-    "github_environments",
 )
 SIX = ("tenants", *KEYED)
 FUNCTIONS = (
@@ -104,10 +103,6 @@ INSERTS = {
         "INSERT INTO credential_operations "
         "(id, tenant_id, adapter, scope_key, kind, status, oidc_offered) "
         "VALUES (gen_random_uuid(), :t, 'a', :k, 'issue', 'pending', false)"
-    ),
-    "github_environments": (
-        "INSERT INTO github_environments (tenant_id, host, repository_id, environment_name) "
-        "VALUES (:t, 'tb.test', :n, :k)"
     ),
 }
 ROLES_SQL = """
@@ -562,7 +557,7 @@ async def test_rls_is_forced_and_the_owner_with_its_policy_still_reads_everythin
         db,
         "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class "
         "WHERE relname IN ('tenants', 'tenant_repositories', 'scope_leases', 'adapter_resources', "
-        "'adapter_credentials', 'credential_operations', 'github_environments') AND relkind = 'r'",
+        "'adapter_credentials', 'credential_operations') AND relkind = 'r'",
     )
     assert sorted(r.relname for r in flags) == sorted(SIX)
     assert all(r.relrowsecurity and r.relforcerowsecurity for r in flags)
@@ -690,7 +685,7 @@ async def test_the_release_n_schema_has_policies_but_rls_is_off_so_nothing_is_fi
         db,
         "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class "
         "WHERE relname IN ('tenants', 'tenant_repositories', 'scope_leases', 'adapter_resources', "
-        "'adapter_credentials', 'credential_operations', 'github_environments') AND relkind = 'r'",
+        "'adapter_credentials', 'credential_operations') AND relkind = 'r'",
     )
     assert sorted(r.relname for r in flags) == sorted(SIX)
     assert not any(r.relrowsecurity or r.relforcerowsecurity for r in flags)
