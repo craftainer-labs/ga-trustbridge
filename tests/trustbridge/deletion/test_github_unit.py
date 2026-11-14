@@ -193,11 +193,37 @@ async def test_a_gone_installation_with_only_outputs_omits_the_environment_entry
     ]
 
 
-async def test_a_failing_installation_lookup_is_transient() -> None:
-    """GitHub down or the host not ready: the error reaches the engine, nothing is removed."""
-    port = FakePort(outs=[_out("S1")], exists_error=RuntimeError("down"))
-    with pytest.raises(RuntimeError, match="down"):
+async def test_a_failing_installation_lookup_holds_with_the_class_name_only() -> None:
+    """GitHub down, rate limited or the host not ready: held and alerted, nothing is removed.
+
+    The message of the underlying error (which may carry GitHub's response text) is not copied.
+    """
+    port = FakePort(outs=[_out("S1")], exists_error=RuntimeError("secret-bearing text"))
+    with pytest.raises(GithubStepHeldError, match="RuntimeError") as held:
         await GithubDeletionStep(port).run(_ctx())
+    assert "secret-bearing" not in str(held.value)
+    assert held.value.__cause__ is None
+    assert port.calls == ["installation"]
+
+
+@pytest.mark.parametrize("error", [LeaseLost(), RunBudgetExhausted(), NonRetryableError("x")])
+async def test_engine_signals_pass_through_the_installation_lookup(error: Exception) -> None:
+    """A lost lease, a spent budget or a non-retryable error is not a hold."""
+    port = FakePort(outs=[_out("S1")], exists_error=error)
+    with pytest.raises(type(error)):
+        await GithubDeletionStep(port).run(_ctx())
+
+
+async def test_outputs_scoped_to_a_tracked_environment_are_settled_with_it() -> None:
+    """A recreated environment's same-named secret is never removed by name."""
+    scoped = GithubOutput("harbor", "scope", "secret", "FOO", 10, "prod")
+    port = FakePort(outs=[scoped, _out("LOOSE")], envs=[_env("prod")])
+    port.github_created["prod"] = ROW_TIME + CREATED_AT_SKEW + timedelta(seconds=1)
+    out = await GithubDeletionStep(port).run(_ctx())
+    assert "remove:FOO" not in port.calls
+    assert "remove:LOOSE" in port.calls
+    assert port.released == ["prod"] and port.deleted == []
+    assert out.skipped == [{"category": "environment_kept", "reason": "recreated", "count": 1}]
     assert len(port.outs) == 1
 
 

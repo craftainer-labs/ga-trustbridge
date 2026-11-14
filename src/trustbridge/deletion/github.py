@@ -170,9 +170,14 @@ class GithubDeletionStep:
         untracked = _untracked(await self._github.untracked_environments(record.tenant_id))
         if not outputs and not environments:
             return StepOutcome(skipped=untracked)
-        if not await self._github.installation_exists(record.host, record.installation_id):
+        if not await self._exists(ctx):
             return StepOutcome(skipped=[*_gone(outputs, environments), *untracked])
-        work: list[GithubOutput | TrackedEnvironment] = [*outputs, *environments]
+        # A secret or variable scoped to a tracked environment is settled with that environment:
+        # it goes with the environment, or the environment was recreated by a person and what is
+        # in it is theirs (a same-named secret must not be deleted by name).
+        tracked = {(e.repository_id, e.name) for e in environments}
+        loose = [o for o in outputs if (o.repository_id, o.environment) not in tracked]
+        work: list[GithubOutput | TrackedEnvironment] = [*loose, *environments]
         # Start where the engine's attempt count points (see the module docstring); the cursor
         # is not touched, because a changed cursor resets the attempts.
         start = record.attempts % len(work)
@@ -214,6 +219,22 @@ class GithubDeletionStep:
         return StepOutcome(
             counts=dict(counts), skipped=skipped, cursor={"handled": handled}, done=False
         )
+
+    async def _exists(self, ctx: StepContext) -> bool:
+        """The live installation check; any failure holds the step with the class name only."""
+        record = ctx.record
+        try:
+            return await self._github.installation_exists(record.host, record.installation_id)
+        except LeaseLost, RunBudgetExhausted, NonRetryableError:
+            raise
+        except Exception as error:
+            logger.warning(
+                "tenant deletion %s: installation lookup failed (%s)",
+                record.id,
+                type(error).__name__,
+            )
+            msg = f"the installation lookup failed ({type(error).__name__})"
+            raise GithubStepHeldError(msg) from None
 
     async def _handle(
         self, ctx: StepContext, item: GithubOutput | TrackedEnvironment, failures: Counter[str]

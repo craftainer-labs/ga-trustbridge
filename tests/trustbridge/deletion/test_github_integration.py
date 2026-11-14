@@ -308,3 +308,49 @@ async def test_a_vanished_credential_row_is_not_an_error(
         await session.execute(AdapterCredentialRow.__table__.delete())  # type: ignore[attr-defined]
     await rig.port.remove_output(rig.tenant, first)
     assert len(rig.writer.removed) == 1
+
+
+async def test_an_output_whose_repository_is_gone_is_cleared(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """A 404 from the repository lookup means nothing is left to remove: the entry is cleared."""
+    rig = Rig(sessions)
+    await rig.seed()
+    (first, *rest) = await rig.port.outputs(rig.tenant)
+    gone = OutputError("GitHub delete failed", retryable=False)
+    gone.__cause__ = GitHubApiError(404, "Not Found")
+    rig.writer.fail_remove = [gone]
+    await rig.port.remove_output(rig.tenant, first)
+    assert await rig.port.outputs(rig.tenant) == rest
+
+
+async def test_any_other_writer_error_leaves_the_output_recorded(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only a 404 is read as gone; a 5xx or a refusal keeps the entry for the next pass."""
+    rig = Rig(sessions)
+    await rig.seed()
+    before = await rig.port.outputs(rig.tenant)
+    failing = OutputError("GitHub delete failed", retryable=True)
+    failing.__cause__ = GitHubApiError(503, "down")
+    rig.writer.fail_remove = [failing]
+    with pytest.raises(OutputError):
+        await rig.port.remove_output(rig.tenant, before[0])
+    assert await rig.port.outputs(rig.tenant) == before
+
+
+async def test_releasing_an_environment_clears_the_outputs_scoped_to_it(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """Its secrets go with it (or are a person's after a recreation): never removed by name."""
+    rig = Rig(sessions)
+    await rig.seed()
+    scoped = {"kind": "secret", "name": "FOO", "repository_id": 10, "environment": "prod"}
+    async with sessions() as session, session.begin():
+        row = (await session.scalars(select(AdapterCredentialRow))).first()
+        assert row is not None
+        row.outputs = [*row.outputs, scoped]
+    (env,) = await rig.port.environments(rig.tenant)
+    await rig.port.release_environment(rig.tenant, env)
+    assert ("secret", "FOO") not in await rig.outputs()
+    assert ("environment", "legacy") in await rig.outputs()

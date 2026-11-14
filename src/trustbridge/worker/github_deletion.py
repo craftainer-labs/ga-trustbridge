@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters import codec
 from trustbridge.adapters.models import AdapterCredentialRow
-from trustbridge.adapters.store import DeliveredOutput, OutputWriter, TenantResolver
+from trustbridge.adapters.store import DeliveredOutput, OutputError, OutputWriter, TenantResolver
 from trustbridge.deletion.ports import GithubOutput, TrackedEnvironment, TrackedEnvironments
 from trustbridge.github.client import HTTP_NOT_FOUND, GitHubApiError
 from trustbridge.github.gateway import Call, TenantGateway, enc
@@ -85,7 +85,15 @@ class SqlGithubPort:
         delivered = DeliveredOutput(
             output.kind, output.name, output.repository_id, output.environment
         )
-        await self._writer.remove(tenant, [delivered])
+        try:
+            await self._writer.remove(tenant, [delivered])
+        except OutputError as exc:
+            # The writer already treats an absent secret as removed; a 404 that gets here is the
+            # repository itself (deleted, transferred or no longer visible): nothing is left on
+            # our side to remove, so the row's entry is cleared like any other.
+            cause = exc.__cause__
+            if not (isinstance(cause, GitHubApiError) and cause.status == HTTP_NOT_FOUND):
+                raise
         await self._clear(tenant_id, output.adapter, output.scope_key, lambda o: o == delivered)
 
     async def environments(self, tenant_id: UUID) -> Sequence[TrackedEnvironment]:
@@ -147,18 +155,23 @@ class SqlGithubPort:
                 raise
 
     async def release_environment(self, tenant_id: UUID, environment: TrackedEnvironment) -> None:
-        """Clear the environment's outputs from the credential rows, then forget its row."""
-        for adapter, scope_key, _ in await self._rows(tenant_id):
-            await self._clear(
-                tenant_id,
-                adapter,
-                scope_key,
-                lambda o: (
-                    o.kind == "environment"
-                    and o.repository_id == environment.repository_id
-                    and o.name == environment.name
-                ),
+        """Clear what the credential rows record for the environment, then forget its row.
+
+        That is its `environment` outputs and the secrets and variables scoped to it (they go
+        with the environment, or belong to a person's recreation of it and are not ours to
+        delete by name). Only rows with such an entry are locked.
+        """
+
+        def covered(o: DeliveredOutput) -> bool:
+            if o.repository_id != environment.repository_id:
+                return False
+            return o.environment == environment.name or (
+                o.kind == "environment" and o.name == environment.name
             )
+
+        for adapter, scope_key, outputs in await self._rows(tenant_id):
+            if any(covered(o) for o in outputs):
+                await self._clear(tenant_id, adapter, scope_key, covered)
         await self._environments.forget(tenant_id, environment.repository_id, environment.name)
 
     async def _rows(self, tenant_id: UUID) -> list[tuple[str, str, tuple[DeliveredOutput, ...]]]:

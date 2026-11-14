@@ -122,7 +122,7 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    covers two clocks disagreeing); a later one was recreated by a person, is kept and recorded as
    `environment_kept` / `recreated`, and its row is forgotten; 404 counts as done. An environment the
    credential rows name that has no tracking row is never deleted and is recorded as
-   `environment_kept` / `untracked` (a count). Passes work like the platform step's (every remaining
+   `environment_kept` / `untracked` (a count). A secret or variable scoped to a tracked environment is settled with that environment (it goes with it, or belongs to a person's recreation and is never removed by name), and a 404 on the repository means nothing is left to remove. A failing installation lookup holds the step (class name only). Passes work like the platform step's (every remaining
    item once per pass, the start rotating by `attempts`, a hold only when all remaining items fail,
    class names only in diagnostics, the budget respected); counts are `github_outputs_removed` and
    `github_environments_removed`. Nothing outside the tracked outputs is touched.

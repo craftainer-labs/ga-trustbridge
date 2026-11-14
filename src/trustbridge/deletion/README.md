@@ -188,7 +188,7 @@ secret or variable through `GitHubOutputWriter.remove` and an environment throug
   forgotten. 404 counts as done. Releasing an environment clears its `environment` outputs from the
   credential rows, then forgets its row (in that order, so a repeat is harmless). The last pass
   records `environment_kept` / `untracked` (a count) for environments the credential rows name that
-  no row tracks; those are never deleted.
+  no row tracks; those are never deleted. Secrets and variables scoped to a tracked environment are not separate items: they are cleared from the rows with the environment (never removed by name from a recreated one). A failing installation lookup raises `GithubStepHeldError` (class name only).
 - **Pass semantics are the platform step's**: every remaining item (outputs, then environments) is
   tried once per pass, the start rotates by `record.attempts`, progress (cursor `handled`) resets the
   attempts, only a pass where every item failed raises `GithubStepHeldError` (class names and counts
