@@ -813,6 +813,10 @@ async def test_the_hardening_downgrade_refuses_a_drifted_body_and_changes_nothin
 ) -> None:
     """The downgrade restores only this revision's exact bodies."""
     async for scratch in _provision(enforce=False):
+        # 9a4d6c2e8b17 (NG6h-6a) replaced tb_delete_tenant after this revision: step off it first
+        # (its own guard has its own test); nothing else it changes is under test here.
+        stepped = await _alembic(scratch.name, "downgrade", "7b2d4f8a1c36")
+        assert stepped.returncode == 0, stepped.stderr[-2000:]
         await _drift(scratch, signature)
         refused = await _alembic(scratch.name, "downgrade", REVISION)
         assert refused.returncode != 0

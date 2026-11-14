@@ -187,3 +187,43 @@ async def test_an_n_minus_one_writer_records_nothing_and_the_table_stays_empty(
     scoped = type(env.tenant)(id=uuid4(), github_host=env.tenant.github_host, org="acme")
     await GitHubOutputWriter(env.gateway).apply(scoped, [ENVIRONMENT])
     assert await _rows(db, scoped.id) == []
+
+
+DELETE = "tb_delete_tenant(uuid, text, bigint)"
+DRIFTED = "SELECT prosrc LIKE '%-- drifted%' FROM pg_proc WHERE oid = CAST(:f AS regprocedure)"
+
+
+async def _drift(db: Db) -> None:
+    """Edit the live function the way a hotfix would: one comment inside its body."""
+    definition = await _admin_scalar(
+        db, "SELECT pg_get_functiondef(CAST(:f AS regprocedure))", {"f": DELETE}
+    )
+    async with db.admin.begin() as conn:
+        await conn.exec_driver_sql(definition.replace("\nBEGIN\n", "\nBEGIN\n    -- drifted\n", 1))
+
+
+async def test_the_delete_backstop_lists_the_table_and_both_guards_refuse_a_drifted_body() -> None:
+    """The new body names `github_environments`; a drifted body is refused up and down."""
+    async for scratch in _provision(enforce=False):
+        body = await _admin_scalar(
+            scratch,
+            "SELECT prosrc FROM pg_proc WHERE oid = CAST(:f AS regprocedure)",
+            {"f": DELETE},
+        )
+        assert body.count("'github_environments'") == 2  # before the delete and the re-check
+        await _drift(scratch)
+        refused = await _alembic(scratch.name, "downgrade", PREVIOUS)
+        assert refused.returncode != 0
+        assert f"{DELETE} is not the {REVISION} body" in refused.stderr
+        assert await _admin_scalar(scratch, DRIFTED, {"f": DELETE})  # nothing was restored
+        assert await _admin_scalar(scratch, "SELECT to_regclass('github_environments') IS NOT NULL")
+
+    async for scratch in _provision(enforce=False):
+        stepped = await _alembic(scratch.name, "downgrade", PREVIOUS)
+        assert stepped.returncode == 0, stepped.stderr[-2000:]
+        await _drift(scratch)
+        refused = await _alembic(scratch.name, "upgrade", REVISION)
+        assert refused.returncode != 0
+        assert f"{DELETE} is not the 6f3b9d2e4a85 body" in refused.stderr
+        assert await _admin_scalar(scratch, DRIFTED, {"f": DELETE})
+        assert await _admin_scalar(scratch, "SELECT to_regclass('github_environments') IS NULL")
