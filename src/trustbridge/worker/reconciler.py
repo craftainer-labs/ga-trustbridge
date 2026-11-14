@@ -489,10 +489,11 @@ class Reconciler:
             beat.register(name, limit)
         if self._d.audit_sessions is None:
             logger.info("audit purge disabled: no audit store")
+        # `audit_sessions` is None only in mock mode (no database); with a database a missing
+        # engine or purger is a wrong entry point (the chart runs `python -m
+        # trustbridge.reconciler`), so deletion requests would stay pending: say so loudly.
+        report = logger.info if self._d.audit_sessions is None else logger.warning
         if self._d.deletion is None:
-            # With a database this is a wrong entry point (the chart runs `python -m
-            # trustbridge.reconciler`), not mock mode: deletion requests would stay pending.
-            report = logger.info if self._d.audit_sessions is None else logger.warning
             report(
                 "tenant deletion disabled: no deletion engine"
                 " (run the reconciler as `python -m trustbridge.reconciler`)"
@@ -502,7 +503,6 @@ class Reconciler:
         elif not (s.tenant_reconcile_enabled and self._d.tenant_reconciler is not None):
             logger.info("tenant reconcile requests stay pending: no reconcile body is enabled")
         if self._d.record_purger is None:
-            report = logger.info if self._d.audit_sessions is None else logger.warning
             report("deletion record purge disabled: no record purger")
         await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop
         jobs = [periodic(name, interval, job, stop, beat.beat) for name, interval, job in schedule]

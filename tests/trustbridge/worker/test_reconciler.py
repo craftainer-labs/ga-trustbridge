@@ -437,6 +437,7 @@ async def test_run_schedules_tenant_deletion_with_a_limit_covering_its_lease_bud
         await recon.run(stop)
     assert beat._limits["tenant-deletion"] == h.settings.deletion_poll_seconds + 600
     assert caplog.text.count("tenant deletion disabled: no deletion engine") == 1
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]  # mock mode: INFO only
 
 
 async def test_run_logs_nothing_about_deletion_when_a_driver_is_present(

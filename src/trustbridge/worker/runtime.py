@@ -205,7 +205,8 @@ class ProcessOverrides:
     checker: HostChecker | None = None
     stop: asyncio.Event | None = None
     deletion: DeletionDriver | None = None  # the reconciler's tenant deletion engine (tests)
-    composer: DeletionComposer | None = None  # builds the engine and the record purger
+    # builds the engine and the record purger; not called when `deletion` is set (tests)
+    composer: DeletionComposer | None = None
     tenant_reconciler: TenantReconciler | None = None  # the reconciler's tenant reconcile body
 
 
