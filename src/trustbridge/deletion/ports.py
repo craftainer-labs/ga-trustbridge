@@ -7,7 +7,7 @@ no engine code (ADR 0034).
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 
 class DeletionDriver(Protocol):
@@ -46,3 +46,18 @@ class RecordPurger(Protocol):
     async def purge(self, on_batch: Callable[[int], None] | None = None) -> PurgeResult:
         """Run bounded batches; `on_batch(purged)` is called after each committed batch."""
         ...
+
+
+ItemKind = Literal["credential", "webhook", "repository", "project"]
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformItem:
+    """One recorded platform-side thing: a credential scope or a resource row.
+
+    `key` is the scope key (credential) or the resource's own key (webhook, repository, project).
+    """
+
+    kind: ItemKind
+    adapter: str
+    key: str

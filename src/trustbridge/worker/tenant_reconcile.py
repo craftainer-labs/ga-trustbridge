@@ -40,6 +40,7 @@ from trustbridge.adapters.core import (
     TenantDisabledError,
 )
 from trustbridge.adapters.interface import AdapterError, PlatformAdapter
+from trustbridge.adapters.resources import ResourceCore
 from trustbridge.adapters.sql_store import SqlCredentialStore
 from trustbridge.adapters.store import CredentialStore, LeaseLostError, TenantResolver
 from trustbridge.audit.actions import SystemActor
@@ -48,6 +49,7 @@ from trustbridge.audit.emit import AuditWriter
 from trustbridge.github.writer import GitHubEnvironmentInspector, GitHubOutputWriter
 from trustbridge.tenancy.gate import SqlTenantGate
 from trustbridge.worker.lease import LeaseBusy, LeaseLost
+from trustbridge.worker.platform_deletion import SqlPlatformPort
 from trustbridge.worker.reconcile_queue import Extend
 
 if TYPE_CHECKING:  # runtime imports this module to compose the body
@@ -194,6 +196,29 @@ class CredentialReconciler:
         return 0
 
 
+def _core_deps(
+    core: Core,
+    sessions: async_sessionmaker[AsyncSession],
+    classes: Mapping[str, type[PlatformAdapter]],
+) -> tuple[CoreDeps, SqlCredentialStore]:
+    """The adapter core's collaborators for the reconciler process, and its credential store."""
+    observer = CredentialAuditObserver(AuditWriter(sessions), SystemActor.RECONCILER)
+    store = SqlCredentialStore(sessions, observer)
+    gateway = core.runtime.gateway
+    deps = CoreDeps(
+        registry=AdapterRegistry(classes, core.connections),
+        store=store,
+        values=core.parked,
+        leases=core.leases,
+        writer=GitHubOutputWriter(gateway),
+        inspector=GitHubEnvironmentInspector(gateway),
+        tenants=core.tenants,
+        orphans=observer,
+        gate=SqlTenantGate(sessions),
+    )
+    return deps, store
+
+
 def build_tenant_reconciler(
     core: Core,
     sessions: async_sessionmaker[AsyncSession] | None,
@@ -209,18 +234,23 @@ def build_tenant_reconciler(
     """
     if sessions is None:
         return None
-    observer = CredentialAuditObserver(AuditWriter(sessions), SystemActor.RECONCILER)
-    store = SqlCredentialStore(sessions, observer)
-    gateway = core.runtime.gateway
-    deps = CoreDeps(
-        registry=AdapterRegistry(classes, core.connections),
-        store=store,
-        values=core.parked,
-        leases=core.leases,
-        writer=GitHubOutputWriter(gateway),
-        inspector=GitHubEnvironmentInspector(gateway),
-        tenants=core.tenants,
-        orphans=observer,
-        gate=SqlTenantGate(sessions),
-    )
+    deps, store = _core_deps(core, sessions, classes)
     return CredentialReconciler(CredentialCore(deps), store, core.tenants, sorted(classes))
+
+
+def build_platform_port(
+    core: Core,
+    sessions: async_sessionmaker[AsyncSession] | None,
+    classes: Mapping[str, type[PlatformAdapter]],
+) -> SqlPlatformPort | None:
+    """The tenant deletion's platform port (NG6h-5), or None without a database.
+
+    The same collaborators as `build_tenant_reconciler` (one `_core_deps`), with a `ResourceCore`
+    beside the `CredentialCore`; the composition root (NG6h-7) hands it to `AdapterPlatformStep`.
+    The registry reads each tenant's connection data, so an adapter that is not enabled, or a
+    tenant without its connection data, makes that item's removal fail (and the step retry).
+    """
+    if sessions is None:
+        return None
+    deps, store = _core_deps(core, sessions, classes)
+    return SqlPlatformPort(sessions, store, core.tenants, CredentialCore(deps), ResourceCore(deps))

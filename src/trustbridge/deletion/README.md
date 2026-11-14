@@ -5,7 +5,7 @@ the state machine, the lease and fence loop, the failure policy, the drain step 
 events. The database half is migration `5d7a2c8e1b94` (`tenancy/README.md`). The reconciler duty
 (`worker/reconciler.py`, `tenant_deletion`), the `DELETION_*` settings, the B10 gate
 (`tenancy/gate.py`) and the [runbook](../../../docs/runbooks/tenant-deletion.md) are NG6h-4a-3; the
-three steps are filled by NG6h-4b (database), -5 (platform) and -6 (GitHub). Until then the steps are
+three steps are filled by NG6h-4b (database), -5 (platform, done) and -6 (GitHub). Until then the steps are
 Protocols and the tests use doubles, and nothing composes a `DeletionEngine` in a process: the
 reconciler runs the duty only when it is given a `DeletionDriver` (`ReconcilerDeps.deletion`,
 `ProcessOverrides.deletion`).
@@ -24,6 +24,7 @@ package and comes in NG6h-7, once 4b, 5 and 6 have landed.
 - `steps.py`: the `Step` Protocol and the slots `PlatformStep`, `GithubStep`, `DatabaseStep`, plus
   `WritersPort` for the drain.
 - `drain.py`: `DrainStep`.
+- `platform.py`: `AdapterPlatformStep`, the `PlatformStep` (NG6h-5), over `PlatformPort` and `ConnectionNamesPort`. See "The platform step" below.
 - `database.py`: `SqlDatabaseStep`, the `DatabaseStep` (NG6h-4b). See "The database step" below.
 - `store.py` / `sql.py`: `DeletionStore` and `SqlDeletionStore` over the definer functions.
 - `purge.py`: `SqlRecordPurger`, the `RecordPurger` over `tb_purge_tenant_deletions` (NG6h-3c-2). See "Record retention" below.
@@ -117,6 +118,39 @@ is left.
   secret word, so their counts take other names. A new tenant-keyed table is added to `database.PLAN`; an integration
   test fails when a table with a `tenant_id` column is in neither `PLAN` nor the retained set.
 - The batch size is a constructor argument; the composition root (NG6h-7) chooses it.
+
+## The platform step
+
+`AdapterPlatformStep(port, connections)` (NG6h-5). `PlatformItem` and `ItemKind` live in `ports.py` so
+the worker can build the port without importing the engine. The worker's `SqlPlatformPort`
+(`worker/platform_deletion.py`, composed by `build_platform_port` in `worker/tenant_reconcile.py`
+from the same collaborators as the reconcile body, plus a `ResourceCore`) is the real port.
+
+- **One item per pass**, in this order: credentials, webhooks, repositories, projects. The cursor is
+  `{"removed": n}`, which changes every pass (so the engine resets the attempts, as 4b does). The
+  list comes from the recorded rows only (`adapter_credentials` rows that still hold a credential,
+  `adapter_resources` rows) and is re-read on every pass: a restart converges, nothing unrecorded is
+  ever removed, and a credential row left with no credential is not listed again.
+- **Credentials** go through `CredentialCore.delete_scope(tenant, adapter, scope, deletion_id=<the
+  deletion's id>, remove_outputs=False)`: write-ahead, under the adapter lease, admitted by the B10
+  gate for this deletion only. `remove_outputs=False` leaves the GitHub outputs recorded for the
+  GitHub step and makes no GitHub call. **Resources** go through `ResourceCore.delete` (no gate,
+  not write-ahead: the adapter's `delete` is idempotent).
+- **`delete_platform_resources`** (user decision 1): repositories and projects are removed only
+  when the record's flag is set; otherwise they are listed in the last pass as
+  `skipped` `platform_repositories` / `platform_projects` with reason `kept_by_request`.
+- **Operator-owned connection data** (user decision 4; the Argo CD token belongs here): the last
+  pass records one `skipped` entry per adapter name found under `store:tenants/<uuid>/`
+  (`operator_owned_connections`, reason `operator_owned`, `adapter`, `count` 1). Only names are
+  read, through the secret store's listing; nothing is logged. The audit event carries category,
+  reason and count only (`adapter` is in the record's `skipped`, not the event).
+- **Failures** are the engine's (transient: retry with backoff, the attempts alert, held in
+  `platform`; `failed` only for a `NonRetryableError`, which this step never raises). Blocking
+  cases: the platform is down; the adapter is not enabled in this process or the tenant has no
+  connection data for it (the registry cannot open it); a delete leaves an operation waiting for a
+  manual action (`PlatformDeleteIncompleteError`); an `adapter_resources` key of an unknown kind
+  (`UnknownResourceKindError`). The operator fixes the cause or acknowledges it with `skip-step`.
+- Counts after a crash between a removal and the saved cursor miss that one item (a lower bound).
 
 ## Audit (ADR 0034 "The audit trail", inv. 12, 14)
 
