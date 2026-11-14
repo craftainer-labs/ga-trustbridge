@@ -53,10 +53,6 @@ class GitHubOutputWriter:
             ) from exc
         except HostNotReadyError as exc:
             raise OutputError(str(exc), retryable=True) from exc
-        except SQLAlchemyError as exc:  # recording a created environment failed
-            raise OutputError(
-                f"recording a created environment failed ({type(exc).__name__})", retryable=True
-            ) from exc
 
     async def remove(self, tenant: Tenant, outputs: Sequence[DeliveredOutput]) -> None:
         """Delete secrets and variables; absent is fine.
@@ -145,9 +141,17 @@ class GitHubOutputWriter:
             # After the PUT: a crash in between leaves a created but untracked environment, which
             # is kept (never deleted), the safe direction. A row is never written for an
             # environment this writer did not create.
-            await self._environments.record_created(
-                tenant.id, tenant.github_host.name, out.repository_id, out.name
-            )
+            try:
+                await self._environments.record_created(
+                    tenant.id, tenant.github_host.name, out.repository_id, out.name
+                )
+            except SQLAlchemyError as exc:
+                # Retryable: the remaining outputs still need applying (the environment itself
+                # stays untracked, hence kept). The message carries the class name only.
+                raise OutputError(
+                    f"recording a created environment failed ({type(exc).__name__})",
+                    retryable=True,
+                ) from exc
 
     async def _is_absent(self, tenant: Tenant, path: str, ids: list[int]) -> bool:
         """True when the environment does not exist yet (`GET` answers 404)."""
