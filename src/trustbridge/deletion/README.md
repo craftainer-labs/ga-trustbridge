@@ -126,11 +126,18 @@ the worker can build the port without importing the engine. The worker's `SqlPla
 (`worker/platform_deletion.py`, composed by `build_platform_port` in `worker/tenant_reconcile.py`
 from the same collaborators as the reconcile body, plus a `ResourceCore`) is the real port.
 
-- **One item per pass**, in this order: credentials, webhooks, repositories, projects. The cursor is
-  `{"removed": n}`, which changes every pass (so the engine resets the attempts, as 4b does). The
-  list comes from the recorded rows only (`adapter_credentials` rows that still hold a credential,
-  `adapter_resources` rows) and is re-read on every pass: a restart converges, nothing unrecorded is
-  ever removed, and a credential row left with no credential is not listed again.
+- **A pass tries every recorded item once**, in this order: credentials, webhooks, repositories,
+  projects (NG6h-5b). An item that fails is skipped for the rest of the pass and the pass moves on,
+  so one stuck item never holds up the ones behind it. A project is never tried while one of its
+  repositories (`<project>/<repo>`, same adapter) remains. A pass stops after `MAX_TRIES_PER_PASS`
+  (50) tries, or when `ctx.renew` raises `RunBudgetExhausted` (what was removed is still reported;
+  with failures and nothing removed the step holds, so the attempt is counted; with neither the
+  exception goes to the engine). A pass starts at item `attempts % len(items)` and wraps, so items
+  that keep failing at the head cannot starve the ones behind them across retries. The cursor is `{"removed": n}` and
+  changes only when something was removed, so the engine resets the attempts exactly on progress.
+  The list comes from the recorded rows only (`adapter_credentials` rows that still hold a
+  credential, `adapter_resources` rows) and is re-read on every pass: a restart converges, nothing
+  unrecorded is ever removed, and a credential row left with no credential is not listed again.
 - **Credentials** go through `CredentialCore.delete_scope(tenant, adapter, scope, deletion_id=<the
   deletion's id>, remove_outputs=False)`: write-ahead, under the adapter lease, admitted by the B10
   gate for this deletion only. `remove_outputs=False` leaves the GitHub outputs recorded for the
@@ -144,13 +151,16 @@ from the same collaborators as the reconcile body, plus a `ResourceCore`) is the
   (`operator_owned_connections`, reason `operator_owned`, `adapter`, `count` 1). Only names are
   read, through the secret store's listing; nothing is logged. The audit event carries category,
   reason and count only (`adapter` is in the record's `skipped`, not the event).
-- **Failures** are the engine's (transient: retry with backoff, the attempts alert, held in
-  `platform`; `failed` only for a `NonRetryableError`, which this step never raises). Blocking
-  cases: the platform is down; the adapter is not enabled in this process or the tenant has no
+- **Failures** are the engine's. Each failed item is logged by exception class only (no message,
+  key or value). When every remaining item failed in a pass the step raises `PlatformStepHeldError`
+  (counts and class names): retry with backoff, the attempts alert, held in `platform`. A
+  `NonRetryableError` from the port is not an item failure: it propagates and the engine writes
+  `failed` (the port does not raise one today). Blocking cases: the platform is down; the adapter is not enabled in this process or the tenant has no
   connection data for it (the registry cannot open it); a delete leaves an operation waiting for a
   manual action (`PlatformDeleteIncompleteError`); an `adapter_resources` key of an unknown kind
   (`UnknownResourceKindError`). The operator fixes the cause or acknowledges it with `skip-step`.
-- Counts after a crash between a removal and the saved cursor miss that one item (a lower bound).
+- Counts are saved when a pass ends, so after a crash they miss that pass's removals, at most
+  `MAX_TRIES_PER_PASS` items (a lower bound).
 
 ## Audit (ADR 0034 "The audit trail", inv. 12, 14)
 
