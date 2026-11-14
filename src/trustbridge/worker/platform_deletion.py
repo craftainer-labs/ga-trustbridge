@@ -100,18 +100,22 @@ class SqlPlatformPort:
         return items
 
     async def remove(self, tenant_id: UUID, deletion_id: UUID, item: PlatformItem) -> None:
-        """Delete `item` through its core; raise unless it is gone."""
+        """Delete `item` through its core; raise unless it is gone.
+
+        The whole call runs in the tenant's context, so every row read and write of the cores
+        (the credential and resource rows, the lease and operation rows) is scoped to it.
+        """
         tenant = await self._tenants.get_tenant(tenant_id)
-        if item.kind != "credential":
-            await self._resources.delete(tenant, item.adapter, item.kind, item.key)
-            return
         with tenant_context(tenant_id):
+            if item.kind != "credential":
+                await self._resources.delete(tenant, item.adapter, item.kind, item.key)
+                return
             stored = await self._store.get_credential(tenant_id, item.adapter, item.key)
-        if stored is None:
-            return
-        result = await self._credentials.delete_scope(
-            tenant, item.adapter, stored.scope, deletion_id=deletion_id, remove_outputs=False
-        )
+            if stored is None:
+                return
+            result = await self._credentials.delete_scope(
+                tenant, item.adapter, stored.scope, deletion_id=deletion_id, remove_outputs=False
+            )
         if result.status not in {None, OperationStatus.FINISHED}:
             raise PlatformDeleteIncompleteError(
                 f"adapter {item.adapter}: delete is {result.status.value if result.status else ''}"

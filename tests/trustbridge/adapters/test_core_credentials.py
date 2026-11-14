@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import timedelta
 
+import pytest
 from pydantic import SecretStr
 
 from tests.trustbridge.adapters.conftest import (
@@ -13,9 +14,10 @@ from tests.trustbridge.adapters.conftest import (
     build_world,
     make_tenant,
 )
+from trustbridge.adapters.core import RetryableOperationError
 from trustbridge.adapters.fake import fake_capabilities
 from trustbridge.adapters.interface import ChangeState, credential_name, scope_key
-from trustbridge.adapters.store import OperationStatus, ScopeId
+from trustbridge.adapters.store import OperationStatus, OutputError, ScopeId
 
 
 def _name(world: World, scope_id_key: str, generation: int) -> str:
@@ -222,3 +224,30 @@ async def test_delete_scope_without_outputs_keeps_them_for_the_github_step(
     assert after.outputs == outputs
     again = await w.core.delete_scope(w.tenant, "fake", PUSH_PROD, remove_outputs=False)
     assert again.change is ChangeState.UNCHANGED
+
+
+async def test_a_delete_left_open_without_the_flag_finishes_keeping_outputs(
+    secret_world: World,
+) -> None:
+    """The flag belongs to the call: resuming a delete opened by an ordinary delete keeps outputs.
+
+    An admin delete whose GitHub output removal failed leaves its operation open. The tenant
+    deletion's call then resumes it with `remove_outputs=False`; the outputs stay recorded for
+    the GitHub step and GitHub is not called again.
+    """
+    w = secret_world
+    await w.core.ensure_scope(w.tenant, "fake", PUSH_PROD)
+    (stored,) = await w.store.list_credentials(w.tenant.id, "fake")
+    outputs = stored.outputs
+    w.writer.fail_remove = [OutputError("GitHub 502")]
+    with pytest.raises(RetryableOperationError):
+        await w.core.delete_scope(w.tenant, "fake", PUSH_PROD)
+    assert await w.store.get_open_operation(w.tenant.id, "fake", stored.scope_key) is not None
+    w.writer.removed.clear()
+    await w.core.delete_scope(w.tenant, "fake", PUSH_PROD, remove_outputs=False)
+    assert await w.store.get_open_operation(w.tenant.id, "fake", stored.scope_key) is None
+    assert w.writer.removed == []
+    after = await w.store.get_credential(w.tenant.id, "fake", stored.scope_key)
+    assert after is not None
+    assert after.state.current is None
+    assert after.outputs == outputs
