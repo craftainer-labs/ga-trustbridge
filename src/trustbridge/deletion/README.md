@@ -5,7 +5,7 @@ the state machine, the lease and fence loop, the failure policy, the drain step 
 events. The database half is migration `5d7a2c8e1b94` (`tenancy/README.md`). The reconciler duty
 (`worker/reconciler.py`, `tenant_deletion`), the `DELETION_*` settings, the B10 gate
 (`tenancy/gate.py`) and the [runbook](../../../docs/runbooks/tenant-deletion.md) are NG6h-4a-3; the
-three steps are filled by NG6h-4b (database), -5 (platform, done) and -6 (GitHub). Until then the steps are
+three steps are filled by NG6h-4b (database), -5 (platform, done) and -6 (GitHub, done). Until then the steps are
 Protocols and the tests use doubles, and nothing composes a `DeletionEngine` in a process: the
 reconciler runs the duty only when it is given a `DeletionDriver` (`ReconcilerDeps.deletion`,
 `ProcessOverrides.deletion`).
@@ -25,6 +25,7 @@ package and comes in NG6h-7, once 4b, 5 and 6 have landed.
   `WritersPort` for the drain.
 - `drain.py`: `DrainStep`.
 - `platform.py`: `AdapterPlatformStep`, the `PlatformStep` (NG6h-5), over `PlatformPort` and `ConnectionNamesPort`. See "The platform step" below.
+- `github.py`: `GithubDeletionStep`, the `GithubStep` (NG6h-6), over `GithubPort`. See "The GitHub step" below.
 - `database.py`: `SqlDatabaseStep`, the `DatabaseStep` (NG6h-4b). See "The database step" below.
 - `store.py` / `sql.py`: `DeletionStore` and `SqlDeletionStore` over the definer functions.
 - `purge.py`: `SqlRecordPurger`, the `RecordPurger` over `tb_purge_tenant_deletions` (NG6h-3c-2). See "Record retention" below.
@@ -162,6 +163,41 @@ from the same collaborators as the reconcile body, plus a `ResourceCore`) is the
 - Counts are saved when a pass ends, so after a crash they miss that pass's removals, at most
   `MAX_TRIES_PER_PASS` items (a lower bound).
 
+## The GitHub step
+
+`GithubDeletionStep(port)` (NG6h-6, ADR 0034 step 3, decisions B6 and B9). `GithubOutput` and
+`TrackedEnvironment` live in `ports.py`; the worker's `SqlGithubPort` (`worker/github_deletion.py`,
+composed by `build_github_port` in `worker/tenant_reconcile.py`) is the real port: it removes a
+secret or variable through `GitHubOutputWriter.remove` and an environment through the tenant gateway
+(an installation token down-scoped to the repository and permission).
+
+- **The installation is checked first, live** (`GET /app/installations/{id}` with the App JWT, 404 =
+  gone; a suspended installation still exists). Gone: the step makes no other GitHub call and no
+  write, records `github_outputs` and `github_environments` skipped entries with reason
+  `installation_gone` (counts only, never a name or id) and finishes. The rows stay for the database
+  step. With nothing recorded there is no call at all. A failing lookup is transient (retry, alert).
+- **What it removes** is what the rows record: the secrets and variables in the credential rows'
+  `outputs` (the platform step leaves them there, `remove_outputs=False`), then the tracked
+  environments. Each removed output is cleared from its row right after the GitHub call (absent on
+  GitHub is fine), so a crash repeats an idempotent call and converges.
+- **Environments (B6).** Only a row of `github_environments` is ever deleted. GitHub's `created_at`
+  is read first: later than the row's plus `CREATED_AT_SKEW` (5 minutes: the row is written after the
+  `PUT` from the database clock, so only clock disagreement matters; a margin that is too small keeps
+  our own environment, one that is too large deletes a recreated one, so it is no larger than a
+  GHES clock drift needs) means someone recreated it: kept, `environment_kept` / `recreated`, row
+  forgotten. 404 counts as done. Releasing an environment clears its `environment` outputs from the
+  credential rows, then forgets its row (in that order, so a repeat is harmless). The last pass
+  records `environment_kept` / `untracked` (a count) for environments the credential rows name that
+  no row tracks; those are never deleted.
+- **Pass semantics are the platform step's**: every remaining item (outputs, then environments) is
+  tried once per pass, the start rotates by `record.attempts`, progress (cursor `handled`) resets the
+  attempts, only a pass where every item failed raises `GithubStepHeldError` (class names and counts
+  only; the engine retries, backs off and alerts), the run budget and `LeaseLost` are respected and
+  `NonRetryableError` propagates. At most 50 items are tried per pass. Counts are
+  `github_outputs_removed` and `github_environments_removed` (a different name from the database
+  step's `github_environments`, which counts rows). A crash can lose the counts and the
+  `recreated` entry of the pass it interrupted.
+
 ## Audit (ADR 0034 "The audit trail", inv. 12, 14)
 
 `tenant.deletion.step` (one per completed step; `counts` are cumulative), `.skipped` (one per skipped
@@ -230,7 +266,7 @@ hands it to `ReconcilerDeps.record_purger`, and with none the duty does nothing.
 
 `github_environments` (migration `9a4d6c2e8b17`) holds the environments the GitHub writer created itself; the
 `database.PLAN` clears it (count `github_environments`) after the GitHub step has deleted them. `ports.TrackedEnvironments`
-(`tracked(tenant_id) -> [(repository_id, name)]`, `forget(tenant_id, repository_id, name)`) is what NG6h-6 uses: delete the
+(`tracked(tenant_id) -> [(repository_id, name)]`, `tracked_since(tenant_id)`, which adds each row's `created_at`, and `forget(tenant_id, repository_id, name)`) is what the GitHub step (NG6h-6) uses: delete the
 listed environments, `forget` each once it is gone (or already absent), and record every environment in an output that is
 not listed as `environment_kept`. The app role holds `SELECT, INSERT, DELETE` and `UPDATE (created_at)` on it, which is
 enough for the step's `FOR UPDATE SKIP LOCKED` batches. `tb_delete_tenant`'s emptiness backstop lists the table too (migration `9a4d6c2e8b17` replaces its

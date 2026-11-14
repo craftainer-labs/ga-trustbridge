@@ -107,6 +107,10 @@ async def test_tracked_lists_the_tenants_rows_and_forget_removes_one(db: Db) -> 
         await store.record_created(a, "tb.test", repo, name)
     await store.record_created(b, "tb.test", 3, "dev")
     assert await store.tracked(a) == [(3, "dev"), (3, "stage"), (9, "prod")]
+    since = await store.tracked_since(a)
+    assert [(r, n) for r, n, _ in since] == await store.tracked(a)
+    assert all(created.tzinfo is not None for _, _, created in since)
+    assert await store.tracked_since(uuid4()) == []
     await store.forget(a, 3, "dev")
     await store.forget(a, 3, "dev")
     assert await store.tracked(a) == [(3, "stage"), (9, "prod")]

@@ -47,8 +47,10 @@ from trustbridge.audit.actions import SystemActor
 from trustbridge.audit.credentials import CredentialAuditObserver
 from trustbridge.audit.emit import AuditWriter
 from trustbridge.github.environments import SqlEnvironmentStore
+from trustbridge.github.installations import AppInstallationLookup
 from trustbridge.github.writer import GitHubEnvironmentInspector, GitHubOutputWriter
 from trustbridge.tenancy.gate import SqlTenantGate
+from trustbridge.worker.github_deletion import SqlGithubPort
 from trustbridge.worker.lease import LeaseBusy, LeaseLost
 from trustbridge.worker.platform_deletion import SqlPlatformPort
 from trustbridge.worker.reconcile_queue import Extend
@@ -255,3 +257,28 @@ def build_platform_port(
         return None
     deps, store = _core_deps(core, sessions, classes)
     return SqlPlatformPort(sessions, store, core.tenants, CredentialCore(deps), ResourceCore(deps))
+
+
+def build_github_port(
+    core: Core,
+    sessions: async_sessionmaker[AsyncSession] | None,
+    classes: Mapping[str, type[PlatformAdapter]],
+) -> SqlGithubPort | None:
+    """The tenant deletion's GitHub port (NG6h-6), or None without a database.
+
+    The same writer, gateway and environment store as the reconciler's core (one `_core_deps`),
+    and an App-JWT installation lookup over the host runtime's monitor and signers; the
+    composition root (NG6h-7) hands it to `GithubDeletionStep`.
+    """
+    if sessions is None:
+        return None
+    deps, _ = _core_deps(core, sessions, classes)
+    runtime = core.runtime
+    return SqlGithubPort(
+        sessions=sessions,
+        tenants=core.tenants,
+        writer=deps.writer,
+        gateway=runtime.gateway,
+        environments=SqlEnvironmentStore(sessions),
+        installations=AppInstallationLookup(runtime.monitor, runtime.signers),
+    )

@@ -7,6 +7,7 @@ enforced. The same class is the writer's `EnvironmentTracker` and, structurally,
 """
 
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
@@ -50,6 +51,24 @@ class SqlEnvironmentStore:
             async with self._sf() as session:
                 return [
                     (row.repository_id, row.environment_name)
+                    for row in await session.execute(query)
+                ]
+
+    async def tracked_since(self, tenant_id: UUID) -> Sequence[tuple[int, str, datetime]]:
+        """As `tracked`, with each row's `created_at` (the deletion's recreation guard)."""
+        query = (
+            select(
+                GitHubEnvironmentRow.repository_id,
+                GitHubEnvironmentRow.environment_name,
+                GitHubEnvironmentRow.created_at,
+            )
+            .where(GitHubEnvironmentRow.tenant_id == tenant_id)
+            .order_by(GitHubEnvironmentRow.repository_id, GitHubEnvironmentRow.environment_name)
+        )
+        with tenant_context(tenant_id):
+            async with self._sf() as session:
+                return [
+                    (row.repository_id, row.environment_name, row.created_at)
                     for row in await session.execute(query)
                 ]
 

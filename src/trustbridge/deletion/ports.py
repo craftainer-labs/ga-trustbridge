@@ -7,6 +7,7 @@ no engine code (ADR 0034).
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, Protocol
 from uuid import UUID
 
@@ -76,6 +77,35 @@ class TrackedEnvironments(Protocol):
         """The tenant's tracked environments as `(repository_id, name)`, in key order."""
         ...
 
+    async def tracked_since(self, tenant_id: UUID) -> Sequence[tuple[int, str, datetime]]:
+        """As `tracked`, with each row's `created_at` (NG6h-6's recreation guard)."""
+        ...
+
     async def forget(self, tenant_id: UUID, repository_id: int, name: str) -> None:
         """Remove one row once its environment is deleted (or already gone); absent is fine."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class GithubOutput:
+    """One recorded GitHub secret or variable: an entry of a credential row's `outputs`.
+
+    Names and ids only (never a value). `adapter` and `scope_key` say which credential row records
+    it, so the entry can be cleared from that row once it is removed from GitHub.
+    """
+
+    adapter: str
+    scope_key: str
+    kind: Literal["secret", "variable"]
+    name: str
+    repository_id: int | None
+    environment: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TrackedEnvironment:
+    """An environment trustbridge created (a `github_environments` row) and when it did."""
+
+    repository_id: int
+    name: str
+    created_at: datetime

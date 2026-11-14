@@ -29,8 +29,9 @@ The GitHub core ([ADR 0028](../../../docs/adrs/0028-trustbridge-architecture-and
   refreshes `created_at`. Without a tracker (the previous release) the writer does the `PUT` alone and
   records nothing, so N-1 writers leave environments untracked and therefore kept. The table is
   tenant-scoped (`tenant_isolation`, inert until release N+1 like the other tenant tables); the app role
-  has `SELECT, INSERT, DELETE` and `UPDATE (created_at)` only. `tracked(tenant_id)` and
-  `forget(tenant_id, repository_id, name)` are NG6h-6's calls (the `TrackedEnvironments` port in
+  has `SELECT, INSERT, DELETE` and `UPDATE (created_at)` only. `tracked(tenant_id)`,
+  `tracked_since(tenant_id)` (the same with `created_at`, for the recreation guard) and
+  `forget(tenant_id, repository_id, name)` are the GitHub deletion step's calls (the `TrackedEnvironments` port in
   `deletion/ports.py`; the packages do not import each other). The database step also clears a
   tenant's rows. Both composition roots (`admin/credentials.py`, `worker/tenant_reconcile.py`) pass the store
   to the writer. `github_environments` is also in `tenancy.role_check.RLS_TABLES`.
