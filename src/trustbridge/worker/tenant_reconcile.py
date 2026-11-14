@@ -21,6 +21,7 @@ when the claim is gone it raises `ClaimLostError` and the body stops before that
 step fails does not stop the others; the body raises `ReconcileIncompleteError` at the end so the
 request is retried after the claim TTL, up to `TENANT_RECONCILE_MAX_ATTEMPTS` times. The parked
 sweep is the exception: its failure is only logged (see `_sweep_parked`).
+"""
 
 import logging
 import time
