@@ -32,7 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 logger = logging.getLogger(__name__)
 
 ROLE_CHECK_NAME = "role_safety"
-# The six tenant-owned tables plus 0032's `audit_events`: "an RLS table" for this check.
+# The tenant-owned tables plus 0032's `audit_events` and NG6h-6a's `github_environments`: "an RLS
+# table" for this check.
 RLS_TABLES = (
     "tenants",
     "tenant_repositories",
@@ -40,6 +41,7 @@ RLS_TABLES = (
     "adapter_resources",
     "adapter_credentials",
     "credential_operations",
+    "github_environments",
     "audit_events",
 )
 # The schema the app's tables live in (the migrations create them unqualified, in `public`).

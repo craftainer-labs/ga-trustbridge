@@ -105,7 +105,8 @@ def test_the_check_is_skipped_while_no_rls_table_is_forced() -> None:
 def test_audit_events_counts_as_an_rls_table() -> None:
     """`audit_events` (ADR 0031 "seventh RLS table") is among the tables that arm the check."""
     assert "audit_events" in role_module.RLS_TABLES
-    assert len(role_module.RLS_TABLES) == 7
+    assert "github_environments" in role_module.RLS_TABLES  # NG6h-6a
+    assert len(role_module.RLS_TABLES) == 8
 
 
 def test_a_missing_table_is_unsafe_even_for_a_plain_role() -> None:

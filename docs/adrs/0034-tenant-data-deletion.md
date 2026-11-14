@@ -394,7 +394,9 @@ adapter fakes.
   crash or a failed write after the `PUT`, a release without the tracker (N-1), and an environment created
   before this migration are untracked. A row can also outlive its environment (someone deleted it and created their own of that name): NG6h-6
 should delete a tracked environment only when GitHub's `created_at` for it is not later than the row's. The table is in the database step's `PLAN` (count `github_environments`), so a
-  tenant's remaining rows go in step 5; `tb_delete_tenant`'s emptiness check does not list it.
+  tenant's remaining rows go in step 5, and `tb_delete_tenant`'s emptiness backstop lists it (migration
+  `9a4d6c2e8b17`, md5-guarded body replacement). The writer is wired in both composition roots, the
+  api's `build_runtime` and the reconciler's `_core_deps`.
 
 ## Consequences
 

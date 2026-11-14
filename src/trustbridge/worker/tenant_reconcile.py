@@ -46,6 +46,7 @@ from trustbridge.adapters.store import CredentialStore, LeaseLostError, TenantRe
 from trustbridge.audit.actions import SystemActor
 from trustbridge.audit.credentials import CredentialAuditObserver
 from trustbridge.audit.emit import AuditWriter
+from trustbridge.github.environments import SqlEnvironmentStore
 from trustbridge.github.writer import GitHubEnvironmentInspector, GitHubOutputWriter
 from trustbridge.tenancy.gate import SqlTenantGate
 from trustbridge.worker.lease import LeaseBusy, LeaseLost
@@ -210,7 +211,7 @@ def _core_deps(
         store=store,
         values=core.parked,
         leases=core.leases,
-        writer=GitHubOutputWriter(gateway),
+        writer=GitHubOutputWriter(gateway, SqlEnvironmentStore(sessions)),
         inspector=GitHubEnvironmentInspector(gateway),
         tenants=core.tenants,
         orphans=observer,

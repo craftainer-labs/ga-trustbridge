@@ -19,6 +19,7 @@ from trustbridge.adapters.core import (
 from trustbridge.adapters.fake import fake_capabilities
 from trustbridge.adapters.interface import AdapterError, IssuedSecret
 from trustbridge.adapters.store import OperationStatus, OutputError
+from trustbridge.github.environments import SqlEnvironmentStore
 from trustbridge.worker.lease import LeaseBusy
 from trustbridge.worker.platform_deletion import SqlPlatformPort
 from trustbridge.worker.reconcile_queue import ClaimLostError
@@ -242,6 +243,8 @@ def test_the_factory_composes_the_core_for_the_reconciler_only_with_a_database()
     body = build_tenant_reconciler(core, sessions, classes)
     assert isinstance(body, CredentialReconciler)
     assert body._adapters == ("a", "b")
+    # NG6h-6a: the writer records the environments it creates (ADR 0034 decision B6)
+    assert isinstance(cast("Any", body._core._d.writer)._environments, SqlEnvironmentStore)
 
 
 def test_the_platform_port_factory_needs_a_database() -> None:

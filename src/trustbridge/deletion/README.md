@@ -223,5 +223,5 @@ hands it to `ReconcilerDeps.record_purger`, and with none the duty does nothing.
 (`tracked(tenant_id) -> [(repository_id, name)]`, `forget(tenant_id, repository_id, name)`) is what NG6h-6 uses: delete the
 listed environments, `forget` each once it is gone (or already absent), and record every environment in an output that is
 not listed as `environment_kept`. The app role holds `SELECT, INSERT, DELETE` and `UPDATE (created_at)` on it, which is
-enough for the step's `FOR UPDATE SKIP LOCKED` batches. The `tb_delete_tenant` emptiness backstop does not list this table
-(changing that function needs its own guarded revision); the step itself is the only deleter.
+enough for the step's `FOR UPDATE SKIP LOCKED` batches. `tb_delete_tenant`'s emptiness backstop lists the table too (migration `9a4d6c2e8b17` replaces its
+body under an `md5(prosrc)` guard, before and after the delete).

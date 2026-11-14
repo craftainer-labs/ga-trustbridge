@@ -56,6 +56,7 @@ from trustbridge.audit.credentials import (
 from trustbridge.audit.redact import FailureReason, failure_after
 from trustbridge.github.availability import HostNotReadyError
 from trustbridge.github.client import GitHubApiError
+from trustbridge.github.environments import SqlEnvironmentStore
 from trustbridge.github.writer import GitHubEnvironmentInspector, GitHubOutputWriter
 from trustbridge.rbac import Principal
 from trustbridge.rbac.deps import client_ip, safe_request_id
@@ -279,7 +280,7 @@ def build_runtime(
         store=store,
         values=core.parked,
         leases=core.leases,
-        writer=GitHubOutputWriter(gateway),
+        writer=GitHubOutputWriter(gateway, SqlEnvironmentStore(sessions)),
         inspector=GitHubEnvironmentInspector(gateway),
         tenants=core.tenants,
         orphans=observer,

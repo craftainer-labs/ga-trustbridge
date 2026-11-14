@@ -32,8 +32,8 @@ The GitHub core ([ADR 0028](../../../docs/adrs/0028-trustbridge-architecture-and
   has `SELECT, INSERT, DELETE` and `UPDATE (created_at)` only. `tracked(tenant_id)` and
   `forget(tenant_id, repository_id, name)` are NG6h-6's calls (the `TrackedEnvironments` port in
   `deletion/ports.py`; the packages do not import each other). The database step also clears a
-  tenant's rows. The composition roots (`admin/credentials.py`, `worker/tenant_reconcile.py`) must pass the
-  store to the writer for tracking to be on.
+  tenant's rows. Both composition roots (`admin/credentials.py`, `worker/tenant_reconcile.py`) pass the store
+  to the writer. `github_environments` is also in `tenancy.role_check.RLS_TABLES`.
 - `checks.py`, `deployments.py` — check runs (scan results, manual-action notes) and deployments
   with statuses from Argo CD notifications. A static-header notification is only a trigger: state
   is re-read through the Argo CD adapter (`DeploymentStateSource`).
