@@ -381,6 +381,7 @@ def test_the_runtime_is_built_from_the_cores_parts_with_the_disable_gate() -> No
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: PLC0415
 
     from trustbridge.adapters.sql_store import SqlCredentialStore  # noqa: PLC0415
+    from trustbridge.github.environments import SqlEnvironmentStore  # noqa: PLC0415
     from trustbridge.tenancy.gate import SqlTenantGate  # noqa: PLC0415
 
     core: Any = SimpleNamespace(
@@ -397,6 +398,8 @@ def test_the_runtime_is_built_from_the_cores_parts_with_the_disable_gate() -> No
     assert isinstance(runtime.store, SqlCredentialStore)
     assert isinstance(runtime.core, CredentialCore)
     assert isinstance(runtime.core._d.gate, SqlTenantGate)
+    # NG6h-6a: the writer records the environments it creates (ADR 0034 decision B6)
+    assert isinstance(cast("Any", runtime.core._d.writer)._environments, SqlEnvironmentStore)
     assert runtime.adapters == frozenset()
     assert build_runtime(classes={}, core=core, sessions=None, writer=writer) is None
     assert build_runtime(classes={}, core=core, sessions=sessions, writer=None) is None

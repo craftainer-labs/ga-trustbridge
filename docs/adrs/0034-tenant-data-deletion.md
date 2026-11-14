@@ -389,6 +389,24 @@ adapter fakes.
   non-personal operational identifiers, not tenant content; this is a judgement call listed so
   the user can overrule it (the alternative is hashing them, which makes the record unusable
   for an operator).
+- **Environment tracking (NG6h-6a, user decision B6).** The GitHub writer is the only code that creates
+  an environment (`PUT /repos/{full}/environments/{name}`, which is a create-or-update and does not say
+  which). With a tracker it first reads the environment (`GET`, 404 = absent) and, after the `PUT`, writes
+  a `github_environments` row (migration `9a4d6c2e8b17`: `tenant_id`, `host`, `repository_id`,
+  `environment_name`, `created_at`; primary key tenant, repository, name; tenant-scoped, no foreign key)
+  only when the environment was absent. An environment found existing is never recorded, so it is never
+  deleted; step 3 deletes exactly the tracked ones (`TrackedEnvironments.tracked`, then `forget` per
+  deleted environment) and records the rest as `environment_kept`. Failure directions are all "kept": a
+  crash or a failed write after the `PUT`, a release without the tracker (N-1), and an environment created
+  before this migration are untracked. A row can also outlive its environment (someone deleted it and created their own of that
+  name): NG6h-6 should delete a tracked environment only when GitHub's `created_at` for it is not later than the
+  row's (the row is written after the `PUT`, so only clock skew narrower than a recreation can fool it).
+  One window remains: someone creating the environment between the writer's `GET` (404) and its `PUT`
+  (one request round trip) would have it recorded as ours; the `created_at` guard cannot see that, and it
+  is accepted. The table is in the database step's `PLAN` (count `github_environments`), so a
+  tenant's remaining rows go in step 5, and `tb_delete_tenant`'s emptiness backstop lists it (migration
+  `9a4d6c2e8b17`, md5-guarded body replacement). The writer is wired in both composition roots, the
+  api's `build_runtime` and the reconciler's `_core_deps`.
 
 ## Consequences
 

@@ -124,3 +124,17 @@ class ReconcileScheduler(Protocol):
     async def schedule(self, tenant_id: UUID) -> None:
         """Enqueue a reconcile for the tenant."""
         ...
+
+
+class EnvironmentTracker(Protocol):
+    """Records the repository environments trustbridge itself created (ADR 0034 decision B6)."""
+
+    async def record_created(
+        self, tenant_id: UUID, host: str, repository_id: int, name: str
+    ) -> None:
+        """Remember that trustbridge created `name` in the repository; idempotent.
+
+        Called only after the writer's own `PUT` created the environment, never for one that was
+        already there.
+        """
+        ...

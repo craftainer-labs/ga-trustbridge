@@ -6,13 +6,14 @@ One pass is one bounded batch in one transaction, in the tenant's context (ADR 0
 role: its `tenant_isolation` policies (`FOR ALL`) admit the context tenant for `DELETE` and for the
 `FOR UPDATE` row locks (which need `UPDATE` privilege and an `UPDATE` policy; the tenant tables
 only, `webhook_deliveries` has no policy), and the app role already holds the table grants
-(`SELECT, INSERT, UPDATE, DELETE`), so no `SECURITY DEFINER` function is added (least privilege:
-the app role gains nothing). The tables have no foreign keys; the order is the ADR's (in-flight
-operations first). `webhook_deliveries` is host-scoped and outside RLS: the tenant's rows keep
-their dedupe key (`host`, `delivery_id`, `body_sha256`) and the non-personal `event`, and lose
+(`SELECT, INSERT, UPDATE, DELETE`; on `github_environments` `SELECT, INSERT, DELETE` and `UPDATE
+(created_at)`, enough for the row locks), so no `SECURITY DEFINER` function is added (least
+privilege: the app role gains nothing). The tables have no foreign keys; the order is the ADR's
+(in-flight operations first). `webhook_deliveries` is host-scoped and outside RLS: the tenant's rows
+keep their dedupe key (`host`, `delivery_id`, `body_sha256`) and the non-personal `event`, and lose
 every field that can hold personal or tenant data: `body`, `headers` (the allow-listed request
-headers, which are not read once a row is `deleted`; the column is NOT NULL, so it becomes `{}`)
-and `last_error` (handler error text). The row becomes `deleted` (never relayed or handled again).
+headers, which are not read once a row is `deleted`; the column is NOT NULL, so it becomes `{}`) and
+`last_error` (handler error text). The row becomes `deleted` (never relayed or handled again).
 
 A batch is keyed on the table's primary key, not on `ctid`: `DELETE ... WHERE pk IN (SELECT pk ...
 ORDER BY pk LIMIT n FOR UPDATE SKIP LOCKED)`. The row locks are taken before the statement acts, so
@@ -52,6 +53,7 @@ PLAN: tuple[tuple[str, str], ...] = (
     ("adapter_credentials", "access_grants"),
     ("adapter_resources", "adapter_resources"),
     ("scope_leases", "scope_leases"),
+    ("github_environments", "github_environments"),
     ("tenant_repositories", "tenant_repositories"),
     ("webhook_deliveries", "webhook_bodies"),
 )
@@ -74,6 +76,7 @@ PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "adapter_credentials": ("tenant_id", "adapter", "scope_key"),
     "adapter_resources": ("tenant_id", "adapter", "resource_key"),
     "scope_leases": ("tenant_id", "adapter", "lease_key"),
+    "github_environments": ("tenant_id", "repository_id", "environment_name"),
     "tenant_repositories": ("tenant_id", "repository_id"),
     "webhook_deliveries": ("host", "delivery_id"),
 }

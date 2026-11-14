@@ -71,3 +71,13 @@ def test_the_tombstone_bodies_differ_and_the_guards_hash_the_right_ones() -> Non
         assert _body(old) != _body(new)
         assert after._body_md5(old) in "".join(after._ASSERT_PREVIOUS)
         assert after._body_md5(new) in "".join(after._ASSERT_NEW)
+
+
+def test_the_environments_migration_restores_the_delete_body_it_replaced() -> None:
+    """NG6h-6a: the copy is the body 6f3b9d2e4a85 installs; the new one lists the new table."""
+    hardening = _load("6f3b9d2e4a85")
+    tracking = _load("9a4d6c2e8b17")
+    assert _body(tracking._PREVIOUS_DELETE_FN) == _body(hardening._DELETE_FN)
+    assert _body(tracking._DELETE_FN) != _body(tracking._PREVIOUS_DELETE_FN)
+    assert _body(tracking._DELETE_FN).count("'github_environments'") == 2
+    assert "pg_temp" in tracking._DELETE_FN.split("AS $$")[0]

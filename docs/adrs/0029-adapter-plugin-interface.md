@@ -622,6 +622,11 @@ as below.
 - JFrog accepting `repository_id` / `repository_owner_id` as mapping
   claims, and GHES/GHE.com tokens carrying them, are unconfirmed (NG5 and
   NG4).
+- **Created environments are tracked (NG6h-6a, ADR 0034 B6).** An `environment` output stays "ensure it
+  exists" (a `PUT`), but the core's GitHub writer now reads the environment first and records, in
+  `github_environments`, the ones it created itself; one that already existed is not recorded. Nothing
+  about the adapter interface changes (adapters never see this), and `remove` still never deletes an
+  environment: only a tenant deletion does, and only the tracked ones.
 
 ## Consequences
 

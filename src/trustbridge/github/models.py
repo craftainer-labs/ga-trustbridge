@@ -7,13 +7,14 @@ recheck, so a registration is picked up without a restart. The row holds the App
 reference and the slug; the PEM goes to the signer and the webhook secret to the secret store.
 """
 
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
 from craftainer_crud.models.base import Base
 from sqlalchemy import BigInteger, DateTime, String, func, select
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import UUID, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -27,6 +28,25 @@ class HostRegistrationRow(Base):
     app_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     webhook_secret_ref: Mapped[str] = mapped_column(String, nullable=False)
     app_slug: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class GitHubEnvironmentRow(Base):
+    """A repository environment trustbridge created (ADR 0034 user decision B6; NG6h-6a).
+
+    Written by the GitHub writer only when its own `PUT` created the environment, never for one it
+    found already there. A tenant deletion removes exactly these environments and then their rows
+    (`SqlEnvironmentStore`). Tenant-scoped (`tenant_isolation`), no foreign key.
+    """
+
+    __tablename__ = "github_environments"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    host: Mapped[str] = mapped_column(String, nullable=False)
+    repository_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    environment_name: Mapped[str] = mapped_column(String, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

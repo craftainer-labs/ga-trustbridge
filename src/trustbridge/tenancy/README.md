@@ -83,7 +83,7 @@ same row lock as enable and disable, validates the confirmation before returning
 and stores an optional `not_before` (default NULL: no delay). `tb_delete_tenant(uuid, text, bigint)`
 (holder and fence, NG6h-4a-1, migration `5d7a2c8e1b94`) refuses (55000) unless the tenant is
 admin-disabled, has a deletion in its `database` step whose `not_before` has passed, and has no
-rows left in the five other tables or an uncleared `webhook_deliveries` row (`status <> 'deleted'`, migration
+rows left in the other tenant tables (`github_environments` since `9a4d6c2e8b17`) or an uncleared `webhook_deliveries` row (`status <> 'deleted'`, migration
 `6f3b9d2e4a85`), and raises `TB003` (`deletion lease lost`) unless the caller
 holds that deletion's live lease (holder, fence and an unexpired `expires_at`). Because those tables have no
 foreign key, a writer is not blocked by the row lock; `tb_delete_tenant` checks again after the

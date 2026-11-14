@@ -578,11 +578,15 @@ async def test_a_request_waits_for_the_installation_advisory_lock(db: Db) -> Non
 
 
 async def test_tb_delete_tenant_refuses_while_any_tenant_keyed_row_remains(db: Db) -> None:
-    """One row in any of the five tables blocks it, and removing it lets the delete through."""
+    """One row in any of the six tables blocks it, and removing it lets the delete through."""
     tenant = await _tenant(db)
     deletion = (await _request(db, tenant)).deletion_id
     await _set_state(db, deletion, "database")
-    for table, insert in INSERTS.items():
+    tracked = (
+        "INSERT INTO github_environments (tenant_id, host, repository_id, environment_name) "
+        "VALUES (:t, 'tb.test', :n, :k)"
+    )  # NG6h-6a: kept out of the shared INSERTS, which also seeds the downgrade tests
+    for table, insert in {**INSERTS, "github_environments": tracked}.items():
         await _admin(db, insert, {"t": tenant.id, "k": "leftover", "n": 1})
         with pytest.raises(DBAPIError, match=f"still has rows in: {table}"):
             await _app_rows(db, DELETE, {"t": tenant.id})
