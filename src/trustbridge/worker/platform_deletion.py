@@ -102,8 +102,8 @@ class SqlPlatformPort:
     async def remove(self, tenant_id: UUID, deletion_id: UUID, item: PlatformItem) -> None:
         """Delete `item` through its core; raise unless it is gone.
 
-        The whole call runs in the tenant's context, so every row read and write of the cores
-        (the credential and resource rows, the lease and operation rows) is scoped to it.
+        The cores' calls run in the tenant's context, so their row reads and writes (credential,
+        resource, lease and operation rows) are scoped to it. The tenant lookup scopes itself.
         """
         tenant = await self._tenants.get_tenant(tenant_id)
         with tenant_context(tenant_id):
