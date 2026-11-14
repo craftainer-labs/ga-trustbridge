@@ -198,6 +198,24 @@ async def get_current_claims(
         raise
 
 
+def subject_of(claims: dict[str, Any]) -> str:
+    """The token's `sub`, or a 401 `invalid_token` when it has none.
+
+    The validator requires `exp`, `iss` and `aud`, not `sub`, so a validly signed token can
+    lack it. Anything that identifies the caller (ownership, audit) must refuse such a token
+    rather than index `claims["sub"]` (a KeyError is a 500) or treat it as an unowned caller.
+    """
+    sub = claims.get("sub")
+    # e2e-unreachable: the live api's tokens always carry `sub`; covered by tests/unit.
+    if not isinstance(sub, str) or not sub.strip():  # pragma: no cover
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers=bearer_challenge("invalid_token"),
+        )
+    return sub
+
+
 def require_roles(*roles: str) -> Callable[..., Awaitable[dict[str, Any]]]:
     """Build a dependency requiring at least one of the given Keycloak client roles.
 

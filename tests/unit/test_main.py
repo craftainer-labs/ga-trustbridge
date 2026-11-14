@@ -73,6 +73,11 @@ def events(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         recorded.append("close_health")
 
     monkeypatch.setattr(main_module, "close_health_checks", _close_health)
+
+    async def _close_events() -> None:
+        recorded.append("close_events")
+
+    monkeypatch.setattr(main_module, "close_event_publishers", _close_events)
     monkeypatch.setattr(main_module, "_run_migrations", lambda: recorded.append("migrate"))
 
     def _collect() -> int:
@@ -121,6 +126,7 @@ async def test_lifespan_orders_startup_and_shutdown(
         "collect",
         "freeze",
         "serving",
+        "close_events",
         "close_health",
         "dispose",
     ]
@@ -203,7 +209,7 @@ async def test_lifespan_closes_redis_cache_after_cancelling_invalidation(
     monkeypatch.setattr(heroes_v2, "get_hero_event_source", object)
     async with main_module.lifespan(main_module.app):
         await asyncio.sleep(0)
-    assert events[-4:] == ["cancelled", "aclose", "close_health", "dispose"]
+    assert events[-5:] == ["cancelled", "aclose", "close_events", "close_health", "dispose"]
 
 
 def test_docs_path_is_off_only_in_production() -> None:

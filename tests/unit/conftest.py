@@ -29,7 +29,7 @@ _ANALYTICS_ENV = (
 def analytics_off(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """No test reaches a real analytics backend, whatever the devcontainer's env says.
 
-    Clears every ANALYTICS_* variable (the stack's umami.env sets the backend inside the
+    Clears every ANALYTICS_* variable (the stack's analytics.env sets the backend inside the
     devcontainer) and drops the library's process-wide client, which reads them once.
     """
     for name in _ANALYTICS_ENV:

@@ -191,6 +191,11 @@ def relative_files_matching(
     return [rel for rel in listing if matches(rel, pattern)]
 
 
+def is_bytecode(rel: str) -> bool:
+    """Whether ``rel`` is Python bytecode (``__pycache__/`` or ``*.pyc``), never synced."""
+    return rel.endswith(".pyc") or "__pycache__" in rel.split("/")
+
+
 def tier_paths(root: Path, tiers: dict[str, list[str]], tier: str) -> set[str]:
     """Return every file under ``root`` classified into ``tier`` by the manifest."""
     candidates: set[str] = set()
@@ -205,7 +210,9 @@ def tier_paths(root: Path, tiers: dict[str, list[str]], tier: str) -> set[str]:
             continue
         rel = pattern.rstrip("/") if pattern.endswith("/") else pattern
         candidates.update(relative_files_under(root, rel))
-    return {path for path in candidates if classify(path, tiers) == [tier]}
+    return {
+        path for path in candidates if not is_bytecode(path) and classify(path, tiers) == [tier]
+    }
 
 
 def is_executable(path: Path) -> bool:
@@ -443,7 +450,15 @@ def cmd_check_apply(args: argparse.Namespace) -> int:
 
 def pr_body(summary: dict[str, dict[str, list[str]]], old_tag: str, new_tag: str, repo: str) -> str:
     """Render the sync PR body markdown from an ``apply`` summary."""
-    lines = [f"Syncs from `{old_tag}` to `{new_tag}` of {repo}.", "", "### Files changed"]
+    lines = [f"Syncs from `{old_tag}` to `{new_tag}` of {repo}."]
+    if summary["merge"]["conflicts"]:
+        lines += [
+            "",
+            "> [!WARNING]",
+            "> **Needs manual resolution.** This PR is a draft because the merge left "
+            "conflicts (listed below). Resolve them, then mark it ready for review.",
+        ]
+    lines += ["", "### Files changed"]
     for path in summary["replace"]["updated"]:
         lines.append(f"- replace: `{path}`")
     for path in summary["replace"]["removed"]:

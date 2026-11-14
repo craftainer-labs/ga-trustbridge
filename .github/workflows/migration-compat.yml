@@ -32,8 +32,9 @@ jobs:
       # Full history and all tags: the N-1 worktree needs the release tag,
       # and the lint step diffs against the PR's base commit.
       - name: Check out repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
           fetch-tags: true
 
@@ -109,6 +110,15 @@ jobs:
           export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
           export RUN_MIGRATIONS_ON_STARTUP=false
           uv sync --locked --all-extras
+          # The dev broker serves TLS with a self-signed certificate (.devcontainer/
+          # stack/mqtt/). The PR's code trusts it through MQTT_CA_FILE; the previous
+          # release predates that setting and builds its MQTT context from the default
+          # trust store, which honors SSL_CERT_FILE. Point it at the system bundle plus
+          # that certificate (not the certificate alone, which would drop every other
+          # CA), and only now, after uv sync.
+          n1_ca_bundle="$(mktemp)"
+          cat "${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}" "$MQTT_CA_FILE" > "$n1_ca_bundle"
+          export SSL_CERT_FILE="$n1_ca_bundle"
           # Keep the cacheprovider plugin loaded: the N-1 pyproject may set
           # cache_dir, which pytest rejects as an unknown ini option once
           # the plugin is disabled. Point the cache outside the tree instead.
@@ -119,12 +129,12 @@ jobs:
         run: echo "COMPOSE_PROJECT_NAME=migcompat-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.4.1
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Same cache scope as checks.yml's amd64 leg, so the devcontainer
       # image build below is a cache hit.
       - name: Warm devcontainer image build cache
-        uses: docker/build-push-action@v7.4.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: .devcontainer/Dockerfile
@@ -133,7 +143,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=amd64
 
       - name: Lint revisions and run the N-1 suites in the devcontainer
-        uses: devcontainers/ci@v0.3
+        uses: devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca # v0.3.1900000450
         with:
           runCmd: bash .migration-compat/run.sh
           env: |
@@ -143,5 +153,5 @@ jobs:
         if: always()
         run: |
           docker compose \
-            -p ${{ env.COMPOSE_PROJECT_NAME }} \
+            -p "$COMPOSE_PROJECT_NAME" \
             down --volumes --remove-orphans

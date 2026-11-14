@@ -1,7 +1,9 @@
 """Product-analytics events for a resource's CRUD mutations (ADR 0027).
 
 `AnalyticsEventSink` wraps a resource's `EventSink` (the MQTT/in-memory one that feeds
-`GET <prefix>/events`): the wrapped sink publishes first, exactly as before, then the
+`GET <prefix>/events`). The library delivers events after the transaction commits, in a
+background task, so a change that rolled back is neither streamed nor tracked. The wrapped
+sink publishes first, exactly as before, then the
 mutation is recorded through `craftainer_observability.analytics.track`. Two actions are
 sampled as domain events, `create` as `<resource>.created` and `delete` as
 `<resource>.deleted`; the rest (`update`, `restore`) are not tracked. Which request signals
@@ -38,11 +40,21 @@ class AnalyticsEventSink:
         self._props_for = props_for
 
     async def publish(
-        self, *, resource: str, record_id: int, action: str, snapshot: dict[str, Any]
+        self,
+        *,
+        resource: str,
+        record_id: int,
+        action: str,
+        snapshot: dict[str, Any],
+        owner: object = None,
     ) -> None:
-        """Publish through the wrapped sink, then record the event if `action` is sampled."""
+        """Publish through the wrapped sink, then record the event if `action` is sampled.
+
+        `owner` is the event's owner scope value, which the library adds to the envelope so
+        `/events` can filter per subscriber; it is forwarded untouched and never tracked.
+        """
         await self._inner.publish(
-            resource=resource, record_id=record_id, action=action, snapshot=snapshot
+            resource=resource, record_id=record_id, action=action, snapshot=snapshot, owner=owner
         )
         suffix = _EVENT_SUFFIXES.get(action)
         if suffix is not None:

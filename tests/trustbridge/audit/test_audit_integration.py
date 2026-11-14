@@ -136,13 +136,13 @@ class Db:
 def _engine(database: str, user: str) -> AsyncEngine:
     """The application's own engine builder, pointed at the scratch database as `user`."""
     return build_engine(
-        Settings(postgres_user=user, postgres_password=PASSWORD, postgres_db=database)
+        Settings(mode="dev", postgres_user=user, postgres_password=PASSWORD, postgres_db=database)
     )
 
 
 async def _provision() -> AsyncIterator[Db]:
     """Create and migrate a scratch database, re-own the audit objects; drop it afterwards."""
-    s = Settings()
+    s = Settings(mode="dev")
     name = f"tb_audit_{uuid4().hex[:10]}"
 
     def url(user: str, password: str, database: str) -> URL:

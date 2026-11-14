@@ -130,7 +130,7 @@ class Db:
 
 
 def _url(user: str, password: str, database: str) -> URL:
-    s = Settings()
+    s = Settings(mode="dev")
     return URL.create(
         "postgresql+asyncpg",
         username=user,
@@ -150,6 +150,7 @@ def _app_engine(
     """The application's own engine builder, pointed at the scratch database as `user`."""
     return build_engine(
         Settings(
+            mode="dev",
             postgres_user=user,
             postgres_password=PASSWORD,
             postgres_db=database,
@@ -162,7 +163,7 @@ def _app_engine(
 
 async def _provision(*, enforce: bool) -> AsyncIterator[Db]:
     """Create, migrate and seed a scratch database; drop it afterwards."""
-    s = Settings()
+    s = Settings(mode="dev")
     name = f"tb_tenancy_{uuid4().hex[:10]}"
     server = create_async_engine(
         _url(s.postgres_user, s.postgres_password, s.postgres_db),

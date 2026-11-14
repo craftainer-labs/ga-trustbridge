@@ -58,7 +58,7 @@ class GuardLease:
 @pytest.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
     """An engine with the NG4 tables present and empty (created here when not migrated)."""
-    eng = build_engine(Settings())
+    eng = build_engine(Settings(mode="dev"))
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, tables=TABLES, checkfirst=True)
         for table in TABLES:

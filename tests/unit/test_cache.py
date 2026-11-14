@@ -191,10 +191,10 @@ def test_build_stats_cache_versions_the_in_memory_cache(monkeypatch: pytest.Monk
 
 def test_build_stats_cache_by_settings() -> None:
     """Off without a TTL; in-memory under MODE=mock; Redis otherwise."""
-    assert build_stats_cache(Settings()) is None
+    assert build_stats_cache(Settings(mode="dev")) is None
     mock = build_stats_cache(Settings(mode="mock", allow_mock_mode=True, stats_cache_ttl_seconds=5))
     assert isinstance(mock, InMemoryStatsCache)
-    real = build_stats_cache(Settings(stats_cache_ttl_seconds=5))
+    real = build_stats_cache(Settings(mode="dev", stats_cache_ttl_seconds=5))
     assert isinstance(real, RedisStatsCache)
 
 

@@ -6,7 +6,7 @@
 # ../README.md's "Devcontainer stack pattern" section.
 services:
   s3:
-    image: rustfs/rustfs:1.0.0-rc.5-glibc
+    image: rustfs/rustfs:1.0.0-rc.5-glibc@sha256:d14642b8ade7438d75543a357ef2c9dfa7ac06575995163fc692642a24816a51
     restart: unless-stopped
     environment:
       RUSTFS_VOLUMES: /data/rustfs0

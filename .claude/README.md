@@ -46,7 +46,12 @@ this directory).
     escalations, serialized lanes, gates and close-out. The main session
     decides and raises gates; landers do the reviewing, merging,
     verifying and releasing.
-  - `owasp-scan` — a parallel OWASP Top Ten scan of `src/`.
+  - `owasp-scan` — a parallel OWASP Top 10:2025 scan of a whole repo
+    (all languages, workflows, Dockerfiles, compose, scripts, config) plus
+    the permanent scanners, with ASVS 5.0 references and a report file per
+    run; takes an optional `asvs=V3,V7,V10` manual-review focus. Its
+    target discovery is `skills/owasp-scan/discover-targets.sh` (run with
+    `bash`, read-only; `--summary` and `--skipped` show what it skips).
 
   Base lists each of these skills one by one in its sync manifest, so an
   instance adds its own as `skills/<name>/` and lists that directory

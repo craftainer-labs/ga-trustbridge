@@ -26,11 +26,13 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
 
 import httpx
 import pytest
 import uvicorn
-from fastapi.testclient import TestClient
+from craftainer_crud.config import configure, get_config, get_session_factory
+from craftainer_crud.interfaces.delivery import drain_event_deliveries
 
 from app.config import get_settings
 from app.main import app
@@ -39,7 +41,20 @@ from app.oidc import get_current_claims
 _events_url = "/crud/v1/heroes/v2/json/events"
 _heroes_url = "/crud/v1/heroes/v2/json"
 
-client = TestClient(app)
+
+@pytest.fixture(autouse=True)
+def _durable_event_sessions() -> Iterator[None]:
+    """Turn on durable `/events` sessions: the guarantee this module proves is opt-in.
+
+    craftainer_crud streams are transient by default (clean session, no replay, a
+    client-sent `subscriber_id` ignored); `SSE_DURABLE_SESSIONS=true` is the host's opt-in.
+    """
+    original = get_config()
+    configure(replace(original, sse_durable_sessions=True), get_session_factory())
+    try:
+        yield
+    finally:
+        configure(original, get_session_factory())
 
 
 @contextmanager
@@ -128,10 +143,18 @@ async def test_hero_events_survive_a_disconnect_with_the_same_subscriber_id() ->
         # doesn't hit this: reconnecting takes at least a network round trip, which is
         # already more than enough time. This sleep stands in for that unavoidable gap.
         await asyncio.sleep(0.5)
-        # 2. Mutate a hero while the subscriber above is disconnected.
-        created = client.post(
-            _heroes_url, json={"name": "Event Guarantee Test", "powers": ["Persistence"]}
-        ).json()
+        # 2. Mutate a hero while the subscriber above is disconnected. Through the live
+        #    server (this test's own event loop), not the sync TestClient: the library
+        #    publishes after the commit, in a background task, and a TestClient request's
+        #    short-lived loop would cancel that task before the broker ever sees it. The
+        #    drain waits for the publish, so the event is on the broker before step 3.
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            created = (
+                await http.post(
+                    _heroes_url, json={"name": "Event Guarantee Test", "powers": ["Persistence"]}
+                )
+            ).json()
+        await drain_event_deliveries()
         try:
             # 3. Reconnect with the *same* subscriber_id and confirm the missed "create"
             #    event is still delivered -- proving the persistent MQTT session (not
@@ -153,4 +176,6 @@ async def test_hero_events_survive_a_disconnect_with_the_same_subscriber_id() ->
                 assert event["record_id"] == created["id"]
                 assert event["action"] == "create"
         finally:
-            client.delete(_heroes_url, params={"id": created["id"]})
+            async with httpx.AsyncClient(base_url=base_url) as http:
+                await http.delete(_heroes_url, params={"id": created["id"]})
+            await drain_event_deliveries()

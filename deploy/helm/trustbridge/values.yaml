@@ -312,6 +312,15 @@ mqtt:
   port: 8883
   keepaliveSeconds: 60
   useTls: true
+  ## PEM bundle that signs the broker's certificate (a private CA); null uses the system trust store.
+  caFile: null
+  ## Client certificate and key (mutual TLS), as file paths mounted into the pods.
+  clientCert: null
+  clientKey: null
+  ## Refused by the template under mode=production.
+  allowInsecure: false
+  ## How long the broker queues events for a returning durable subscriber.
+  sessionTtlSeconds: 3600
   existingSecret: ""
   usernameKey: username
   passwordKey: password
@@ -328,6 +337,10 @@ app:
   profilingEnabled: false
   statsCacheTtlSeconds: null
   sseKeepaliveSeconds: 15
+  sseMaxStreamsPerCaller: 5
+  sseDurableSessions: false
+  ## Seconds GET /health/ready caches its result; 0 turns the cache off.
+  healthReadyCacheTtlSeconds: 1.0
 
 securityTxt:
   contact: null

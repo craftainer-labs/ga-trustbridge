@@ -35,7 +35,7 @@ from fastapi import Depends
 from app.crud_1.analytics_events import AnalyticsEventSink
 from app.crud_1.wiring import bulk_rate_limit, manifest_registry, stats_cache
 from app.models.hero import Hero as HeroModel
-from app.oidc import get_current_claims, require_roles
+from app.oidc import get_current_claims, require_roles, subject_of
 from app.views.hero_v2 import HeroV2, HeroV2Create, HeroV2Update
 
 _hero_repository = build_repository_provider(HeroModel)
@@ -69,24 +69,43 @@ def get_hero_revision_repository(session: DBSession) -> Repository[Revision]:
 HeroRevisionRepository = Annotated[Repository[Revision], Depends(get_hero_revision_repository)]
 
 
-def get_hero_crud(
-    session: DBSession, claims: Annotated[dict[str, Any], Depends(get_current_claims)]
-) -> CRUDInterface[HeroV2, HeroModel]:
+def get_hero_owner_scope(
+    claims: Annotated[dict[str, Any], Depends(get_current_claims)],
+) -> OwnerScope:
+    """Build Hero's owner scope from the verified token claims, with no database session.
+
+    `OwnerScope("owner_id", sub, read_scoped=False)`: every authenticated caller reads every
+    hero (list/get), but `update`/`delete` (single or bulk) only ever reach heroes the caller
+    created -- see craftainer_crud.interfaces.base.OwnerScope's docstring and
+    docs/adrs/0011-owner-scoped-crud-example-resource.md for why Hero uses
+    `read_scoped=False` rather than the fully-scoped default.
+
+    A token without a usable `sub` is refused with 401 (RFC 6750 `invalid_token`) before an
+    `OwnerScope` exists: `sub` is the only owner identity, so a signed token that lacks it
+    (the validator requires `exp`, `iss` and `aud`, not `sub`) must not reach a write as an
+    unowned caller, nor crash the request with a KeyError (500). Fail closed.
+
+    Also the router's `scope_dependency`, so `GET <prefix>/events` resolves just this (token
+    claims) and holds no database session for the stream's life (craftainer_crud ADR 0009).
+    """
+    return OwnerScope("owner_id", subject_of(claims), read_scoped=False)
+
+
+HeroOwnerScope = Annotated[OwnerScope, Depends(get_hero_owner_scope)]
+
+
+def get_hero_crud(session: DBSession, owner: HeroOwnerScope) -> CRUDInterface[HeroV2, HeroModel]:
     """Build a request-scoped, owner-scoped CRUD interface for Hero.
 
-    `owner=OwnerScope("owner_id", claims["sub"], read_scoped=False)`: every
-    authenticated caller reads every hero (list/get), same as before this was
-    added, but `update`/`delete` (single or bulk) only ever reach heroes the
-    caller themselves created -- see craftainer_crud.interfaces.base.OwnerScope's own
-    docstring and docs/adrs/0011-owner-scoped-crud-example-resource.md for why
-    Hero uses `read_scoped=False` rather than the fully-scoped default.
+    `owner` is `get_hero_owner_scope`'s scope (from the token's `sub`, 401 without one):
+    every authenticated caller reads every hero, `update`/`delete` only reach the caller's own.
 
     `revisions=RepositoryRevisionSink(...)`/`resource="hero"`/`actor=claims["sub"]`:
     every create/update/update_many/delete/delete_many is logged to the shared
     Revision table -- see craftainer_crud.interfaces.base.RevisionSink's own docstring and
     `GET <prefix>/revisions?id=`, added below via `revision_repository_dependency`.
-    `actor` is resolved from the same per-request claims `owner` already reads,
-    the same pattern craftainer_crud.interfaces.README.md's "Do" section describes.
+    `actor` is the owner scope's value (the token's `sub`), the same pattern
+    craftainer_crud.interfaces.README.md's "Do" section describes.
 
     `events=_hero_event_sink()`: every create/update/update_many/delete/
     delete_many **and** restore/restore_many is published for real-time streaming
@@ -102,16 +121,7 @@ def get_hero_crud(
     return CRUDInterface(
         schema=HeroV2,
         repository=_hero_repository(session),
-        # `claims["sub"]` (direct indexing, not `.get()`) is deliberate: `sub` is a
-        # mandatory OIDC claim (app.oidc.decode_bearer_token already requires it to
-        # resolve the caller at all), so ownership scoping has nothing sane to fall
-        # back to if it's ever missing -- a KeyError here fails loudly and immediately
-        # rather than silently scoping writes to a placeholder owner value. `actor`
-        # below uses `.get(..., "unknown")` instead because it's a best-effort label
-        # for the audit/revision log, not a security boundary -- a malformed or
-        # already-authenticated-some-other-way claims payload shouldn't block the
-        # underlying CRUD operation just to name who did it.
-        owner=OwnerScope("owner_id", claims["sub"], read_scoped=False),
+        owner=owner,
         revisions=RepositoryRevisionSink(_revision_repository(session)),
         events=AnalyticsEventSink(
             _hero_event_sink(),
@@ -119,7 +129,7 @@ def get_hero_crud(
             props_for=_hero_analytics_props,
         ),
         resource="hero",
-        actor=str(claims.get("sub", "unknown")),
+        actor=str(owner.value),
     )
 
 
@@ -153,6 +163,7 @@ router = build_resource_router(
     archivable=True,
     revision_repository_dependency=HeroRevisionRepository,
     event_source_dependency=HeroEventSource,
+    scope_dependency=HeroOwnerScope,
     stats_enabled=True,
     stats_cache=stats_cache,
     manifest=ManifestOptions(

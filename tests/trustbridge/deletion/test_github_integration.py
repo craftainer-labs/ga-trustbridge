@@ -49,7 +49,7 @@ LONG_AGO = "2020-01-01T00:00:00Z"
 @pytest.fixture
 async def sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     """A session factory over tables that are present and empty."""
-    engine: AsyncEngine = build_engine(Settings())
+    engine: AsyncEngine = build_engine(Settings(mode="dev"))
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, tables=TABLES, checkfirst=True)
         for table in TABLES:

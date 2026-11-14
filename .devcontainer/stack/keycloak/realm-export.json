@@ -65,7 +65,7 @@
         "backchannel.logout.session.required": "true",
         "backchannel.logout.revoke.offline.tokens": "false",
         "use.refresh.tokens": "true",
-        "standard.token.exchange.enabled": "false"
+        "standard.token.exchange.enabled": "true"
       },
       "protocolMappers": [
         {

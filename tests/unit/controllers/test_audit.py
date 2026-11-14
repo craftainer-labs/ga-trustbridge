@@ -36,3 +36,17 @@ def test_audit_returns_subject_and_roles_for_security() -> None:
         del app.dependency_overrides[get_current_claims]
     assert response.status_code == 200
     assert response.json() == {"sub": "sam", "roles": ["security"]}
+
+
+def test_audit_refuses_a_token_without_a_subject() -> None:
+    """A validly signed token with the role but no `sub` is a 401, not a 500."""
+    settings = get_settings()
+    app.dependency_overrides[get_current_claims] = lambda: {
+        "resource_access": {settings.oidc_client_id: {"roles": ["security"]}},
+    }
+    try:
+        response = client.get("/audit")
+    finally:
+        del app.dependency_overrides[get_current_claims]
+    assert response.status_code == 401
+    assert 'error="invalid_token"' in response.headers["WWW-Authenticate"]

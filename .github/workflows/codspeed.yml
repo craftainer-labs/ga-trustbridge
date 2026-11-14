@@ -30,10 +30,12 @@ jobs:
       id-token: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Same minor as the devcontainer's CPython (.devcontainer/Dockerfile's
@@ -45,7 +47,12 @@ jobs:
         run: uv sync --locked --all-extras
 
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@v5.5.0
+        uses: CodSpeedHQ/action@61efe07e57e55bedeab750c434504de272a56e8c # v5.6.1
+        # The app has no MODE default (it refuses to start without one), and this bare
+        # runner has no devcontainer environment to supply it. tests/bench swaps in the
+        # mock repository itself.
+        env:
+          MODE: dev
         with:
           mode: simulation
           # pyproject.toml's cache_dir points into the devcontainer's home, which
