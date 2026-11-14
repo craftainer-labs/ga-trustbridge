@@ -242,7 +242,7 @@ ignore_imports = ["trustbridge.worker.** -> trustbridge.deletion.ports"]
 name = "only the reconciler entry point imports the composition root"
 type = "forbidden"
 source_modules = ["trustbridge"]
-ignore_imports = ["trustbridge.reconciler.** -> trustbridge.composition"]
+ignore_imports = ["trustbridge.reconciler.__main__ -> trustbridge.composition"]
 forbidden_modules = ["trustbridge.composition"]
 
 [[tool.importlinter.contracts]]
