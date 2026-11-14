@@ -21,7 +21,7 @@ from tests.trustbridge.adapters.conftest import PULL, PUSH_PROD, World, build_wo
 from tests.trustbridge.deletion.fakes import record
 from trustbridge.adapters.core import CredentialCore
 from trustbridge.adapters.fake import fake_capabilities
-from trustbridge.adapters.interface import ProjectSpec, RepoSpec
+from trustbridge.adapters.interface import AdapterError, ProjectSpec, RepoSpec
 from trustbridge.adapters.models import (
     AdapterCredentialRow,
     AdapterResourceRow,
@@ -30,7 +30,7 @@ from trustbridge.adapters.models import (
 from trustbridge.adapters.resources import ResourceCore
 from trustbridge.adapters.sql_store import SqlCredentialStore
 from trustbridge.deletion.model import Lease, StepContext, StepOutcome
-from trustbridge.deletion.platform import AdapterPlatformStep
+from trustbridge.deletion.platform import AdapterPlatformStep, PlatformStepHeldError
 from trustbridge.worker.platform_deletion import (
     ConnectionNames,
     SqlPlatformPort,
@@ -164,3 +164,41 @@ async def test_an_unrecognised_resource_key_holds_the_step(
         )
     with pytest.raises(UnknownResourceKindError):
         await port.pending(w.tenant.id)
+
+
+async def _one_pass(step: AdapterPlatformStep, tenant: UUID, cursor: dict[str, int]) -> StepOutcome:
+    deletion = uuid4()
+    rec = record(
+        id=deletion,
+        tenant_id=tenant,
+        state="platform",
+        delete_platform_resources=True,
+        step_cursor=cursor,
+    )
+
+    async def renew() -> None:
+        return None
+
+    return await step.run(StepContext(rec, Lease(deletion, "h", 1), renew))
+
+
+async def test_one_failing_item_does_not_hold_the_others_and_all_failing_holds(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """One failure: the others are removed (progress). Only failures left: the step holds."""
+    w, store, port, step = _build(sessions)
+    res = ResourceCore(replace(w.deps, store=store))
+    for name in ("p1", "p2", "p3"):
+        await res.ensure_project(w.tenant, "fake", ProjectSpec(name))
+    w.platform.fail_before["delete"] = [AdapterError(False, "rejected")]
+    out = await _one_pass(step, w.tenant.id, {})
+    assert not out.done and out.cursor == {"removed": 2}
+    assert out.counts == {"platform_projects": 2}
+    assert len(await port.pending(w.tenant.id)) == 1
+    w.platform.fail_before["delete"] = [AdapterError(False, "rejected")]
+    with pytest.raises(PlatformStepHeldError, match="1 of 1 removable items failed"):
+        await _one_pass(step, w.tenant.id, {"removed": 2})
+    assert len(await port.pending(w.tenant.id)) == 1
+    done = await _one_pass(step, w.tenant.id, {"removed": 2})
+    assert done.cursor == {"removed": 3}
+    assert await port.pending(w.tenant.id) == []

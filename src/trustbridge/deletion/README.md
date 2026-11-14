@@ -131,7 +131,9 @@ from the same collaborators as the reconcile body, plus a `ResourceCore`) is the
   so one stuck item never holds up the ones behind it. A project is never tried while one of its
   repositories (`<project>/<repo>`, same adapter) remains. A pass stops after `MAX_TRIES_PER_PASS`
   (50) tries, or when `ctx.renew` raises `RunBudgetExhausted` (what was removed is still reported;
-  with nothing removed the exception goes to the engine). The cursor is `{"removed": n}` and
+  with failures and nothing removed the step holds, so the attempt is counted; with neither the
+  exception goes to the engine). A pass starts at item `attempts % len(items)` and wraps, so items
+  that keep failing at the head cannot starve the ones behind them across retries. The cursor is `{"removed": n}` and
   changes only when something was removed, so the engine resets the attempts exactly on progress.
   The list comes from the recorded rows only (`adapter_credentials` rows that still hold a
   credential, `adapter_resources` rows) and is re-read on every pass: a restart converges, nothing

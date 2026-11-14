@@ -72,9 +72,18 @@ class FakeNames:
 
 
 def _ctx(
-    *, flag: bool, cursor: dict[str, int] | None = None, budget: int | None = None
+    *,
+    flag: bool,
+    cursor: dict[str, int] | None = None,
+    budget: int | None = None,
+    attempts: int = 0,
 ) -> tuple[StepContext, list[int]]:
-    rec = record(state="platform", delete_platform_resources=flag, step_cursor=cursor or {})
+    rec = record(
+        state="platform",
+        delete_platform_resources=flag,
+        step_cursor=cursor or {},
+        attempts=attempts,
+    )
     renewals: list[int] = []
 
     async def renew() -> None:
@@ -303,3 +312,48 @@ async def test_a_pass_is_bounded_in_items() -> None:
     out = await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False)[0])
     assert out.cursor == {"removed": MAX_TRIES_PER_PASS} and len(port.items) == 5
     assert not out.done
+
+
+async def test_stuck_head_items_do_not_starve_the_ones_behind_across_retries() -> None:
+    """Budget spent on failing head items: hold (attempt counted), and the next start rotates."""
+    items = [_item("credential", key=k) for k in ("a", "b", "c", "d")]
+    port = FakePort(list(items), fail={"a": RuntimeError("t"), "b": RuntimeError("t")})
+    step = AdapterPlatformStep(port, FakeNames())
+    with pytest.raises(PlatformStepHeldError):  # attempt 0: the budget goes on `a` and `b`
+        await step.run(_ctx(flag=False, budget=2, attempts=0)[0])
+    assert port.tried == ["a", "b"] and port.removed == []
+    out = await step.run(_ctx(flag=False, budget=2, attempts=1)[0])  # attempt 1 starts at `b`
+    assert port.tried == ["a", "b", "b", "c"]
+    assert out.counts == {"platform_access_grants": 1} and out.cursor == {"removed": 1}
+
+
+async def test_the_start_rotates_by_attempts_and_wraps_in_order() -> None:
+    """Start at `attempts % len`; the rest follow in order, wrapping."""
+    keys = ["a", "b", "c"]
+    port = FakePort([_item("credential", key=k) for k in keys], boom=RuntimeError("x"))
+    with pytest.raises(PlatformStepHeldError):
+        await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False, attempts=4)[0])
+    assert port.tried == ["b", "c", "a"]
+
+
+async def test_budget_spent_on_failures_holds_with_type_only_diagnostics() -> None:
+    """Failures and no removal when the budget ends: a held error, not a silent release."""
+    port = FakePort(
+        [_item("credential", key="s3cret"), _item("credential", key="b")], boom=KeyError("s3cret")
+    )
+    with pytest.raises(PlatformStepHeldError) as held:
+        await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=False, budget=1)[0])
+    assert str(held.value) == "1 of 2 removable items failed (KeyError x1)"
+
+
+async def test_a_held_pass_does_not_depend_on_a_project_prefix_edge() -> None:
+    """A project key that is a prefix of another project's repository key stays independent."""
+    port = FakePort(
+        [
+            _item("repository", "other", "p/r"),  # a different adapter's repository
+            _item("project", "harbor", "p"),
+        ],
+        fail={"p/r": RuntimeError("x")},
+    )
+    out = await AdapterPlatformStep(port, FakeNames()).run(_ctx(flag=True)[0])
+    assert out.counts == {"platform_projects": 1}

@@ -12,9 +12,13 @@ An item that fails is skipped for the rest of the pass and the pass moves on, so
 (a disabled adapter, say) never holds up the ones behind it. A project is never tried while one of
 its repositories remains (removed or not, in this pass or before). The pass stops at
 `MAX_TRIES_PER_PASS` tries or when the engine's run budget is spent (`ctx.renew` raises
-`RunBudgetExhausted`). It reports progress (a changed cursor, which resets the engine's attempts)
-only when something was removed; when every remaining item failed it raises `PlatformStepHeldError`
-(the engine retries with backoff, counts the attempt and raises the alert). Repositories and
+`RunBudgetExhausted`; with failures and no removal that holds the step instead of releasing the
+lease, so the attempt is counted). The pass starts at item `attempts % len(items)` and wraps, so
+items stuck at the head cannot starve the ones behind them across retries; the cursor is never
+used for this, because a changed cursor resets the attempts. It reports progress (a changed
+cursor, which resets the engine's attempts) only when something was removed; when every remaining
+item failed it raises `PlatformStepHeldError` (the engine retries with backoff, counts the attempt
+and raises the alert). Repositories and
 projects hold customer artifacts, so they are removed only when the request set
 `delete_platform_resources` (user decision 1); otherwise they stay and are recorded as skipped
 (`kept_by_request`). The work list is re-read from the recorded rows on every pass, so a crash
@@ -144,7 +148,11 @@ class AdapterPlatformStep:
         failures: Counter[str] = Counter()
         left = set(removable)
         tries = 0
-        for item in removable:
+        # Start where the engine's attempt count points, so items stuck at the head cannot keep
+        # the run budget from ever reaching the ones behind them. The cursor is not touched: it
+        # resets the attempts. A pass with progress resets them to 0 (start at the head again).
+        start = record.attempts % len(removable)
+        for item in [*removable[start:], *removable[:start]]:
             if tries >= MAX_TRIES_PER_PASS or _blocked(item, left):
                 continue
             try:
@@ -152,6 +160,10 @@ class AdapterPlatformStep:
             except RunBudgetExhausted:
                 if counts:
                     break
+                if failures:
+                    # Spent on failures: hold (counts the attempt, which rotates the start)
+                    # instead of releasing the lease, which would retry the same head items.
+                    raise _held(failures, len(removable)) from None
                 raise
             tries += 1
             try:
@@ -170,12 +182,16 @@ class AdapterPlatformStep:
             left.discard(item)
             counts[COUNT_CATEGORY[item.kind]] += 1
         if not counts:
-            kinds = ", ".join(f"{name} x{n}" for name, n in sorted(failures.items()))
-            raise PlatformStepHeldError(
-                f"{sum(failures.values())} of {len(removable)} removable items failed ({kinds})"
-            )
+            raise _held(failures, len(removable))
         removed = int(record.step_cursor.get("removed", 0)) + sum(counts.values())
         return StepOutcome(counts=dict(counts), cursor={"removed": removed}, done=False)
+
+
+def _held(failures: Counter[str], total: int) -> PlatformStepHeldError:
+    kinds = ", ".join(f"{name} x{n}" for name, n in sorted(failures.items()))
+    return PlatformStepHeldError(
+        f"{sum(failures.values())} of {total} removable items failed ({kinds})"
+    )
 
 
 def _blocked(item: PlatformItem, left: set[PlatformItem]) -> bool:

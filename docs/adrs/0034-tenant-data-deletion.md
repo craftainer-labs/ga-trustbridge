@@ -90,7 +90,7 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    (`ResourceCore.delete`). *NG6h-5b (no head-of-line blocking):* an item that fails is skipped for
    the rest of the pass and the pass tries the next one, so a stuck item (a disabled adapter, say)
    never holds up the rest; a project is never tried while one of its repositories remains. A pass
-   stops after 50 tries or when the run budget is spent. It reports progress (the cursor, which
+   stops after 50 tries or when the run budget is spent (spent on failures alone it holds, which counts the attempt), and starts at item `attempts % len(items)` (wrapping) so stuck head items cannot starve the rest across retries. It reports progress (the cursor, which
    resets the engine's attempts) only when something was removed; when every remaining item failed
    it raises `PlatformStepHeldError` (class names and counts only), which is the transient failure
    below. Per-item failures are logged by exception class only. Resources are **not write-ahead** (only credentials are, through
