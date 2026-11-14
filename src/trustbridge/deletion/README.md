@@ -71,8 +71,8 @@ cursor leaves them alone.
 ## The database step
 
 `SqlDatabaseStep(factory, batch_size=500)` deletes the tenant's rows in `PLAN` order (`credential_operations`,
-`adapter_credentials`, `adapter_resources`, `scope_leases`, `tenant_repositories`, then clears `webhook_deliveries`
-bodies), never the `tenants` row. One pass is one batch of one table in one transaction inside
+`adapter_credentials`, `adapter_resources`, `scope_leases`, `github_environments`, `tenant_repositories`, then clears
+`webhook_deliveries` bodies), never the `tenants` row. One pass is one batch of one table in one transaction inside
 `tenant_context(tenant_id)`; a short batch with nothing of the tenant left in the table moves the cursor (`{"table", "removed"}`) to the next table, a full one asks
 for another pass on the same table. A cursor it cannot read starts over, which is safe because each pass deletes whatever
 is left.
@@ -114,7 +114,7 @@ is left.
   host-wide: an unresolved delivery cannot be attributed to the tenant, so it is an upper bound.
 - **Retained:** `audit_events` and `tenant_deletions` (ADR 0034).
 - **Category names** in `counts` are `adapter_operations`, `access_grants`, `adapter_resources`, `scope_leases`,
-  `tenant_repositories` and `webhook_bodies`: the tables `credential_operations` and `adapter_credentials` contain a
+  `github_environments`, `tenant_repositories` and `webhook_bodies`: the tables `credential_operations` and `adapter_credentials` contain a
   secret word, so their counts take other names. A new tenant-keyed table is added to `database.PLAN`; an integration
   test fails when a table with a `tenant_id` column is in neither `PLAN` nor the retained set.
 - The batch size is a constructor argument; the composition root (NG6h-7) chooses it.
@@ -215,3 +215,13 @@ hands it to `ReconcilerDeps.record_purger`, and with none the duty does nothing.
   events (tenant id, host, installation id; no login) are removed only by the audit purge, so with
   `AUDIT_RETENTION_DAYS=0` they are kept for ever whatever this setting is. See ADR 0034, "Deletion
   records' retention".
+
+## Tracked GitHub environments (NG6h-6a)
+
+`github_environments` (migration `9a4d6c2e8b17`) holds the environments the GitHub writer created itself; the
+`database.PLAN` clears it (count `github_environments`) after the GitHub step has deleted them. `ports.TrackedEnvironments`
+(`tracked(tenant_id) -> [(repository_id, name)]`, `forget(tenant_id, repository_id, name)`) is what NG6h-6 uses: delete the
+listed environments, `forget` each once it is gone (or already absent), and record every environment in an output that is
+not listed as `environment_kept`. The app role holds `SELECT, INSERT, DELETE` and `UPDATE (created_at)` on it, which is
+enough for the step's `FOR UPDATE SKIP LOCKED` batches. The `tb_delete_tenant` emptiness backstop does not list this table
+(changing that function needs its own guarded revision); the step itself is the only deleter.

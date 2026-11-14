@@ -18,6 +18,22 @@ The GitHub core ([ADR 0028](../../../docs/adrs/0028-trustbridge-architecture-and
 - `writer.py` — libsodium sealed-box secrets, variables and environments; the environment
   protection reader the OIDC eligibility rule uses ("protected" = at least one entry in
   `protection_rules`).
+- `environments.py` — `SqlEnvironmentStore` over `github_environments` (migration `9a4d6c2e8b17`, NG6h-6a):
+  one row per environment trustbridge itself created, which a tenant deletion removes (ADR 0034
+  decision B6) and no other. `GitHubOutputWriter(gateway, environments)` reads the environment
+  first (`GET`, `administration: read`): 404 means the following `PUT` creates it, and the row is
+  written **after** the `PUT`; any other answer (the environment exists) records nothing. A crash
+  between the `PUT` and the row, or a failed row write (a retryable `OutputError`; the retry finds the
+  environment and records nothing), leaves a created but untracked environment, which is kept: the
+  failure direction is always "not deleted". A repeat creation of an already tracked environment
+  refreshes `created_at`. Without a tracker (the previous release) the writer does the `PUT` alone and
+  records nothing, so N-1 writers leave environments untracked and therefore kept. The table is
+  tenant-scoped (`tenant_isolation`, inert until release N+1 like the other tenant tables); the app role
+  has `SELECT, INSERT, DELETE` and `UPDATE (created_at)` only. `tracked(tenant_id)` and
+  `forget(tenant_id, repository_id, name)` are NG6h-6's calls (the `TrackedEnvironments` port in
+  `deletion/ports.py`; the packages do not import each other). The database step also clears a
+  tenant's rows. The composition roots (`admin/credentials.py`, `worker/tenant_reconcile.py`) must pass the
+  store to the writer for tracking to be on.
 - `checks.py`, `deployments.py` — check runs (scan results, manual-action notes) and deployments
   with statuses from Argo CD notifications. A static-header notification is only a trigger: state
   is re-read through the Argo CD adapter (`DeploymentStateSource`).

@@ -124,7 +124,7 @@ async def test_an_empty_table_reports_no_count() -> None:
     """Nothing removed adds nothing to the counts."""
     outcome = await _step(_Log()).run(_ctx({"table": "scope_leases"}))
     assert outcome.counts == {}
-    assert outcome.cursor == {"table": "tenant_repositories", "removed": 0}
+    assert outcome.cursor == {"table": "github_environments", "removed": 0}
 
 
 async def test_the_last_table_finishes_and_lists_the_unresolved_deliveries() -> None:

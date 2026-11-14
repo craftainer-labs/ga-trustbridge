@@ -9,12 +9,14 @@ the one permission it needs.
 from collections.abc import Sequence
 
 from pydantic import SecretStr
+from sqlalchemy.exc import SQLAlchemyError
 
 from trustbridge.adapters.interface import GitHubOutput, Tenant
 from trustbridge.adapters.store import DeliveredOutput, OutputError
 from trustbridge.github.availability import HostNotReadyError
 from trustbridge.github.client import HTTP_NOT_FOUND, GitHubApiError
 from trustbridge.github.gateway import Call, TenantGateway, enc
+from trustbridge.github.ports import EnvironmentTracker
 from trustbridge.github.sealed import seal
 
 _ORG_VISIBILITY = "private"
@@ -24,9 +26,16 @@ _ORG_VISIBILITY = "private"
 class GitHubOutputWriter:
     """`OutputWriter` implemented over GitHub's REST API."""
 
-    def __init__(self, gateway: TenantGateway) -> None:
-        """Use `gateway` for tokens, requests and repository-name lookups."""
+    def __init__(
+        self, gateway: TenantGateway, environments: EnvironmentTracker | None = None
+    ) -> None:
+        """Use `gateway` for tokens, requests and repository-name lookups.
+
+        With an `environments` tracker, an environment this writer creates is recorded (ADR 0034
+        decision B6); without one nothing is recorded and every environment stays untracked.
+        """
         self._gw = gateway
+        self._environments = environments
 
     async def apply(self, tenant: Tenant, outputs: Sequence[GitHubOutput]) -> None:
         """Create or update each output; raises `OutputError`."""
@@ -44,6 +53,10 @@ class GitHubOutputWriter:
             ) from exc
         except HostNotReadyError as exc:
             raise OutputError(str(exc), retryable=True) from exc
+        except SQLAlchemyError as exc:  # recording a created environment failed
+            raise OutputError(
+                f"recording a created environment failed ({type(exc).__name__})", retryable=True
+            ) from exc
 
     async def remove(self, tenant: Tenant, outputs: Sequence[DeliveredOutput]) -> None:
         """Delete secrets and variables; absent is fine.
@@ -123,16 +136,28 @@ class GitHubOutputWriter:
             msg = "an environment output needs a repository"
             raise OutputError(msg, retryable=False)
         full = await self._gw.full_name(tenant, out.repository_id)
-        await self._gw.call(
-            tenant,
-            Call(
-                "PUT",
-                f"/repos/{full}/environments/{enc(out.name)}",
-                {"administration": "write"},
-                [out.repository_id],
-                {},
-            ),
-        )
+        path = f"/repos/{full}/environments/{enc(out.name)}"
+        ids = [out.repository_id]
+        # Only a tracked writer needs to know whether the environment was there already.
+        absent = self._environments is not None and await self._is_absent(tenant, path, ids)
+        await self._gw.call(tenant, Call("PUT", path, {"administration": "write"}, ids, {}))
+        if absent and self._environments is not None:
+            # After the PUT: a crash in between leaves a created but untracked environment, which
+            # is kept (never deleted), the safe direction. A row is never written for an
+            # environment this writer did not create.
+            await self._environments.record_created(
+                tenant.id, tenant.github_host.name, out.repository_id, out.name
+            )
+
+    async def _is_absent(self, tenant: Tenant, path: str, ids: list[int]) -> bool:
+        """True when the environment does not exist yet (`GET` answers 404)."""
+        try:
+            await self._gw.call(tenant, Call("GET", path, {"administration": "read"}, ids))
+        except GitHubApiError as exc:
+            if exc.status == HTTP_NOT_FOUND:
+                return True
+            raise
+        return False
 
     async def _delete(self, tenant: Tenant, out: DeliveredOutput) -> None:
         base = await self._base(tenant, out.repository_id, out.environment)

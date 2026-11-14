@@ -5,9 +5,10 @@ nothing from the package and the package `__init__` re-exports nothing, so depen
 no engine code (ADR 0034).
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
+from uuid import UUID
 
 
 class DeletionDriver(Protocol):
@@ -61,3 +62,20 @@ class PlatformItem:
     kind: ItemKind
     adapter: str
     key: str
+
+
+class TrackedEnvironments(Protocol):
+    """The GitHub environments trustbridge created for a tenant (NG6h-6a; used by NG6h-6).
+
+    ADR 0034 user decision B6: the GitHub step deletes exactly these and no other environment; an
+    environment with no row here is kept and recorded as `environment_kept`. Implemented by
+    `trustbridge.github.environments.SqlEnvironmentStore`; the packages do not import each other.
+    """
+
+    async def tracked(self, tenant_id: UUID) -> Sequence[tuple[int, str]]:
+        """The tenant's tracked environments as `(repository_id, name)`, in key order."""
+        ...
+
+    async def forget(self, tenant_id: UUID, repository_id: int, name: str) -> None:
+        """Remove one row once its environment is deleted (or already gone); absent is fine."""
+        ...
