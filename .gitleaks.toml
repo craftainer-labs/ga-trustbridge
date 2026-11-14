@@ -16,3 +16,33 @@ description = "Smoke-test dummy SUBSCRIBER_SECRET in compose.yml (not a real cre
 paths = ['''^compose\.yml$''']
 regexes = ['''smoke-test-subscriber-secret-0123456789''']
 condition = "AND"
+
+# Instance-owned allowlists (ga-trustbridge): reviewed false positives that the full-history
+# scan reports in committed test data and docs. Each is a dummy or planted value.
+[[allowlists]]
+description = "Argo CD fixture dummy values: base64 of 'dummy-app-key-material' and 'whsec-dummy-value'"
+paths = ['''^tests/trustbridge/adapters/argocd/fixtures/(credentials|webhooks)\.json$''']
+regexes = ['''ZHVtbXktYXBwLWtleS1tYXRlcmlhbA==''', '''d2hzZWMtZHVtbXktdmFsdWU=''']
+regexTarget = "match"
+condition = "AND"
+
+[[allowlists]]
+description = "Planted canary secrets the tests assert are never logged or returned (not real credentials)"
+paths = ['''^tests/trustbridge/admin/test_(registration_unit|reads_integration)\.py$''']
+regexes = ['''whsec-canary-91d2c7''', '''canary-secret-7f3a9c1e''']
+regexTarget = "match"
+condition = "AND"
+
+[[allowlists]]
+description = "Test input that checks a terminal-escape and token-looking admin_disable_reason is sanitised (not a credential)"
+paths = ['''^tests/trustbridge/admin/test_reads_unit\.py$''']
+regexes = ['''token=abc123def456''']
+regexTarget = "match"
+condition = "AND"
+
+[[allowlists]]
+description = "Prose in the system design table: 'installation tokens, secret/variable/environment writer' (no secret)"
+paths = ['''^docs/system-design\.md$''']
+regexes = ['''secret/variable/environment''']
+regexTarget = "match"
+condition = "AND"

@@ -56,7 +56,7 @@ class Allowed:
 @pytest.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
     """An engine with the credential tables present and empty."""
-    eng = build_engine(Settings())
+    eng = build_engine(Settings(mode="dev"))
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, tables=TABLES, checkfirst=True)
         for table in TABLES:

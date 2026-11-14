@@ -38,7 +38,7 @@ class Scratch:
 
 
 def _url(user: str, password: str, database: str) -> URL:
-    s = Settings()
+    s = Settings(mode="dev")
     return URL.create(
         "postgresql+asyncpg",
         username=user,
@@ -52,7 +52,7 @@ def _url(user: str, password: str, database: str) -> URL:
 @pytest.fixture
 async def scratch() -> AsyncIterator[Scratch]:
     """A scratch database with the seven unforced RLS tables and two login roles."""
-    s = Settings()
+    s = Settings(mode="dev")
     suffix = uuid4().hex[:10]
     name, bypass, normal = f"tb_role_{suffix}", f"tb_rb_{suffix}", f"tb_rn_{suffix}"
     server = create_async_engine(

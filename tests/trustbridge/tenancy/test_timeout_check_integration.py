@@ -25,7 +25,7 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker]:  # type: ignore[type-arg]
     """A session factory on the app's database; the hook's bound is restored afterwards."""
-    s = Settings()
+    s = Settings(mode="dev")
     url = URL.create(
         "postgresql+asyncpg",
         username=s.postgres_user,

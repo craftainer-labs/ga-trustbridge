@@ -164,6 +164,11 @@ existing Secret. A null or empty value is not set, so the application default ap
 {{- $_ := set $c "MQTT_PORT" $v.mqtt.port -}}
 {{- $_ := set $c "MQTT_KEEPALIVE_SECONDS" $v.mqtt.keepaliveSeconds -}}
 {{- $_ := set $c "MQTT_USE_TLS" $v.mqtt.useTls -}}
+{{- $_ := set $c "MQTT_CA_FILE" $v.mqtt.caFile -}}
+{{- $_ := set $c "MQTT_CLIENT_CERT" $v.mqtt.clientCert -}}
+{{- $_ := set $c "MQTT_CLIENT_KEY" $v.mqtt.clientKey -}}
+{{- $_ := set $c "MQTT_ALLOW_INSECURE" $v.mqtt.allowInsecure -}}
+{{- $_ := set $c "MQTT_SESSION_TTL_SECONDS" $v.mqtt.sessionTtlSeconds -}}
 {{- $_ := set $c "BULK_ACTION_MAX_MATCHED" $v.app.bulkActionMaxMatched -}}
 {{- $_ := set $c "RATE_LIMIT_MOCK_TOKEN" $v.app.rateLimitMockToken -}}
 {{- $_ := set $c "RATE_LIMIT_BULK_ACTION" $v.app.rateLimitBulkAction -}}
@@ -173,6 +178,9 @@ existing Secret. A null or empty value is not set, so the application default ap
 {{- $_ := set $c "PROFILING_ENABLED" $v.app.profilingEnabled -}}
 {{- $_ := set $c "STATS_CACHE_TTL_SECONDS" $v.app.statsCacheTtlSeconds -}}
 {{- $_ := set $c "SSE_KEEPALIVE_SECONDS" $v.app.sseKeepaliveSeconds -}}
+{{- $_ := set $c "SSE_MAX_STREAMS_PER_CALLER" $v.app.sseMaxStreamsPerCaller -}}
+{{- $_ := set $c "SSE_DURABLE_SESSIONS" $v.app.sseDurableSessions -}}
+{{- $_ := set $c "HEALTH_READY_CACHE_TTL_SECONDS" $v.app.healthReadyCacheTtlSeconds -}}
 {{- $_ := set $c "SECURITY_TXT_CONTACT" $v.securityTxt.contact -}}
 {{- $_ := set $c "SECURITY_TXT_EXPIRES" $v.securityTxt.expires -}}
 {{- $_ := set $c "SECURITY_TXT_POLICY" $v.securityTxt.policy -}}
