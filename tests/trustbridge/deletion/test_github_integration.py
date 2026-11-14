@@ -184,7 +184,9 @@ async def test_the_step_removes_what_the_rows_record_and_only_tracked_environmen
     assert len(before) >= 2 and {o.kind for o in before} == {"secret", "variable"}
     assert await rig.port.untracked_environments(rig.tenant) == 1
     outcomes = await rig.drain()
-    assert len(rig.writer.removed) == len(before)
+    # the outputs scoped to `prod` go with the environment, not by name
+    assert len(rig.writer.removed) == len([o for o in before if o.environment is None])
+    assert any(o.environment == "prod" for o in before)
     assert rig.gateway.deleted == ["prod"]
     assert await _tracked(rig) == []
     # every secret, variable and the deleted environment left the rows; the untracked one stays
@@ -205,14 +207,19 @@ async def test_a_recreated_environment_is_kept_and_forgotten(
     """GitHub's `created_at` later than the row's plus the margin: not deleted, recorded."""
     rig = Rig(sessions)
     await rig.seed()
+    before = await rig.port.outputs(rig.tenant)
+    scoped = len([o for o in before if o.environment == "prod"])
+    assert scoped >= 1
     (_, _, row_time) = (await rig.environments.tracked_since(rig.tenant))[0]
     rig.gateway.created["prod"] = (row_time + CREATED_AT_SKEW + timedelta(seconds=5)).isoformat()
     outcomes = await rig.drain()
     assert rig.gateway.deleted == []
     assert await _tracked(rig) == []
     assert [s for o in outcomes for s in o.skipped if s["reason"] == "recreated"] == [
-        {"category": "environment_kept", "reason": "recreated", "count": 1}
+        {"category": "environment_kept", "reason": "recreated", "count": 1, "outputs": scoped}
     ]
+    # the recreated environment's outputs are never removed by name
+    assert len(rig.writer.removed) == len(before) - scoped
     assert await rig.outputs() == [("environment", "legacy")]
 
 
