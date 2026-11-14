@@ -30,6 +30,12 @@ from trustbridge.audit.model import (
 )
 
 _MAX_SEQ = 9223372036854775807
+# `purge_expired` moves its cut-off back by this margin: `tb_audit_purge` refuses a cut-off newer
+# than the database's `now() - min_days`, so a retention equal to the floor would fail on any
+# app-clock lead. Purging a little later is harmless. The same constant and reasoning live in
+# `trustbridge.deletion.purge.CLOCK_SKEW_MARGIN`; `audit` may not import `deletion` (see the
+# import-linter contracts), so keep the two in step.
+CLOCK_SKEW_MARGIN = timedelta(minutes=5)
 DEFAULT_PURGE_BATCH = 1000
 MAX_PURGE_BATCH = 10000  # the ceiling `tb_audit_purge` enforces
 DEFAULT_PURGE_MAX_BATCHES = 1000  # per call: bounds the loop (1M rows at the default batch)
@@ -318,7 +324,8 @@ async def purge_expired(  # noqa: PLR0913 -- every bound is a distinct, keyword-
     batch once that much `monotonic` time has elapsed, so a caller holding a lease ends before
     it could lapse. `on_batch(deleted)` is called after each committed batch with that batch's
     count (the reconciler beats and accounts rows there, so a later failure loses none).
-    Returns the total deleted. The reconciler runs it as
+    The cut-off is moved back by `CLOCK_SKEW_MARGIN` so a retention equal to `min_days` survives an
+    app clock ahead of the database's. Returns the total deleted. The reconciler runs it as
     a singleton duty (EB-6).
     """
     if retention_days < 0:
@@ -331,7 +338,7 @@ async def purge_expired(  # noqa: PLR0913 -- every bound is a distinct, keyword-
         raise ValueError(f"batch_size must be between 1 and {MAX_PURGE_BATCH}")
     if max_batches < 1:
         raise ValueError("max_batches must be at least 1")
-    cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days) - CLOCK_SKEW_MARGIN
     total = 0
     started = monotonic()
     for _ in range(max_batches):

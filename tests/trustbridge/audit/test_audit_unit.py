@@ -224,6 +224,22 @@ class _FakeSession:
         return self
 
 
+async def test_purge_expired_moves_the_cutoff_back_by_the_clock_skew_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cut-off is `now - retention - CLOCK_SKEW_MARGIN`, so a floor-level retention survives."""
+    cutoffs: list[datetime] = []
+
+    async def fake(_session: object, *, before: datetime, min_days: int, batch_size: int) -> int:
+        cutoffs.append(before)
+        return 0
+
+    monkeypatch.setattr(store_module, "purge_batch", fake)
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    await purge_expired(_fake_factory(), retention_days=90, min_days=90, now=now)
+    assert cutoffs == [now - timedelta(days=90) - store_module.CLOCK_SKEW_MARGIN]
+
+
 def _scripted_purge(monkeypatch: pytest.MonkeyPatch, counts: list[int]) -> list[int]:
     """Replace `purge_batch` with one that returns `counts` in turn; returns the call log."""
     calls: list[int] = []
