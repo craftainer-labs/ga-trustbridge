@@ -34,7 +34,7 @@ from trustbridge.worker.health import Heartbeat, stale_after
 from trustbridge.worker.lease import LeaseBusy, LeaseManager
 from trustbridge.worker.models import NIL_TENANT
 from trustbridge.worker.queue import StreamQueue
-from trustbridge.worker.reconcile_queue import Claim, ReconcileQueue
+from trustbridge.worker.reconcile_queue import Claim, ClaimLostError, Extend, ReconcileQueue
 from trustbridge.worker.relay import Clock, Relay, utcnow
 
 logger = logging.getLogger(__name__)
@@ -121,10 +121,14 @@ class TenantRefusals(Protocol):
 
 
 class TenantReconciler(Protocol):
-    """The tenant reconcile body (NG5r-b). Idempotent: a request can be processed twice."""
+    """The tenant reconcile body (`CredentialReconciler`). Idempotent: a request can run twice."""
 
-    async def reconcile(self, tenant_id: UUID) -> None:
-        """Bring the tenant's credentials to the desired state."""
+    async def reconcile(self, tenant_id: UUID, extend: Extend) -> None:
+        """Bring the tenant's credentials to the desired state.
+
+        `extend` re-stamps the running claim (and beats the loop's heartbeat); the body calls it
+        before each write step, and it raises `ClaimLostError` when the claim was reclaimed.
+        """
         ...
 
 
@@ -173,7 +177,7 @@ class ReconcilerDeps:
     record_purger: RecordPurger | None = None  # None: not composed (NG6h-7), no purge duty
     reconcile_requests: ReconcileQueue | None = None  # None: no Valkey (mock mode), no duty
     refusals: TenantRefusals | None = None  # None: no database, no duty
-    tenant_reconciler: TenantReconciler | None = None  # None: no body yet (NG5r-b)
+    tenant_reconciler: TenantReconciler | None = None  # None: mock mode, no body
 
 
 class Reconciler:
@@ -351,9 +355,12 @@ class Reconciler:
         `TENANT_RECONCILE_ENABLED` true, the body runs and the claim is acknowledged. Without the
         body the request goes back to pending: a request already answered 202 is never consumed
         by a duty that does nothing. A body or database failure leaves the claim inflight, so it is
-        retried after the claim TTL. A run starts no body after half the claim TTL (the rest of its
-        claims go back to pending), so a claim never expires before its body starts. Returns the
-        number of requests acknowledged.
+        retried after the claim TTL (the backoff); each run counts, and the request is dropped,
+        at ERROR, once `TENANT_RECONCILE_MAX_ATTEMPTS` runs have not succeeded. A body whose claim
+        was reclaimed (`ClaimLostError` from its `extend`) stops before its next write step. A run
+        starts no body after half the claim TTL (the rest of its claims go back to pending), so a
+        claim never expires before its body starts.
+        Returns the number of requests acknowledged.
         """
         queue, refusals = self._d.reconcile_requests, self._d.refusals
         if queue is None or refusals is None:
@@ -373,6 +380,12 @@ class Reconciler:
                     deferred += await queue.release(claim)
                     continue
                 done = await self._reconcile_claim(queue, refusals, body, claim)
+            except ClaimLostError:
+                logger.warning(
+                    "tenant reconcile aborted: its claim was reclaimed while it ran",
+                    extra={"tenant": str(claim.tenant_id)},
+                )
+                continue
             except Exception:
                 logger.exception(
                     "tenant reconcile failed; the claim is reclaimed after its TTL",
@@ -411,13 +424,39 @@ class Reconciler:
             await queue.release(claim)
             return False
         else:
-            await body.reconcile(claim.tenant_id)
+            await self._run_body(queue, body, claim)  # a poison request returns, to be acked
         if not await queue.ack(claim):
             logger.warning(
                 "reconcile claim was reclaimed while it ran; the request runs again",
                 extra={"tenant": tenant},
             )
+        else:
+            await queue.clear_attempts(claim)
         return True
+
+    async def _run_body(self, queue: ReconcileQueue, body: TenantReconciler, claim: Claim) -> None:
+        """Run the body for a claim; a poison request is logged and left for the caller to ack.
+
+        Each run counts first (a crash counts too). The request is dropped, at ERROR, when it has
+        already run `TENANT_RECONCILE_MAX_ATTEMPTS` times without success; a failure leaves the
+        claim inflight, so the next attempt waits the claim TTL (the backoff).
+        """
+        attempt = await queue.begin_attempt(claim)
+        limit = self._s.tenant_reconcile_max_attempts
+        if attempt > limit:
+            logger.error(
+                "dropped a reconcile request: it failed %d times",
+                limit,
+                extra={"tenant": str(claim.tenant_id), "attempts": limit},
+            )
+            return
+
+        async def extend() -> None:
+            self._beat("tenant-reconcile")
+            if not await queue.extend(claim, self._d.clock()):
+                raise ClaimLostError(str(claim.tenant_id))
+
+        await body.reconcile(claim.tenant_id, extend)
 
     async def trim_streams(self) -> None:
         """Trim `tb:events` below what the group acknowledged, the dead letter by age, set lag."""

@@ -242,6 +242,7 @@ existing Secret. A null or empty value is not set, so the application default ap
 {{- $_ := set $c "TENANT_RECONCILE_INTERVAL_SECONDS" $tb.tenantReconcile.intervalSeconds -}}
 {{- $_ := set $c "TENANT_RECONCILE_BATCH_SIZE" $tb.tenantReconcile.batchSize -}}
 {{- $_ := set $c "TENANT_RECONCILE_CLAIM_TTL_SECONDS" $tb.tenantReconcile.claimTtlSeconds -}}
+{{- $_ := set $c "TENANT_RECONCILE_MAX_ATTEMPTS" $tb.tenantReconcile.maxAttempts -}}
 {{- $_ := set $c "LEASE_TTL_SECONDS" $tb.lease.ttlSeconds -}}
 {{- $_ := set $c "ADAPTER_CALL_TIMEOUT_SECONDS" $tb.lease.adapterCallTimeoutSeconds -}}
 {{- if $tb.secretStore.existingClaim -}}

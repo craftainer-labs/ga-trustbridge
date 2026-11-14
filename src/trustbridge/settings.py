@@ -174,10 +174,13 @@ class TrustbridgeSettings(Settings):
     # set `tb:reconcile` every `tenant_reconcile_interval_seconds`, at most
     # `tenant_reconcile_batch_size` claims per run. A claim not acknowledged within
     # `tenant_reconcile_claim_ttl_seconds` is reclaimed (at least `lease_ttl_seconds`, so a
-    # reconcile that holds a scope lease is not reclaimed under it). While
-    # `tenant_reconcile_enabled` is false (the default) a request for a tenant that may be
-    # reconciled stays pending; a request for a disabled, deleting or deleted tenant is dropped.
-    tenant_reconcile_enabled: bool = False
+    # reconcile that holds a scope lease is not reclaimed under it; a running body re-stamps its
+    # claim at each step). While `tenant_reconcile_enabled` is false a request for a tenant that
+    # may be reconciled stays pending; a request for a disabled, deleting or deleted tenant is
+    # dropped. A body that has run `tenant_reconcile_max_attempts` times without success for one
+    # tenant is dropped with an ERROR log (each retry waits the claim TTL).
+    tenant_reconcile_enabled: bool = True
+    tenant_reconcile_max_attempts: int = Field(default=5, ge=1, le=100)
     tenant_reconcile_interval_seconds: float = Field(default=30.0, gt=0)
     tenant_reconcile_batch_size: int = Field(default=50, ge=1, le=1000)
     tenant_reconcile_claim_ttl_seconds: float = Field(default=300.0, gt=0)

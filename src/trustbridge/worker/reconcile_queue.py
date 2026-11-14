@@ -17,6 +17,14 @@ and a stale holder cannot undo a newer claim):
    older release) is stamped first and reclaimed one TTL later.
 4. **release**: the same token check, then `HDEL` and `SMOVE` back to pending, for a request that
    was claimed and deliberately not acted on.
+5. **extend**: the same token check, then the claim's time is re-stamped (the token is kept). A
+   running body calls it at each heartbeat (a visibility-timeout extension), so a reclaim only
+   takes a request whose holder stopped heartbeating. A False answer means the claim is gone.
+
+The attempts of a request live in a separate hash, `tb:reconcile:attempts` (a reclaim removes the
+claim entry, so the count cannot live there): `begin_attempt` adds one before the body runs and
+`clear_attempts` removes the count when the request is acknowledged. The reconciler drops a request
+whose count passes `TENANT_RECONCILE_MAX_ATTEMPTS` (poison handling, ADR 0029).
 
 A slow holder whose claim was reclaimed finds out at its ack: the claim entry is gone or carries
 another token, so `ack` returns False and the caller logs it. The reconcile itself is idempotent
@@ -27,6 +35,7 @@ re-claimed it, the request stays pending and runs once more.
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID, uuid4
@@ -38,6 +47,7 @@ from trustbridge.worker.ports import RECONCILE_SET
 logger = logging.getLogger(__name__)
 INFLIGHT_SET = "tb:reconcile:inflight"
 CLAIMS_HASH = "tb:reconcile:claims"
+ATTEMPTS_HASH = "tb:reconcile:attempts"
 _SEP = "|"
 
 # KEYS: pending set, inflight set, claims hash. ARGV: see each script. The token is the text after
@@ -63,6 +73,13 @@ if not v or string.match(v, '^[^|]*|(.*)$') ~= ARGV[2] then return 0 end
 redis.call('HDEL', KEYS[3], ARGV[1])
 return redis.call('SMOVE', KEYS[2], KEYS[1], ARGV[1])
 """
+# ARGV: member, token, the new stamp (the same token, a new time)
+_EXTEND = """
+local v = redis.call('HGET', KEYS[3], ARGV[1])
+if not v or string.match(v, '^[^|]*|(.*)$') ~= ARGV[2] then return 0 end
+redis.call('HSET', KEYS[3], ARGV[1], ARGV[3])
+return 1
+"""
 # ARGV: member, a stamp, the entry as listed ('' for none): stamps a member that is still inflight
 # and whose entry is still the listed one (absent, or unreadable)
 _STAMP = """
@@ -86,6 +103,14 @@ class Claim:
 
     tenant_id: UUID
     token: str
+
+
+class ClaimLostError(Exception):
+    """A running reconcile found its claim reclaimed (or acknowledged) by someone else."""
+
+
+Extend = Callable[[], Awaitable[None]]
+"""Re-stamps the running claim; raises `ClaimLostError` when it is gone (before each write step)."""
 
 
 def _text(value: str | bytes | int) -> str:
@@ -160,6 +185,19 @@ class ReconcileQueue:
     async def release(self, claim: Claim) -> bool:
         """Put the request back to pending without acting on it. False when the claim was lost."""
         return bool(await self._run(_RELEASE, str(claim.tenant_id), claim.token))
+
+    async def extend(self, claim: Claim, now: datetime) -> bool:
+        """Re-stamp the claim with `now`, only if its token is still ours; False when it is gone."""
+        stamp = _stamp(now, claim.token)
+        return bool(await self._run(_EXTEND, str(claim.tenant_id), claim.token, stamp))
+
+    async def begin_attempt(self, claim: Claim) -> int:
+        """Count one more run of the request's body; returns the number of runs so far."""
+        return int(await self._r.hincrby(ATTEMPTS_HASH, str(claim.tenant_id), 1))
+
+    async def clear_attempts(self, claim: Claim) -> None:
+        """Forget the request's attempts (it was acknowledged)."""
+        await self._r.hdel(ATTEMPTS_HASH, str(claim.tenant_id))
 
     async def reclaim(self, now: datetime, ttl_seconds: float) -> int:
         """Return requests inflight for longer than `ttl_seconds` to pending; returns the count."""

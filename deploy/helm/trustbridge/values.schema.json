@@ -148,6 +148,11 @@
             "claimTtlSeconds": {
               "type": "number",
               "exclusiveMinimum": 0
+            },
+            "maxAttempts": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
             }
           }
         },

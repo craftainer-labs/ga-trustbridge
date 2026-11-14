@@ -27,6 +27,7 @@ from redis.asyncio import from_url as redis_from_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters.interface import GitHubHost
+from trustbridge.adapters.loader import load_adapter_classes
 from trustbridge.audit.emit import AuditWriter, TenantSyncAudit
 from trustbridge.deletion.ports import DeletionDriver
 from trustbridge.github.availability import HostChecker
@@ -48,10 +49,11 @@ from trustbridge.worker.ports import (
 )
 from trustbridge.worker.queue import StreamQueue
 from trustbridge.worker.reconcile_queue import ReconcileQueue
-from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
+from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps, TenantReconciler
 from trustbridge.worker.relay import Relay
 from trustbridge.worker.schema import SchemaGate, SchemaWaitTimeout
 from trustbridge.worker.secrets import LocalSecrets, MemorySecrets
+from trustbridge.worker.tenant_reconcile import build_tenant_reconciler
 from trustbridge.worker.worker import Worker, WorkerDeps
 
 logger = logging.getLogger(__name__)
@@ -198,6 +200,7 @@ class ProcessOverrides:
     checker: HostChecker | None = None
     stop: asyncio.Event | None = None
     deletion: DeletionDriver | None = None  # the reconciler's tenant deletion engine
+    tenant_reconciler: TenantReconciler | None = None  # the reconciler's tenant reconcile body
 
 
 async def run_process(
@@ -294,6 +297,14 @@ async def run_process(
                     deletion=chosen.deletion,
                     reconcile_requests=ReconcileQueue(client),
                     refusals=core.tenant_gate,
+                    tenant_reconciler=chosen.tenant_reconciler
+                    or (
+                        build_tenant_reconciler(
+                            core, sessions, load_adapter_classes(settings.adapters_enabled)
+                        )
+                        if sessions is not None
+                        else None
+                    ),
                 )
                 await Reconciler(settings, rdeps).run(stop)
         finally:
