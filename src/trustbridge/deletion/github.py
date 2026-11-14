@@ -77,6 +77,7 @@ GONE_REASON = "installation_gone"
 KEPT_CATEGORY = "environment_kept"
 RECREATED_REASON = "recreated"
 UNTRACKED_REASON = "untracked"
+UNREACHABLE_REASON = "repository_unreachable"
 
 
 class GithubStepHeldError(Exception):
@@ -97,8 +98,13 @@ class GithubPort(Protocol):
         """The secrets and variables still recorded in the tenant's credential rows."""
         ...
 
-    async def remove_output(self, tenant_id: UUID, output: GithubOutput) -> None:
-        """Delete it from GitHub (absent is fine), then clear it from its credential row."""
+    async def remove_output(self, tenant_id: UUID, output: GithubOutput) -> bool:
+        """Delete it from GitHub (absent is fine), then clear it from its credential row.
+
+        False when GitHub answers 404 for the repository itself (deleted, transferred or no longer
+        visible to the installation): nothing can be removed from our side, the entry is cleared
+        anyway, and the step reports it as skipped rather than removed.
+        """
         ...
 
     async def environments(self, tenant_id: UUID) -> Sequence[TrackedEnvironment]:
@@ -155,6 +161,62 @@ def _untracked(count: int) -> list[dict[str, object]]:
     return [{"category": KEPT_CATEGORY, "reason": UNTRACKED_REASON, "count": count}]
 
 
+class _Tally:
+    """What one pass settled: counts, and the entries `skipped` records."""
+
+    def __init__(self, scoped: Counter[tuple[int | None, str | None]]) -> None:
+        """`scoped` is how many recorded outputs sit in each (repository, environment)."""
+        self._scoped = scoped
+        self.counts: Counter[str] = Counter()
+        self.settled = 0
+        self._recreated = 0
+        self._recreated_outputs = 0
+        self._unreachable: list[int | None] = []
+
+    def settle(self, item: GithubOutput | TrackedEnvironment, outcome: str) -> None:
+        """Record one settled item."""
+        self.settled += 1
+        if outcome == UNREACHABLE_REASON and isinstance(item, GithubOutput):
+            self._unreachable.append(item.repository_id)
+            return
+        inside = (
+            self._scoped[(item.repository_id, item.name)]
+            if isinstance(item, TrackedEnvironment)
+            else 0
+        )
+        if outcome == RECREATED_REASON:
+            self._recreated += 1
+            self._recreated_outputs += inside
+            return
+        self.counts[outcome] += 1
+        if inside:  # its scoped secrets and variables went with it
+            self.counts[COUNT_OUTPUTS] += inside
+
+    def skipped(self) -> list[dict[str, object]]:
+        """The `skipped` entries of the pass."""
+        entries: list[dict[str, object]] = []
+        if self._recreated:  # their scoped secrets and variables stay on GitHub, as `outputs`
+            entries.append(
+                {
+                    "category": KEPT_CATEGORY,
+                    "reason": RECREATED_REASON,
+                    "count": self._recreated,
+                    "outputs": self._recreated_outputs,
+                }
+            )
+        if self._unreachable:
+            ids = sorted({i for i in self._unreachable if i is not None})
+            entries.append(
+                {
+                    "category": SKIPPED_OUTPUTS,
+                    "reason": UNREACHABLE_REASON,
+                    "count": len(self._unreachable),
+                    "repository_ids": ids,
+                }
+            )
+        return entries
+
+
 class GithubDeletionStep:
     """The `GithubStep` over a `GithubPort`."""
 
@@ -181,10 +243,8 @@ class GithubDeletionStep:
         # Start where the engine's attempt count points (see the module docstring); the cursor
         # is not touched, because a changed cursor resets the attempts.
         start = record.attempts % len(work)
-        counts: Counter[str] = Counter()
         failures: Counter[str] = Counter()
-        recreated = 0
-        settled = 0
+        tally = _Tally(Counter((o.repository_id, o.environment) for o in outputs if o.environment))
         tries = 0
         spent = False
         for item in [*work[start:], *work[:start]]:
@@ -197,27 +257,20 @@ class GithubDeletionStep:
             except RunBudgetExhausted:
                 spent = True
                 break
-            if outcome is None:
-                continue
-            settled += 1
-            if outcome == RECREATED_REASON:
-                recreated += 1
-            else:
-                counts[outcome] += 1
-        if not settled:
+            if outcome is not None:
+                tally.settle(item, outcome)
+        if not tally.settled:
             if spent and not failures:
                 raise RunBudgetExhausted
             # Held, also when the budget went on failures: the attempt is counted, which rotates
             # the next start, where releasing the lease would retry the same head items.
             raise _held(failures, len(work))
-        skipped = (
-            [{"category": KEPT_CATEGORY, "reason": RECREATED_REASON, "count": recreated}]
-            if recreated
-            else []
-        )
-        handled = int(record.step_cursor.get("handled", 0)) + settled
+        handled = int(record.step_cursor.get("handled", 0)) + tally.settled
         return StepOutcome(
-            counts=dict(counts), skipped=skipped, cursor={"handled": handled}, done=False
+            counts=dict(tally.counts),
+            skipped=tally.skipped(),
+            cursor={"handled": handled},
+            done=False,
         )
 
     async def _exists(self, ctx: StepContext) -> bool:
@@ -243,8 +296,8 @@ class GithubDeletionStep:
         record = ctx.record
         try:
             if isinstance(item, GithubOutput):
-                await self._github.remove_output(record.tenant_id, item)
-                return COUNT_OUTPUTS
+                removed = await self._github.remove_output(record.tenant_id, item)
+                return COUNT_OUTPUTS if removed else UNREACHABLE_REASON
             return await self._environment(record.tenant_id, item)
         except LeaseLost, RunBudgetExhausted, NonRetryableError:
             raise

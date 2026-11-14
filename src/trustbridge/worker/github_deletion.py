@@ -79,8 +79,11 @@ class SqlGithubPort:
                     )
         return found
 
-    async def remove_output(self, tenant_id: UUID, output: GithubOutput) -> None:
-        """Delete it from GitHub, then clear it from its credential row."""
+    async def remove_output(self, tenant_id: UUID, output: GithubOutput) -> bool:
+        """Delete it from GitHub, then clear it from its credential row.
+
+        False when the repository itself answered 404 (the entry is cleared anyway).
+        """
         tenant = await self._tenants.get_tenant(tenant_id)
         delivered = DeliveredOutput(
             output.kind, output.name, output.repository_id, output.environment
@@ -88,13 +91,17 @@ class SqlGithubPort:
         try:
             await self._writer.remove(tenant, [delivered])
         except OutputError as exc:
-            # The writer already treats an absent secret as removed; a 404 that gets here is the
-            # repository itself (deleted, transferred or no longer visible): nothing is left on
-            # our side to remove, so the row's entry is cleared like any other.
+            # The writer already treats an absent secret as removed (`from exc` keeps the cause);
+            # a 404 that gets here is the repository itself (deleted, transferred or no longer
+            # visible): nothing can be removed from our side, so the entry is cleared and the
+            # step reports it as unreachable rather than removed.
             cause = exc.__cause__
             if not (isinstance(cause, GitHubApiError) and cause.status == HTTP_NOT_FOUND):
                 raise
+            await self._clear(tenant_id, output.adapter, output.scope_key, lambda o: o == delivered)
+            return False
         await self._clear(tenant_id, output.adapter, output.scope_key, lambda o: o == delivered)
+        return True
 
     async def environments(self, tenant_id: UUID) -> Sequence[TrackedEnvironment]:
         """The tracked environments with the time their rows were written."""

@@ -47,6 +47,7 @@ class FakePort:
     exists_error: Exception | None = None
     github_created: dict[str, datetime | None] = field(default_factory=dict)
     fail: dict[str, Exception] = field(default_factory=dict)
+    unreachable: set[str] = field(default_factory=set)
     calls: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     released: list[str] = field(default_factory=list)
@@ -64,12 +65,13 @@ class FakePort:
         assert tenant_id == TENANT
         return list(self.outs)
 
-    async def remove_output(self, tenant_id: UUID, output: GithubOutput) -> None:
-        """Remove one, or raise."""
+    async def remove_output(self, tenant_id: UUID, output: GithubOutput) -> bool:
+        """Remove one (False when its repository is unreachable), or raise."""
         self.calls.append(f"remove:{output.name}")
         if output.name in self.fail:
             raise self.fail[output.name]
         self.outs.remove(output)
+        return output.name not in self.unreachable
 
     async def environments(self, tenant_id: UUID) -> Sequence[TrackedEnvironment]:
         """The tracked environments."""
@@ -223,8 +225,35 @@ async def test_outputs_scoped_to_a_tracked_environment_are_settled_with_it() -> 
     assert "remove:FOO" not in port.calls
     assert "remove:LOOSE" in port.calls
     assert port.released == ["prod"] and port.deleted == []
-    assert out.skipped == [{"category": "environment_kept", "reason": "recreated", "count": 1}]
-    assert len(port.outs) == 1
+    assert out.skipped == [
+        {"category": "environment_kept", "reason": "recreated", "count": 1, "outputs": 1}
+    ]
+    assert out.counts == {"github_outputs_removed": 1}
+
+
+async def test_outputs_scoped_to_a_deleted_environment_count_as_removed() -> None:
+    """They went with the environment: counted with the removed outputs."""
+    scoped = GithubOutput("harbor", "scope", "variable", "V", 10, "prod")
+    port = FakePort(outs=[scoped], envs=[_env("prod")])
+    out = await GithubDeletionStep(port).run(_ctx())
+    assert port.deleted == ["prod"] and "remove:V" not in port.calls
+    assert out.counts == {"github_environments_removed": 1, "github_outputs_removed": 1}
+
+
+async def test_an_output_in_an_unreachable_repository_is_skipped_not_counted() -> None:
+    """A 404 on the repository: cleared, reported with the repository id, not as removed."""
+    port = FakePort(outs=[_out("S1", repo=11), _out("S2")], unreachable={"S1"})
+    out = await GithubDeletionStep(port).run(_ctx())
+    assert out.counts == {"github_outputs_removed": 1}
+    assert out.skipped == [
+        {
+            "category": "github_outputs",
+            "reason": "repository_unreachable",
+            "count": 1,
+            "repository_ids": [11],
+        }
+    ]
+    assert port.outs == []
 
 
 async def test_only_environments_named_by_rows_are_recorded_as_kept_untracked() -> None:
@@ -253,7 +282,9 @@ async def test_a_recreated_environment_is_kept_recorded_and_forgotten() -> None:
     assert port.deleted == ["old"]
     assert port.released == ["prod", "old"]
     assert out.counts == {"github_environments_removed": 1}
-    assert out.skipped == [{"category": "environment_kept", "reason": "recreated", "count": 1}]
+    assert out.skipped == [
+        {"category": "environment_kept", "reason": "recreated", "count": 1, "outputs": 0}
+    ]
     assert out.cursor == {"handled": 2} and not out.done
 
 

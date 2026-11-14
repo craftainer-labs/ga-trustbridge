@@ -320,7 +320,7 @@ async def test_an_output_whose_repository_is_gone_is_cleared(
     gone = OutputError("GitHub delete failed", retryable=False)
     gone.__cause__ = GitHubApiError(404, "Not Found")
     rig.writer.fail_remove = [gone]
-    await rig.port.remove_output(rig.tenant, first)
+    assert await rig.port.remove_output(rig.tenant, first) is False
     assert await rig.port.outputs(rig.tenant) == rest
 
 
