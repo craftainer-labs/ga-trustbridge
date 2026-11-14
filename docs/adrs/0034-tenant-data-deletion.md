@@ -107,11 +107,29 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    operator's `skip-step` moves on (user decision 2). Counts are `platform_access_grants`,
    `platform_webhooks`, `platform_repositories` and `platform_projects`.
 3. **GitHub.** Remove the secrets, variables and environments trustbridge wrote, as tracked in
-   the tenant's resource and credential rows, using an installation token, per repository. If
-   the installation no longer exists (the App was uninstalled), GitHub has already revoked
-   access and the outputs cannot be removed from our side: they are recorded in `skipped` as
-   `installation_gone`, with repository ids, so the customer can remove them. Nothing outside
-   the tracked outputs is touched.
+   the tenant's credential rows (`outputs`) and `github_environments` rows, using an installation
+   token, per repository. *Implemented (NG6h-6):* the step first checks, live, that the installation
+   still exists (`GET /app/installations/{id}` with the App JWT; 404 means gone, a suspended
+   installation exists). If it is gone, GitHub has already revoked access and the outputs cannot be
+   removed from our side: the step makes no other GitHub call and records them in `skipped` as
+   `installation_gone` (categories `github_outputs` and `github_environments`, each with a count and
+   the repository ids, so the customer can remove them; never a name; the audit event keeps only
+   category, reason and count). Otherwise it removes each
+   recorded secret and variable through the writer's remove path (absent is fine) and clears it from
+   its credential row, then handles the tracked environments (decision B6): an environment is
+   deleted only when GitHub's `created_at` is not later than the row's plus a 5 minute skew margin
+   (`CREATED_AT_SKEW`; the row is written after the `PUT` from the database clock, so the margin only
+   covers two clocks disagreeing); a later one was recreated by a person, is kept and recorded as
+   `environment_kept` / `recreated`, and its row is forgotten; 404 counts as done. An environment the
+   credential rows name that has no tracking row is never deleted and is recorded as
+   `environment_kept` / `untracked` (a count). A secret or variable scoped to a tracked environment is settled
+   with that environment (counted as removed when it goes with it; left, and noted on the `recreated`
+   entry, when a person recreated it, and never removed by name). A 404 on the repository itself
+   clears the entry and records `github_outputs` / `repository_unreachable` with the repository ids.
+   A failing installation lookup holds the step (class name only). Passes work like the platform
+   step's (every remaining item once per pass, the start rotating by `attempts`, a hold only when all remaining items fail,
+   class names only in diagnostics, the budget respected); counts are `github_outputs_removed` and
+   `github_environments_removed`. Nothing outside the tracked outputs is touched.
 4. **Secret store.** Remove the tenant's parked values (the drain abandons them). *Settled
    (NG6h-5):* the per-tenant Argo CD token is part of the operator-provisioned connection data and is
    **not** deleted; there is no separate secret-store state, and the platform step records the
@@ -399,7 +417,7 @@ adapter fakes.
   deleted environment) and records the rest as `environment_kept`. Failure directions are all "kept": a
   crash or a failed write after the `PUT`, a release without the tracker (N-1), and an environment created
   before this migration are untracked. A row can also outlive its environment (someone deleted it and created their own of that
-  name): NG6h-6 should delete a tracked environment only when GitHub's `created_at` for it is not later than the
+  name): step 3 deletes a tracked environment only when GitHub's `created_at` for it is not later than the
   row's (the row is written after the `PUT`, so only clock skew narrower than a recreation can fool it).
   One window remains: someone creating the environment between the writer's `GET` (404) and its `PUT`
   (one request round trip) would have it recorded as ours; the `created_at` guard cannot see that, and it
