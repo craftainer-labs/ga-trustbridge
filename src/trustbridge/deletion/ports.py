@@ -41,13 +41,25 @@ class PurgeResult:
 class RecordPurger(Protocol):
     """Purges finished deletion records past `DELETION_RETENTION_DAYS` (the reconciler's duty).
 
-    The hook the composition root (NG6h-7) fills: `ReconcilerDeps.record_purger`. With no purger
-    the duty does nothing.
+    The hook the composition root (`trustbridge.composition`) fills: `ReconcilerDeps.record_purger`.
+    With no purger the duty does nothing.
     """
 
     async def purge(self, on_batch: Callable[[int], None] | None = None) -> PurgeResult:
         """Run bounded batches; `on_batch(purged)` is called after each committed batch."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class DeletionWiring:
+    """What the composition root hands the reconciler: the engine and the record purger.
+
+    Either may be None (mock mode composes nothing); the reconciler then logs that the duty is
+    disabled and runs without it.
+    """
+
+    driver: DeletionDriver | None = None
+    record_purger: RecordPurger | None = None
 
 
 ItemKind = Literal["credential", "webhook", "repository", "project"]

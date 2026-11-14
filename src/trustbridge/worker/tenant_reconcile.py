@@ -50,6 +50,7 @@ from trustbridge.github.environments import SqlEnvironmentStore
 from trustbridge.github.installations import AppInstallationLookup
 from trustbridge.github.writer import GitHubEnvironmentInspector, GitHubOutputWriter
 from trustbridge.tenancy.gate import SqlTenantGate
+from trustbridge.worker.drain_deletion import SqlWritersPort
 from trustbridge.worker.github_deletion import SqlGithubPort
 from trustbridge.worker.lease import LeaseBusy, LeaseLost
 from trustbridge.worker.platform_deletion import SqlPlatformPort
@@ -249,7 +250,8 @@ def build_platform_port(
     """The tenant deletion's platform port (NG6h-5), or None without a database.
 
     The same collaborators as `build_tenant_reconciler` (one `_core_deps`), with a `ResourceCore`
-    beside the `CredentialCore`; the composition root (NG6h-7) hands it to `AdapterPlatformStep`.
+    beside the `CredentialCore`; the composition root (`trustbridge.composition`) hands it to
+    `AdapterPlatformStep`.
     The registry reads each tenant's connection data, so an adapter that is not enabled, or a
     tenant without its connection data, makes that item's removal fail (and the step retry).
     """
@@ -268,7 +270,7 @@ def build_github_port(
 
     The same writer, gateway and environment store as the reconciler's core (one `_core_deps`),
     and an App-JWT installation lookup over the host runtime's monitor and signers; the
-    composition root (NG6h-7) hands it to `GithubDeletionStep`.
+    composition root (`trustbridge.composition`) hands it to `GithubDeletionStep`.
     """
     if sessions is None:
         return None
@@ -282,3 +284,19 @@ def build_github_port(
         environments=SqlEnvironmentStore(sessions),
         installations=AppInstallationLookup(runtime.monitor, runtime.signers),
     )
+
+
+def build_writers_port(
+    core: Core,
+    sessions: async_sessionmaker[AsyncSession] | None,
+    classes: Mapping[str, type[PlatformAdapter]],
+) -> SqlWritersPort | None:
+    """The tenant deletion's drain port (NG6h-7a), or None without a database.
+
+    The same credential core as the reconciler's (one `_core_deps`), so an open operation of the
+    tenant is resumed under the normal rules while the drain waits for it.
+    """
+    if sessions is None:
+        return None
+    deps, _ = _core_deps(core, sessions, classes)
+    return SqlWritersPort(sessions, CredentialCore(deps))

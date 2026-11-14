@@ -20,6 +20,7 @@ from trustbridge.adapters.fake import fake_capabilities
 from trustbridge.adapters.interface import AdapterError, IssuedSecret
 from trustbridge.adapters.store import OperationStatus, OutputError
 from trustbridge.github.environments import SqlEnvironmentStore
+from trustbridge.worker.drain_deletion import SqlWritersPort
 from trustbridge.worker.github_deletion import SqlGithubPort
 from trustbridge.worker.lease import LeaseBusy
 from trustbridge.worker.platform_deletion import SqlPlatformPort
@@ -32,6 +33,7 @@ from trustbridge.worker.tenant_reconcile import (
     build_github_port,
     build_platform_port,
     build_tenant_reconciler,
+    build_writers_port,
 )
 
 
@@ -279,6 +281,22 @@ def test_the_github_port_factory_needs_a_database() -> None:
     assert build_github_port(core, None, classes) is None
     sessions = cast("async_sessionmaker[AsyncSession]", object())
     assert isinstance(build_github_port(core, sessions, classes), SqlGithubPort)
+
+
+def test_the_writers_port_factory_needs_a_database() -> None:
+    """NG6h-7a: the drain's port is composed from the same collaborators."""
+    parts = SimpleNamespace(
+        runtime=SimpleNamespace(gateway=object()),
+        connections=object(),
+        parked=object(),
+        leases=object(),
+        tenants=object(),
+    )
+    core = cast("Core", parts)
+    classes: dict[str, Any] = {"a": object}
+    assert build_writers_port(core, None, classes) is None
+    sessions = cast("async_sessionmaker[AsyncSession]", object())
+    assert isinstance(build_writers_port(core, sessions, classes), SqlWritersPort)
 
 
 async def test_the_global_parked_sweep_runs_once_per_interval() -> None:

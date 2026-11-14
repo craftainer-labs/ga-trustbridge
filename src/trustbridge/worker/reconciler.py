@@ -174,7 +174,7 @@ class ReconcilerDeps:
     heartbeat: Heartbeat | None = None
     audit_sessions: async_sessionmaker[AsyncSession] | None = None  # None: mock mode, no purge
     deletion: DeletionDriver | None = None  # None: no deletion engine composed, no duty
-    record_purger: RecordPurger | None = None  # None: not composed (NG6h-7), no purge duty
+    record_purger: RecordPurger | None = None  # None: not composed (mock mode), no purge duty
     reconcile_requests: ReconcileQueue | None = None  # None: no Valkey (mock mode), no duty
     refusals: TenantRefusals | None = None  # None: no database, no duty
     tenant_reconciler: TenantReconciler | None = None  # None: mock mode, no body

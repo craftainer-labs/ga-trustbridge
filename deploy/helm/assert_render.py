@@ -103,7 +103,11 @@ def check_commands(deployments: dict[str, Doc], ports: dict[str, int] | None) ->
     check("HEALTH_PORT" not in env_of(api), "the api does not run the health endpoint")
     for process in ("worker", "reconciler"):
         container = container_of(deployments[process])
-        want = ["python", "-m", "trustbridge.worker", process]
+        want = (
+            ["python", "-m", "trustbridge.reconciler"]
+            if process == "reconciler"
+            else ["python", "-m", "trustbridge.worker", process]
+        )
         check(container["command"] == want, f"{process} command")
         env = env_of(container)
         if ports is None:

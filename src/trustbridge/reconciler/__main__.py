@@ -1,7 +1,7 @@
-"""Shim: `python -m trustbridge.reconciler` runs `python -m trustbridge.worker reconciler`."""
+"""`python -m trustbridge.reconciler`: the reconciler with the tenant deletion composed in."""
 
 import sys
 
-from trustbridge.worker.__main__ import main
+from trustbridge.composition import main
 
-sys.exit(main(["reconciler", *sys.argv[1:]]))
+sys.exit(main("reconciler"))

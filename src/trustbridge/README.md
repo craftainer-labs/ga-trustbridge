@@ -35,8 +35,11 @@ The instance package of the trustbridge GitHub App, a sibling of the template's 
 - `deletion/`: the tenant deletion engine (ADR 0034): state machine, lease and fence loop, failure
   policy, drain step and audit events; the steps are Protocols filled by later items. See its
   `README.md`.
-- `reconciler/`, `migrations/`: one-line `__main__` shims so the commands keep the names in the
-  ADR (`python -m trustbridge.reconciler`, `python -m trustbridge.migrations upgrade`).
+- `composition.py`: the composition root of the tenant deletion (NG6h-7a): builds the engine with its
+  four steps and the record purger from the reconciler's `Core`. It is the one module that imports the
+  concrete classes of both `deletion/` and `worker/`.
+- `reconciler/`, `migrations/`: `python -m trustbridge.reconciler` runs the reconciler with the deletion
+  composed (`composition.main`); `python -m trustbridge.migrations upgrade` is a one-line shim.
 
 Import rules (import-linter, `pyproject.toml`): `main` > `webhooks` and `admin` (independent) >
 `worker` > `ratelimit` > `settings`; `app` never imports `trustbridge`; `adapters` and `signer`
