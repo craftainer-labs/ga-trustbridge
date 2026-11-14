@@ -10,8 +10,9 @@ gateway with an installation token). It imports nothing from `adapters` or `gith
 `installation_exists` says the App is gone, GitHub has already revoked access and no token can be
 minted, so the step makes no other GitHub call: it records the recorded outputs and tracked
 environments as `installation_gone` skipped entries (categories `github_outputs` and
-`github_environments`, counts only, never a name) and finishes. With nothing recorded at all it
-makes no call. A lookup that fails (host not ready, GitHub down) is transient like any other.
+`github_environments`, with the repository ids and a count, never a name) and finishes. With
+nothing recorded at all it makes no call. A lookup that fails (host not ready, GitHub down) is
+transient like any other.
 
 **Environments (B6).** Only a tracked environment is ever deleted. Before deleting it, GitHub's
 `created_at` is compared with the row's: when GitHub's is later than the row's plus
@@ -127,15 +128,25 @@ class GithubPort(Protocol):
 def _gone(
     outputs: Sequence[GithubOutput], environments: Sequence[TrackedEnvironment]
 ) -> list[dict[str, object]]:
-    entries = [
-        {"category": category, "reason": GONE_REASON, "count": len(items)}
+    """One entry per category with a count and the sorted repository ids (ADR 0034 step 3).
+
+    Numeric ids only, never a name; the audit event keeps just category, reason and count.
+    """
+    return [
+        {
+            "category": category,
+            "reason": GONE_REASON,
+            "count": len(items),
+            "repository_ids": sorted(
+                {i.repository_id for i in items if i.repository_id is not None}
+            ),
+        }
         for category, items in (
             (SKIPPED_OUTPUTS, outputs),
             (SKIPPED_ENVIRONMENTS, environments),
         )
         if items
     ]
-    return entries
 
 
 def _untracked(count: int) -> list[dict[str, object]]:

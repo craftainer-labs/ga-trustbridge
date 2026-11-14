@@ -112,9 +112,9 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    still exists (`GET /app/installations/{id}` with the App JWT; 404 means gone, a suspended
    installation exists). If it is gone, GitHub has already revoked access and the outputs cannot be
    removed from our side: the step makes no other GitHub call and records them in `skipped` as
-   `installation_gone` (categories `github_outputs` and `github_environments`, **counts only**: no
-   repository id, name or login, because the record is read by more people than the repositories'
-   owners; the customer finds them from their own repository list). Otherwise it removes each
+   `installation_gone` (categories `github_outputs` and `github_environments`, each with a count and
+   the repository ids, so the customer can remove them; never a name; the audit event keeps only
+   category, reason and count). Otherwise it removes each
    recorded secret and variable through the writer's remove path (absent is fine) and clears it from
    its credential row, then handles the tracked environments (decision B6): an environment is
    deleted only when GitHub's `created_at` is not later than the row's plus a 5 minute skew margin

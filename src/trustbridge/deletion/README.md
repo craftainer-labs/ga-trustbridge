@@ -174,7 +174,7 @@ secret or variable through `GitHubOutputWriter.remove` and an environment throug
 - **The installation is checked first, live** (`GET /app/installations/{id}` with the App JWT, 404 =
   gone; a suspended installation still exists). Gone: the step makes no other GitHub call and no
   write, records `github_outputs` and `github_environments` skipped entries with reason
-  `installation_gone` (counts only, never a name or id) and finishes. The rows stay for the database
+  `installation_gone` (a count and the repository ids, never a name; the audit event keeps only category, reason and count) and finishes. The rows stay for the database
   step. With nothing recorded there is no call at all. A failing lookup is transient (retry, alert).
 - **What it removes** is what the rows record: the secrets and variables in the credential rows'
   `outputs` (the platform step leaves them there, `remove_outputs=False`), then the tracked

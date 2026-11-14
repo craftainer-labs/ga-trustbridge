@@ -219,7 +219,7 @@ async def test_a_recreated_environment_is_kept_and_forgotten(
 async def test_a_gone_installation_calls_nothing_and_leaves_the_rows_for_the_database_step(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    """B9: counts only, no GitHub write, nothing cleared (step 5 deletes the rows)."""
+    """B9: ids and counts, no GitHub write, nothing cleared (step 5 deletes the rows)."""
     rig = Rig(sessions, exists=False)
     await rig.seed()
     before = await rig.outputs()
@@ -232,6 +232,11 @@ async def test_a_gone_installation_calls_nothing_and_leaves_the_rows_for_the_dat
         ("github_environments", "installation_gone"),
         ("environment_kept", "untracked"),
     }
+    assert all(
+        isinstance(s.get("repository_ids"), list)
+        for s in out.skipped
+        if s["reason"] == "installation_gone"
+    )
     assert await rig.outputs() == before
     assert await _tracked(rig) == [(10, "prod")]
 

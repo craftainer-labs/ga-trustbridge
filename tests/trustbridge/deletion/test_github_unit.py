@@ -149,10 +149,10 @@ async def test_an_empty_tenant_completes_without_a_github_call() -> None:
     assert port.calls == []
 
 
-async def test_a_gone_installation_records_counts_only_and_calls_nothing_else() -> None:
+async def test_a_gone_installation_records_repository_ids_and_calls_nothing_else() -> None:
     """B9: no token needed; the outputs and tracked environments are `installation_gone`."""
     port = FakePort(
-        outs=[_out("TOP-SECRET-NAME"), _out("V1", "variable")],
+        outs=[_out("TOP-SECRET-NAME", repo=11), _out("V1", "variable"), _out("ORG", repo=None)],
         envs=[_env("prod-private")],
         exists=False,
         untracked=2,
@@ -160,8 +160,18 @@ async def test_a_gone_installation_records_counts_only_and_calls_nothing_else() 
     out = await GithubDeletionStep(port).run(_ctx())
     assert out.done
     assert out.skipped == [
-        {"category": "github_outputs", "reason": "installation_gone", "count": 2},
-        {"category": "github_environments", "reason": "installation_gone", "count": 1},
+        {
+            "category": "github_outputs",
+            "reason": "installation_gone",
+            "count": 3,
+            "repository_ids": [10, 11],
+        },
+        {
+            "category": "github_environments",
+            "reason": "installation_gone",
+            "count": 1,
+            "repository_ids": [10],
+        },
         {"category": "environment_kept", "reason": "untracked", "count": 2},
     ]
     assert port.calls == ["installation"]
@@ -174,7 +184,12 @@ async def test_a_gone_installation_with_only_outputs_omits_the_environment_entry
     port = FakePort(outs=[_out("S1")], exists=False)
     out = await GithubDeletionStep(port).run(_ctx())
     assert out.skipped == [
-        {"category": "github_outputs", "reason": "installation_gone", "count": 1}
+        {
+            "category": "github_outputs",
+            "reason": "installation_gone",
+            "count": 1,
+            "repository_ids": [10],
+        }
     ]
 
 
