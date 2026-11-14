@@ -292,9 +292,13 @@ lease TTL, is a no-op when retention is 0, and logs once at startup when there i
 
 ## Rules
 
-- `AUDIT_RETENTION_DAYS` equal to `AUDIT_RETENTION_MIN_DAYS` passes validation but leaves no
-  clock-skew margin: an app clock ahead of the database's makes every purge raise 22023. Keep
-  retention above the floor by a margin. `AUDIT_EXPORT_LAG_SECONDS` has no upper bound.
+- `AUDIT_RETENTION_DAYS` equal to `AUDIT_RETENTION_MIN_DAYS` is safe against app-clock skew:
+  `purge_expired` subtracts `CLOCK_SKEW_MARGIN` (5 minutes) from the app-computed cut-off before
+  calling `tb_audit_purge`, so an app clock up to that far ahead of the database's no longer makes
+  the purge raise 22023. Events are purged up to 5 minutes later than the retention strictly says.
+  A lead beyond the margin still raises. The database-side floor check is unchanged. The deletion
+  purge has the same constant (`trustbridge.deletion.purge.CLOCK_SKEW_MARGIN`); `audit` may not
+  import `deletion`, so it is defined once in each. `AUDIT_EXPORT_LAG_SECONDS` has no upper bound.
 - Redaction is the emitter's job (`redact.project`); `append` stores `before` and `after` as
   given, after the construction-time shape and size checks.
 - Never `RETURNING` on an insert; never write `occurred_at`; never delete except via the purge.

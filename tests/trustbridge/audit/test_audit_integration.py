@@ -484,6 +484,23 @@ async def test_the_purge_function_is_the_only_delete_path(fresh_db: Db) -> None:
     assert {mid, new} <= set(await _all_ids(db.owner))
 
 
+async def test_a_retention_at_the_floor_survives_an_app_clock_ahead_of_the_database(
+    fresh_db: Db,
+) -> None:
+    """Retention at the floor, app clock 2 minutes ahead (inside the margin): purges, no 22023."""
+    db = fresh_db
+    old, new = await _seed_aged(db, [91, 5])
+    ahead = datetime.now(UTC) + timedelta(minutes=2)
+    # The raw cut-off would be newer than the database's `now() - 90 days`, which it refuses.
+    async with db.app() as session:
+        with pytest.raises(DBAPIError, match="retention floor"):
+            await purge_batch(session, before=ahead - timedelta(days=90), min_days=90)
+    assert await purge_expired(db.app, retention_days=90, min_days=90, now=ahead) == 1
+    remaining = set(await _all_ids(db.owner))
+    assert old not in remaining
+    assert new in remaining
+
+
 async def _all_ids(factory: async_sessionmaker[AsyncSession]) -> list[UUID]:
     async with factory() as session:
         result = await session.execute(text("SELECT id FROM audit_events"))
