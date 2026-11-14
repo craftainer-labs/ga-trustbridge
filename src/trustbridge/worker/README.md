@@ -36,10 +36,16 @@ template app: deployments override it).
 ```bash
 uvicorn trustbridge.main:app --no-proxy-headers --host 0.0.0.0 --port 8000   # api
 python -m trustbridge.worker worker                                          # stream consumer
-python -m trustbridge.worker reconciler                                      # relay, reconciler, retention
+python -m trustbridge.worker reconciler                                      # the same, WITHOUT the deletion engine (not for deployment)
+python -m trustbridge.reconciler                                             # relay, reconciler, retention and the tenant deletion engine
 python -m trustbridge.worker migrate upgrade                                 # the migrate Job (owner role)
 python -m trustbridge.worker migrate revision --autogenerate -m "..."        # autogenerate wrapper
 ```
+
+The chart runs `python -m trustbridge.reconciler`. With a database, `worker reconciler` logs a
+WARNING at start that tenant deletion and the record purge are disabled (an old chart on a new
+image, or a `reconciler.command` override); deletion requests then stay pending until the command
+is fixed. It does not exit, so a rollback never crash-loops.
 
 `--no-proxy-headers` is required for the api: `TRUSTED_PROXIES` (applied through
 `ProxyHeadersMiddleware` in `trustbridge.main`) is then the only trusted list.

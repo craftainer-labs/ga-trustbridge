@@ -291,7 +291,8 @@ async def run_process(
                 )
                 await Worker(settings, deps, consumer_name()).run(stop)
             else:
-                wiring = chosen.composer(core, sessions) if chosen.composer else DeletionWiring()
+                compose = chosen.composer if chosen.deletion is None else None
+                wiring = compose(core, sessions) if compose else DeletionWiring()
                 rdeps = ReconcilerDeps(
                     store=core.store,
                     queue=core.queue,

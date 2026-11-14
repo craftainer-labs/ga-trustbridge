@@ -103,3 +103,20 @@ async def test_only_a_deletion_origin_reaches_the_gate_on_a_delete(secret_world:
     await core.delete_scope(w.tenant, "fake", PUSH_PROD)
     second: tuple[UUID, OperationKind | None, UUID | None] = gate.asked[-1]
     assert second == (w.tenant.id, OperationKind.DELETE, None)
+
+
+async def test_resume_operation_is_not_gated_so_the_deletion_drain_can_settle_an_open_one(
+    secret_world: World,
+) -> None:
+    """`resume_operation` (the drain's call) finishes an open rotation through a closed gate."""
+    w = secret_world
+    gate = Gate(open_=True)
+    core = _gated(w, gate)
+    await core.ensure_scope(w.tenant, "fake", PUSH_PROD)
+    started = await core.rotate_scope(w.tenant, "fake", PUSH_PROD)
+    assert started.operation_id is not None
+    gate.open = False
+    w.clock.advance(3601)
+    finished = await core.resume_operation(started.operation_id)
+    assert finished is not None
+    assert finished.status is OperationStatus.FINISHED

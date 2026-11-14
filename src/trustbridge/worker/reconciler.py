@@ -490,13 +490,20 @@ class Reconciler:
         if self._d.audit_sessions is None:
             logger.info("audit purge disabled: no audit store")
         if self._d.deletion is None:
-            logger.info("tenant deletion disabled: no deletion engine")
+            # With a database this is a wrong entry point (the chart runs `python -m
+            # trustbridge.reconciler`), not mock mode: deletion requests would stay pending.
+            report = logger.info if self._d.audit_sessions is None else logger.warning
+            report(
+                "tenant deletion disabled: no deletion engine"
+                " (run the reconciler as `python -m trustbridge.reconciler`)"
+            )
         if self._d.reconcile_requests is None or self._d.refusals is None:
             logger.info("tenant reconcile disabled: no Valkey or database")
         elif not (s.tenant_reconcile_enabled and self._d.tenant_reconciler is not None):
             logger.info("tenant reconcile requests stay pending: no reconcile body is enabled")
         if self._d.record_purger is None:
-            logger.info("deletion record purge disabled: no record purger")
+            report = logger.info if self._d.audit_sessions is None else logger.warning
+            report("deletion record purge disabled: no record purger")
         await self._d.queue.ensure_group()  # registered first: a hang here is a stale loop
         jobs = [periodic(name, interval, job, stop, beat.beat) for name, interval, job in schedule]
         await asyncio.gather(*jobs)
