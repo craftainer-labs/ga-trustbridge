@@ -172,6 +172,30 @@ Process-wide switches `main.py` consumes (see "Startup, shutdown and middleware 
 | `HEALTH_INFO_ENABLED` | `false` | Mount `GET /health/info` (`{"version", "commit"}` from `APP_VERSION`/`APP_COMMIT`, falling back to the installed `template-fastapi` distribution's version). Off because it discloses the version. |
 | `PROFILING_ENABLED` | `false` | A request with `?profile=1` is answered with a pyinstrument HTML profile. Startup fails (`ProfilingDisabledError`) under `MODE=production`. pyinstrument is a dev dependency only. |
 
+MQTT broker (the CRUD event stream, ADR-0015) and `GET <prefix>/events` limits, mapped onto
+`craftainer_crud.config.MQTTConfig`/`CrudConfig` in `crud_1/wiring.py`:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MQTT_HOST` | `localhost` | Broker host name. With TLS it must match the broker certificate. |
+| `MQTT_PORT` | `8883` with `MQTT_USE_TLS`, else `1883` | Broker port. |
+| `MQTT_USE_TLS` | `false` | Connect over TLS (TLS 1.2 or newer, broker certificate and host name verified). Required under `MODE=production`. |
+| `MQTT_USERNAME` / `MQTT_PASSWORD` | unset | Broker credentials; the password is kept out of `repr`. Both required under `MODE=production`. Without TLS the library refuses them unless `MQTT_ALLOW_INSECURE`. |
+| `MQTT_CA_FILE` | unset (system trust store, `SSL_CERT_FILE`) | PEM bundle that signs the broker's certificate (a private CA). Needs `MQTT_USE_TLS`. |
+| `MQTT_CLIENT_CERT` / `MQTT_CLIENT_KEY` | unset | PEM client certificate (chain) and key for mutual TLS. Needs `MQTT_USE_TLS`. |
+| `MQTT_ALLOW_INSECURE` | `false` | Library escape hatch: credentials without TLS, a context that does not verify the broker. Local development only; refused under `MODE=production`. |
+| `MQTT_KEEPALIVE_SECONDS` | `60` | MQTT keep-alive, 0 to 65535. |
+| `MQTT_SESSION_TTL_SECONDS` | `3600` | How long the broker keeps an abandoned durable event-stream session. |
+| `SSE_MAX_STREAMS_PER_CALLER` | `5` | Concurrent `/events` streams one caller (the owner scope's value) may hold per process; the next gets 429. |
+| `SSE_DURABLE_SESSIONS` | `false` | `false`: every stream is transient (clean session, no replay, a client-sent `subscriber_id` is ignored). `true`: the broker queues events for a returning subscriber id (opt-in). |
+| `SSE_KEEPALIVE_SECONDS` | `15` | Idle seconds before a `: keep-alive` comment. |
+| `HEALTH_READY_CACHE_TTL_SECONDS` | `1` | Seconds `GET /health/ready` reuses its last result (concurrent calls share one run); `0` turns the cache off. Mount the health routes on an internal port. |
+
+Events are published **after the commit**, in a background task, over one shared connection:
+a rolled-back change is never streamed, and a broker failure is logged and counted
+(`craftainer_crud.interfaces.delivery.event_delivery_stats()`), never a 500. The lifespan's
+shutdown calls `close_event_publishers()` to let in-flight deliveries finish first.
+
 ## Stats cache
 
 `GET <prefix>/stats` and `/predict` are whole-table aggregates, not per-user data, so
@@ -243,7 +267,7 @@ loggers over to the root handlers, so its lines are JSON too.
 
 `craftainer_observability.analytics` (the `analytics` extra) reads the `ANALYTICS_*`
 variables itself, so `config.py` has no fields for them. Off unless a backend is set
-(`none` by default; the devcontainer's `umami.env` selects `umami`):
+(`none` by default; the devcontainer's `analytics.env` selects `umami`):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -267,6 +291,11 @@ reaches a real backend. The privacy rules a new event must keep are in NFR-0028:
 props on the allowlist, no personal data, path-only `url`.
 
 ## Alembic migrations
+
+`../../alembic/env.py` connects with `app.db.build_engine(get_settings())`, the same
+engine factory as the request path, so migrations honor `POSTGRES_SSLMODE`,
+`DB_CONNECT_TIMEOUT` and `DB_COMMAND_TIMEOUT` (a slow DDL statement can hit the
+command timeout). It does not build its own engine.
 
 Pending migrations apply automatically: `main.py`'s FastAPI `lifespan`
 runs `alembic upgrade head` (off the event loop, via `asyncio.to_thread`
@@ -376,9 +405,15 @@ role list beyond what `realm-export.json` defines.
 `config.py`'s `Settings.mode` (env var `MODE`) is `"dev"`, `"mock"`, or
 `"production"`, read once at import time everywhere it's used (the same
 pattern as `get_settings()` generally) — it's a startup-time setting,
-not a per-request one.
+not a per-request one. **There is no default**: with `MODE` unset (or any other
+value) the app refuses to start (`mode: Field required`), instead of silently
+running as dev with the debugger and open docs. Every launcher sets it
+explicitly: the devcontainer (`dev`), the smoke stack (`production`), the image
+smoke runs in `image.mk` (`mock`, `dev`), the tests, and a real deployment.
+Anyone running the image directly must pass `-e MODE=...`
+(ADR-0028).
 
-- `dev` (the default): `main.py` starts `debugpy` listening on
+- `dev`: `main.py` starts `debugpy` listening on
   `127.0.0.1:5678` for a remote attach (non-blocking — never
   `wait_for_client()` — and loopback-only, since the devcontainer's own
   port forwarding reaches it there without needing every interface) and
@@ -400,9 +435,9 @@ not a per-request one.
   by `MODE`'s own default/typo alone. `tests/e2e/conftest.py` sets it for
   its own `MODE=mock` parametrized leg; a future local-only use beyond
   that adds it explicitly alongside `MODE=mock`.
-- `production`: no debugger. The `../../Dockerfile`'s `runner` stage
-  sets `ENV MODE=production` as the single source of truth for that
-  default.
+- `production`: no debugger, no `/docs`, generic 500 bodies, and the
+  guardrails in `config.py`. The `../../Dockerfile`'s `runner` stage
+  deliberately does not set `MODE`: the deployment states it.
 
 A resource that wants `MODE=mock` support builds its CRUD dependency from
 `craftainer_crud.interfaces.dependency.build_repository_provider(Model)` the way
@@ -628,8 +663,19 @@ generated-JS shape each takes):
   in-memory fan-out under `MODE=mock` — see `craftainer_crud/interfaces/README.md`'s
   `EventSink`/`EventSource` paragraph and
   `docs/adrs/0015-mqtt-for-crud-events.md` for the delivery-guarantee
-  design (a subscriber that preserves its `subscriber_id` doesn't miss
-  events across a brief disconnect).
+  design. A subscriber that preserves its `subscriber_id` doesn't miss
+  events across a brief disconnect **only with `SSE_DURABLE_SESSIONS=true`**
+  (opt-in; streams are transient by default). `GET /events` depends on
+  `get_hero_owner_scope` (the router's `scope_dependency`, from the token's
+  `sub` alone), so a stream holds no database session; a token without a
+  usable `sub` gets 401 there and on every write. At most
+  `SSE_MAX_STREAMS_PER_CALLER` streams per caller.
+- **Optimistic concurrency**: `PATCH`/`DELETE` of one record with
+  `If-Match` pass the record's `updated_at` as `expected_version` and the
+  library re-checks it atomically (a stale tag is `412`, a concurrent delete
+  `404`). A write with no `If-Match` is unconditional (`expected_version=None`).
+  Code that calls `CRUDInterface.update/delete` or a repository directly
+  must pass `expected_version` (there is no default).
 - **Statistics/predictions**: `stats_enabled=True` adds `GET /stats`
   (count, per-numeric-field min/max/avg/sum, per-categorical-field (bool/
   enum) value distribution, an optional `?bucket=day|week|month`

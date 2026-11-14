@@ -1,10 +1,10 @@
-# syntax=docker/dockerfile:1.28
+# syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # Runtime image (builder → runner), the repo's only top-level Dockerfile, in
 # the layout template-docker expects (docs/TEMPLATE.md's "Image layer"). The
 # devcontainer image is the base-owned .devcontainer/Dockerfile's `develop`
 # stage.
 
-# PYTHON_VERSION and DEBIAN_VERSION are also declared in
+# PYTHON_VERSION, SSL_CERT_FILE and SSL_CERT_DIR are also declared in
 # .devcontainer/Dockerfile; scripts/check-dockerfile-versions.sh keeps the
 # two equal.
 
@@ -13,7 +13,7 @@ ARG PYTHON_VERSION=3.14.8
 ARG DEBIAN_VERSION=trixie
 
 # renovate: datasource=github-releases depName=astral-sh/uv
-ARG UV_VERSION=0.12.17
+ARG UV_VERSION=0.13.6
 
 ARG APP_UID=1000
 
@@ -75,8 +75,7 @@ ENV PYTHONUNBUFFERED=1 \
     SSL_CERT_FILE=${SSL_CERT_FILE} \
     SSL_CERT_DIR=${SSL_CERT_DIR} \
     REQUESTS_CA_BUNDLE=${SSL_CERT_FILE} \
-    CURL_CA_BUNDLE=${SSL_CERT_FILE} \
-    MODE=production
+    CURL_CA_BUNDLE=${SSL_CERT_FILE}
 
 # Create the user and the few writable directories first (home, /app/data),
 # then copy the app read-only on top: no recursive chgrp/chmod layer, and the

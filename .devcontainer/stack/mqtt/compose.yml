@@ -4,35 +4,63 @@
 # docs/adrs/0015-mqtt-for-crud-events.md. mosquitto.conf resolves relative to
 # this file's own directory (see ../README.md's "Devcontainer stack pattern").
 services:
+  # One-shot: writes a self-signed dev certificate (SAN DNS:mqtt, what the app and the
+  # healthcheck connect to) into the `mqtt-tls` volume, once (only when a file is missing or
+  # empty; delete the volume to regenerate). The broker serves it and the
+  # app mounts the volume read-only to trust it (MQTT_CA_FILE). World-readable on purpose:
+  # the broker, the app and this one-shot run as different users, and the pair has no value
+  # outside this local stack.
+  mqtt-tls-cert:
+    image: alpine/openssl:latest@sha256:6821afa2476e11be343f29275f2ca24291720ff0a7148bd131fd8e314ff26d9e
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        { [ -s /tls/mqtt.crt ] && [ -s /tls/mqtt.key ]
+        || openssl req -x509 -newkey rsa:2048 -nodes -days 3650
+        -keyout /tls/mqtt.key -out /tls/mqtt.crt -subj /CN=mqtt
+        -addext subjectAltName=DNS:mqtt,DNS:localhost; }
+        && chmod 644 /tls/mqtt.key /tls/mqtt.crt
+    volumes:
+      - mqtt-tls:/tls
+
   mqtt:
-    image: eclipse-mosquitto:2.0.22
+    image: eclipse-mosquitto:2.0.22@sha256:81a6193ae693942a3231cd3ac52875b02b7e3a19da671b2fb4b55cc874c5b279
     restart: unless-stopped
+    # The password file is built from mqtt.env's credentials at every start (see
+    # mosquitto.conf); the image's own entrypoint still runs first and fixes /mosquitto
+    # ownership.
+    command:
+      - sh
+      - -c
+      - >-
+        mosquitto_passwd -b -c /mosquitto/passwd "$$MQTT_USERNAME" "$$MQTT_PASSWORD"
+        && chown mosquitto: /mosquitto/passwd
+        && exec mosquitto -c /mosquitto/config/mosquitto.conf
+    env_file:
+      - ./mqtt.env
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mqtt-data:/mosquitto/data
+      - mqtt-tls:/tls:ro
     # The image ships mosquitto_pub/mosquitto_sub but no curl/wget (see
-    # ../README.md's "Devcontainer stack pattern") -- a real publish against
-    # the broker itself is both available and a stronger check than a bare
-    # TCP probe.
+    # ../README.md's "Devcontainer stack pattern") -- a real authenticated TLS
+    # publish against the broker itself is both available and a stronger check
+    # than a bare TCP probe. `-h mqtt` (not localhost) so the host name matches the
+    # certificate's SAN.
     healthcheck:
       test:
-        [
-          "CMD",
-          "mosquitto_pub",
-          "-h",
-          "localhost",
-          "-t",
-          "healthcheck",
-          "-m",
-          "ping",
-          "-q",
-          "1",
-          "-i",
-          "healthcheck",
-        ]
+        - CMD-SHELL
+        - >-
+          mosquitto_pub -h mqtt -p 8883 --cafile /tls/mqtt.crt
+          -u "$$MQTT_USERNAME" -P "$$MQTT_PASSWORD"
+          -t healthcheck -m ping -q 1 -i healthcheck
       interval: 5s
       timeout: 5s
       retries: 10
+    depends_on:
+      mqtt-tls-cert:
+        condition: service_completed_successfully
 
 volumes:
   mqtt-data:
+  mqtt-tls:

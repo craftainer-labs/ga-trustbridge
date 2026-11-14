@@ -21,7 +21,8 @@ services:
       - ./stack/postgres/postgres.env
       - ./stack/s3/s3.env
       - ./stack/keycloak/keycloak.env
-      - ./stack/umami/umami.env
+      - ./stack/mqtt/mqtt.env
+      - ./stack/umami/analytics.env
     # Waits for every stack service's own healthcheck (see each fragment's
     # compose.yml) so `docker compose up` -- and therefore devcontainers/ci's
     # runCmd, and postCreateCommand -- never starts app, prek, or pytest
@@ -39,6 +40,8 @@ services:
         condition: service_healthy
       selenium:
         condition: service_healthy
+    volumes:
+      - mqtt-tls:/mqtt-tls:ro
     environment:
       # Fixed in-network hostnames/ports, not credentials, so they're
       # literal here rather than pulled from a stack env file. MODE is a
@@ -50,7 +53,13 @@ services:
       S3_ENDPOINT_URL: http://s3:9000
       REDIS_URL: redis://redis:6379/0
       MQTT_HOST: mqtt
-      MQTT_PORT: "1883"
+      # The dev broker serves TLS only and refuses anonymous clients (stack/mqtt/); its
+      # credentials arrive from mqtt.env above. The self-signed certificate lives in the
+      # `mqtt-tls` volume, mounted read-only below.
+      MQTT_PORT: "8883"
+      MQTT_USE_TLS: "true"
+      MQTT_CA_FILE: /mqtt-tls/mqtt.crt
+      # MODE has no default in the app (it refuses to start without it): set explicitly.
       MODE: dev
       # OTel service.name, read by craftainer_observability.logs.
       OTEL_SERVICE_NAME: template-fastapi

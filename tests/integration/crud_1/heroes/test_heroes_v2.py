@@ -6,11 +6,13 @@ from contextlib import contextmanager
 from uuid import uuid4
 
 import pytest
+from craftainer_crud.interfaces.base import InMemoryEventSink
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 from starlette.types import Message
 
 from app.config import get_settings
+from app.crud_1.heroes import heroes_v2
 from app.db import session_factory as async_session_factory
 from app.main import app
 from app.models.hero import Hero
@@ -50,6 +52,20 @@ def _authed() -> Iterator[None]:
     """Authenticate every request in this module as "test-user" by default."""
     with _authed_as("test-user"):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _in_memory_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Publish this module's hero events to an in-memory sink, not the MQTT broker.
+
+    This module proves the CRUD routes against real Postgres. craftainer_crud delivers events
+    after the commit, over one process-wide MQTT connection that a sync `TestClient` request
+    would bind to its short-lived event loop (closed again when the request ends). The
+    broker path is covered by test_heroes_v2_events.py (a live server on this test's loop)
+    and by tests/e2e.
+    """
+    sink = InMemoryEventSink("hero")
+    monkeypatch.setattr(heroes_v2, "_hero_event_sink", lambda: sink)
 
 
 def test_hero_crud_lifecycle_against_real_postgres() -> None:

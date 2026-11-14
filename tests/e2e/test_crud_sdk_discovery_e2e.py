@@ -71,12 +71,16 @@ def test_catalog_then_manifest_over_http(base_url: str, access_token: Callable[[
     assert again.status_code == 304
 
 
+# The api runs on plain http at a non-loopback devcontainer host (`myapp`), which the SDK
+# (>=0.3) refuses to send credentials to unless the client opts in; a trusted network only.
 def test_sdk_discovers_and_reads_sync(
     base_url: str, access_token: Callable[[str], str], seeded_hero: dict[str, object]
 ) -> None:
     """The sync client discovers via the catalog, then gets and lists the seeded hero."""
     token = access_token("viewer")
-    with CrudClient(base_url, token_provider=static_token(token)) as client:
+    with CrudClient(
+        base_url, token_provider=static_token(token), allow_insecure_http=True
+    ) as client:
         manifest = client.manifest()
         assert manifest.manifest_version == "1"
         heroes = client.resource("heroes")
@@ -89,7 +93,9 @@ def test_sdk_discovers_and_reads_sync(
 
 
 async def _read_async(base_url: str, token: str, hero_id: int, name: str) -> None:
-    async with AsyncCrudClient(base_url, token_provider=static_token(token)) as client:
+    async with AsyncCrudClient(
+        base_url, token_provider=static_token(token), allow_insecure_http=True
+    ) as client:
         manifest = await client.manifest()
         _assert_heroes_v2(manifest.find("heroes", "v2") or pytest.fail("no heroes v2"))
         heroes = await client.resource("heroes")

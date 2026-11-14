@@ -14,6 +14,27 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool
 from app.config import Settings, get_settings
 
 
+def build_connect_args(settings: Settings, *, command_timeout: bool = True) -> dict[str, Any]:
+    """The asyncpg `connect_args` for `settings`: TLS mode and the connect/command timeouts.
+
+    `postgres_sslmode` goes to asyncpg's `ssl` (which accepts the libpq mode strings),
+    `db_connect_timeout` to `timeout` and, with `command_timeout`, `db_command_timeout` to
+    `command_timeout`, each only when set. Every connection the app opens uses this,
+    Alembic's included (`alembic/env.py`), so a TLS requirement or a connect timeout cannot
+    be honored by the request path and silently skipped by migrations. Migrations pass
+    `command_timeout=False`: the setting bounds a request's statements, and a schema change
+    (an index build, a table rewrite) legitimately runs longer.
+    """
+    connect_args: dict[str, Any] = {}
+    if settings.postgres_sslmode is not None:
+        connect_args["ssl"] = settings.postgres_sslmode
+    if settings.db_connect_timeout is not None:
+        connect_args["timeout"] = settings.db_connect_timeout
+    if command_timeout and settings.db_command_timeout is not None:
+        connect_args["command_timeout"] = settings.db_command_timeout
+    return connect_args
+
+
 def build_engine(settings: Settings) -> AsyncEngine:
     """Build the async engine for `settings.db_pool_mode`, SSL mode and timeouts.
 
@@ -31,17 +52,9 @@ def build_engine(settings: Settings) -> AsyncEngine:
       unique prepared-statement names, because asyncpg's default numbered names
       collide across clients sharing a server connection.
 
-    `postgres_sslmode` goes to asyncpg's `ssl` (which accepts the libpq mode strings),
-    `db_connect_timeout` to `timeout` and `db_command_timeout` to `command_timeout`,
-    each only when set.
+    The TLS mode and timeouts come from `build_connect_args`.
     """
-    connect_args: dict[str, Any] = {}
-    if settings.postgres_sslmode is not None:
-        connect_args["ssl"] = settings.postgres_sslmode
-    if settings.db_connect_timeout is not None:
-        connect_args["timeout"] = settings.db_connect_timeout
-    if settings.db_command_timeout is not None:
-        connect_args["command_timeout"] = settings.db_command_timeout
+    connect_args = build_connect_args(settings)
 
     kwargs: dict[str, Any] = {}
     if settings.db_pool_mode == "local":

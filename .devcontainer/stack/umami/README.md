@@ -8,7 +8,7 @@ sends events to it server-side via `POST /api/send`.
 - Host (from other containers): `umami`, port `3000` (forwarded to the host for the dev UI)
 - Database: `umami` in the stack's Postgres (`postgres:5432`), created by `umami-db-init` (idempotent; `initdb.d` would skip an existing volume)
 - Website: `umami-seed` inserts the site `template-fastapi` with ID `96951c7e-f72b-5245-9755-6e3f4b9bf82c` (UUIDv5 of `template-fastapi.craftainer.local`, in the DNS namespace) owned by the admin user from Umami's first migration. Idempotent.
-- Configuration: `umami.env`, next to this file. It also holds `ANALYTICS_BACKEND`, `ANALYTICS_ENDPOINT` and `ANALYTICS_SITE_ID` for the app.
+- Configuration: `umami.env`, next to this file, loaded by the `umami` service only (it holds Umami's own `DATABASE_URL` and `APP_SECRET`). The app-facing `ANALYTICS_*` settings (`ANALYTICS_BACKEND`, `ANALYTICS_ENDPOINT`, `ANALYTICS_SITE_ID`, ...) live in `analytics.env`, which `myapp` and `umami-seed` load instead. It holds no secrets.
 
 ## Do
 

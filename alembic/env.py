@@ -13,9 +13,11 @@ from craftainer_crud.models import (
 from craftainer_crud.models.base import Base
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from alembic import context
 from app.config import get_settings
+from app.db import build_connect_args
 from app.models import hero  # noqa: F401 -- import registers Hero on Base.metadata
 
 config = context.config
@@ -53,13 +55,26 @@ def _do_run_migrations(connection: Connection) -> None:
 
 
 async def _run_async_migrations() -> None:
-    """Connect over asyncpg and run migrations through the sync-style API via run_sync."""
-    connectable: AsyncEngine = create_async_engine(get_settings().database_url)
+    """Connect over asyncpg and run migrations through the sync-style API via run_sync.
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(_do_run_migrations)
-
-    await connectable.dispose()
+    The connection uses `app.db.build_connect_args`, so migrations honor the same TLS mode
+    (`POSTGRES_SSLMODE`) and connect timeout (`DB_CONNECT_TIMEOUT`) as the request path:
+    without that, the DDL session would fall back to asyncpg's default (`prefer`, plaintext
+    on downgrade) and a black-holed database would hang startup with no connect timeout.
+    `DB_COMMAND_TIMEOUT` is left out on purpose (it bounds request statements, not DDL). One
+    connection, no pool.
+    """
+    settings = get_settings()
+    connectable: AsyncEngine = create_async_engine(
+        settings.database_url,
+        poolclass=NullPool,
+        connect_args=build_connect_args(settings, command_timeout=False),
+    )
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(_do_run_migrations)
+    finally:
+        await connectable.dispose()
 
 
 def run_migrations_online() -> None:

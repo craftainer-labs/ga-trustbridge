@@ -43,14 +43,20 @@ unit-tests:
 # host name is pinned to the IP the devcontainer resolves it to. MODE=dev:
 # production mode demands TLS everywhere, which the plain stack does not
 # serve (the smoke.yml workflow covers production mode with a TLS stack).
+# The dev broker is the exception: it serves TLS only and refuses anonymous
+# clients, so the image gets its credentials (mqtt.env) and its certificate,
+# bind-mounted from where the devcontainer mounts it ($MQTT_CA_FILE, set by
+# .devcontainer/compose.instance.yml); the path is the devcontainer's own, which the
+# inner Docker-in-Docker daemon shares.
 # POSTGRES_DB passes through from the caller's environment when set.
 stack-smoke:
-	@args="-e MODE=dev -e POSTGRES_PORT=5432 -e POSTGRES_HOST=postgres -e S3_ENDPOINT_URL=http://s3:9000 -e REDIS_URL=redis://redis:6379/0 -e MQTT_HOST=mqtt -e MQTT_PORT=1883 -e POSTGRES_DB"; \
+	@test -n "$$MQTT_CA_FILE" || { echo "stack-smoke: MQTT_CA_FILE (the dev broker certificate) is not set" >&2; exit 1; }; \
+	args="-e MODE=dev -e POSTGRES_PORT=5432 -e POSTGRES_HOST=postgres -e S3_ENDPOINT_URL=http://s3:9000 -e REDIS_URL=redis://redis:6379/0 -e MQTT_HOST=mqtt -e MQTT_PORT=8883 -e MQTT_USE_TLS=true -e MQTT_CA_FILE=/mqtt-tls/mqtt.crt -v $$MQTT_CA_FILE:/mqtt-tls/mqtt.crt:ro -e POSTGRES_DB"; \
 	for h in postgres redis s3 keycloak mqtt; do \
 		ip="$$(getent hosts $$h | awk '{print $$1; exit}')"; \
 		test -n "$$ip" || { echo "stack-smoke: cannot resolve $$h" >&2; exit 1; }; \
 		args="$$args --add-host=$$h:$$ip"; \
 	done; \
-	for e in postgres/postgres s3/s3 keycloak/keycloak; do args="$$args --env-file=.devcontainer/stack/$$e.env"; done; \
+	for e in postgres/postgres s3/s3 keycloak/keycloak mqtt/mqtt; do args="$$args --env-file=.devcontainer/stack/$$e.env"; done; \
 	IMAGE_SMOKE_RUN_ARGS="$$args" IMAGE_SMOKE_PATH=/health/ready IMAGE_SMOKE_TIMEOUT=150 \
 		bash scripts/image-smoke.sh

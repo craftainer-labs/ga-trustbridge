@@ -26,12 +26,24 @@ class _RecordingSink:
         self._fail = fail
 
     async def publish(
-        self, *, resource: str, record_id: int, action: str, snapshot: dict[str, Any]
+        self,
+        *,
+        resource: str,
+        record_id: int,
+        action: str,
+        snapshot: dict[str, Any],
+        owner: object = None,
     ) -> None:
         if self._fail:
             raise RuntimeError("broker down")
         self.calls.append(
-            {"resource": resource, "record_id": record_id, "action": action, "snapshot": snapshot}
+            {
+                "resource": resource,
+                "record_id": record_id,
+                "action": action,
+                "snapshot": snapshot,
+                "owner": owner,
+            }
         )
 
 
@@ -66,7 +78,9 @@ async def test_create_and_delete_are_forwarded_then_tracked(
     sink = _sink(inner)
     snapshot = {"name": "Spider-Man", "powers": ["Wall-crawling", "Spider-sense"]}
 
-    await sink.publish(resource="hero", record_id=1, action="create", snapshot=snapshot)
+    await sink.publish(
+        resource="hero", record_id=1, action="create", snapshot=snapshot, owner="user-1"
+    )
     await sink.publish(resource="hero", record_id=1, action="delete", snapshot=snapshot)
 
     assert [c["action"] for c in inner.calls] == ["create", "delete"]
@@ -75,7 +89,9 @@ async def test_create_and_delete_are_forwarded_then_tracked(
         "record_id": 1,
         "action": "create",
         "snapshot": snapshot,
+        "owner": "user-1",
     }
+    assert inner.calls[1]["owner"] is None
     records = _records(tracked)
     assert [r["analytics_event"] for r in records] == ["hero.created", "hero.deleted"]
     assert all(r["analytics_url"] == "/crud/v1/heroes/v2" for r in records)
@@ -169,7 +185,7 @@ async def test_the_real_crud_interface_emits_created_and_deleted(
         resource="hero",
     )
     created = await crud.create(HeroV2Create(name="Batman", powers=["Money", "Gadgets"]))
-    assert await crud.delete(created.id) is True
+    assert await crud.delete(created.id, expected_version=None) is True
     records = _records(tracked)
     assert [r["analytics_event"] for r in records] == ["hero.created", "hero.deleted"]
     assert all(r["analytics_prop_powers_count"] == 2 for r in records)
@@ -178,6 +194,6 @@ async def test_the_real_crud_interface_emits_created_and_deleted(
 
 def test_get_hero_crud_wires_the_analytics_sink() -> None:
     """The real dependency wraps Hero's event sink; the owner and resource are unchanged."""
-    crud = get_hero_crud(AsyncSession(), {"sub": "u1"})
+    crud = get_hero_crud(AsyncSession(), OwnerScope("owner_id", "u1", read_scoped=False))
     assert isinstance(crud._events, AnalyticsEventSink)
     assert crud._resource == "hero"

@@ -27,13 +27,20 @@ configure(
         use_memory=_settings.mode == "mock",
         bulk_action_max_matched=_settings.bulk_action_max_matched,
         sse_keepalive_seconds=_settings.sse_keepalive_seconds,
+        sse_max_streams_per_caller=_settings.sse_max_streams_per_caller,
+        sse_durable_sessions=_settings.sse_durable_sessions,
         mqtt=MQTTConfig(
             host=_settings.mqtt_host,
-            port=_settings.mqtt_port,
+            port=_settings.resolved_mqtt_port,
             keepalive_seconds=_settings.mqtt_keepalive_seconds,
             username=_settings.mqtt_username,
             password=_settings.mqtt_password,
             use_tls=_settings.mqtt_use_tls,
+            ca_file=_settings.mqtt_ca_file,
+            client_cert=_settings.mqtt_client_cert,
+            client_key=_settings.mqtt_client_key,
+            allow_insecure=_settings.mqtt_allow_insecure,
+            session_ttl_seconds=_settings.mqtt_session_ttl_seconds,
         ),
         subscriber_secret=(
             _settings.subscriber_secret.encode() if _settings.subscriber_secret else None

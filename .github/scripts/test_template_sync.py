@@ -862,6 +862,81 @@ def directly_invoked_scripts(workflow_text: str) -> set[str]:
     return invoked
 
 
+class BytecodeExcludedTest(unittest.TestCase):
+    """Python bytecode never syncs: running the script in a checkout creates it."""
+
+    def test_tier_paths_skips_pycache_and_pyc(self) -> None:
+        """A replace directory and a glob both skip ``__pycache__/`` and ``*.pyc``."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel in (
+                ".github/scripts/a.py",
+                ".github/scripts/__pycache__/a.cpython-314.pyc",
+                ".github/scripts/sub/__pycache__/b.txt",
+                ".github/scripts/stray.pyc",
+                "cfg/x.json",
+                "cfg/__pycache__/x.json",
+            ):
+                write(root / rel, b"x\n", 0o644)
+            tiers: dict[str, list[str]] = {
+                "replace": [".github/scripts/", "cfg/*"],
+                "ignore": [],
+                "merge": [],
+            }
+            self.assertEqual(
+                template_sync.tier_paths(root, tiers, "replace"),
+                {".github/scripts/a.py", "cfg/x.json"},
+            )
+
+    def test_apply_does_not_copy_bytecode_into_the_instance(self) -> None:
+        """End to end: a stray ``__pycache__`` in the new template stays out."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new, inst = (Path(tmp) / n for n in ("old", "new", "inst"))
+            for d in (old, new, inst):
+                d.mkdir()
+            write(new / "s/a.py", b"print(1)\n", 0o644)
+            write(new / "s/__pycache__/a.pyc", b"\0\1", 0o644)
+            paths = template_sync.tier_paths(
+                new, {"replace": ["s/"], "ignore": [], "merge": []}, "replace"
+            )
+            template_sync.apply_replace(old, new, inst, paths)
+            self.assertTrue((inst / "s/a.py").exists())
+            self.assertFalse((inst / "s/__pycache__").exists())
+
+
+class ConflictedSyncIsDraftTest(unittest.TestCase):
+    """A sync whose merge left conflicts must open as a draft naming the files."""
+
+    CONFLICT = {
+        "replace": {"updated": [], "removed": []},
+        "merge": {"merged": [], "conflicts": [".github/renovate.json"], "binary": []},
+    }
+    CLEAN = {
+        "replace": {"updated": [], "removed": []},
+        "merge": {"merged": ["README.md"], "conflicts": [], "binary": []},
+    }
+
+    def test_body_flags_manual_resolution_and_lists_files(self) -> None:
+        """The body leads with a warning and lists each conflicted file."""
+        body = template_sync.pr_body(self.CONFLICT, "v1.0.0", "v1.1.0", "o/t")
+        self.assertIn("Needs manual resolution", body)
+        self.assertIn("draft", body)
+        self.assertIn("`.github/renovate.json`", body)
+
+    def test_clean_body_has_no_warning(self) -> None:
+        """A clean sync's body is unchanged."""
+        body = template_sync.pr_body(self.CLEAN, "v1.0.0", "v1.1.0", "o/t")
+        self.assertNotIn("Needs manual resolution", body)
+
+    def test_workflow_opens_conflicted_sync_as_draft(self) -> None:
+        """The workflow passes ``--draft`` on ``conflicts=1`` and disables bytecode."""
+        text = (REPO_ROOT / ".github/workflows/template-sync.yml").read_text()
+        self.assertIn("CONFLICTS: ${{ steps.apply.outputs.conflicts }}", text)
+        self.assertIn('if [ "$CONFLICTS" = "1" ]; then\n            draft=(--draft)', text)
+        self.assertIn('gh pr create "${draft[@]}"', text)
+        self.assertIn('PYTHONDONTWRITEBYTECODE: "1"', text)
+
+
 class DirectlyInvokedScriptsAreExecutableTest(unittest.TestCase):
     """A workflow step that names a script as the command needs mode 755 (exit 126 otherwise)."""
 

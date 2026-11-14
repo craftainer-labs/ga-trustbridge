@@ -9,7 +9,9 @@ from app.db import build_engine
 
 async def test_local_pool_reuses_one_connection_within_one_event_loop() -> None:
     """Sequential checkouts under `local` mode get the same backend; the pool holds it idle."""
-    engine = build_engine(Settings(db_pool_mode="local", db_pool_size=2, db_max_overflow=0))
+    engine = build_engine(
+        Settings(mode="dev", db_pool_mode="local", db_pool_size=2, db_max_overflow=0)
+    )
     try:
         assert isinstance(engine.pool, AsyncAdaptedQueuePool)
         pids = []
@@ -29,7 +31,7 @@ async def test_app_engine_reports_tls_state_matching_postgres_sslmode() -> None:
     In the devcontainer (sslmode unset) the server may not offer TLS, so this only
     asserts the wiring when an encrypting mode is configured.
     """
-    settings = Settings()
+    settings = Settings(mode="dev")
     engine = build_engine(settings)
     try:
         async with engine.connect() as conn:

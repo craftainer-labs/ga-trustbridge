@@ -45,11 +45,13 @@ class Settings(BaseSettings):
     # dev: debugger enabled (see app.main). mock: every external service
     # (Postgres, Redis, S3, OIDC) is replaced with a local/in-memory fake --
     # see app.crud_1.heroes, app.health_checks, app.oidc. production:
-    # debugger disabled. Defaults to "dev" to match this template's other
-    # defaults (localhost hosts, etc.), which assume local/devcontainer use
-    # unless overridden -- see the Dockerfile's runner stage for the
-    # production default.
-    mode: Mode = "dev"
+    # debugger disabled. Deliberately has NO default: a process that starts with
+    # MODE unset fails with "mode: Field required" instead of silently running as
+    # dev (debugger, open /docs, exception text in 500 bodies) or as anything else
+    # (OWASP secure-configuration: fail closed). Every launcher sets it explicitly:
+    # .devcontainer/compose.instance.yml, compose.yml (the smoke stack), image.mk's
+    # smoke runs and the test suites.
+    mode: Mode
 
     # MODE=mock trusts every bearer token's claims and skips every real
     # external service (see oidc.decode_bearer_token) -- a deployment that
@@ -114,6 +116,12 @@ class Settings(BaseSettings):
     # forked worker doesn't copy-on-write its pages). A switch so a load test can A/B it.
     gc_freeze: bool = True
 
+    # GET /health/ready is unauthenticated and each call would hit every dependency, so
+    # craftainer_observability caches its result for this many seconds and lets concurrent
+    # requests share one run of the checks. 0 turns the cache off (probes then hit the
+    # backends on every call). Env HEALTH_READY_CACHE_TTL_SECONDS.
+    health_ready_cache_ttl_seconds: float = Field(default=1.0, ge=0)
+
     # Expose GET /health/info (version and commit). Off by default: it discloses the version.
     health_info_enabled: bool = False
 
@@ -140,10 +148,31 @@ class Settings(BaseSettings):
     # own no-auth/no-TLS local-dev default (see its "Don't" section) -- and are
     # required to be set in production, see _require_mqtt_auth_in_production below.
     mqtt_host: str = "localhost"
-    mqtt_port: int = 1883
+    # None (unset) means the conventional port for the transport: 8883 with MQTT_USE_TLS,
+    # else 1883. See `resolved_mqtt_port`.
+    mqtt_port: int | None = Field(default=None, ge=1, le=65535)
     mqtt_keepalive_seconds: int = 60
     mqtt_username: str | None = None
-    mqtt_password: str | None = None
+    mqtt_password: str | None = Field(default=None, repr=False)
+    # craftainer_crud's MQTT TLS options (needs mqtt_use_tls). mqtt_ca_file is the PEM bundle
+    # that signs the broker's certificate (a private CA); unset uses the system trust store
+    # (and SSL_CERT_FILE). mqtt_client_cert/mqtt_client_key present a client certificate
+    # (mutual TLS). The library builds the SSL context: TLS 1.2 or newer, broker certificate
+    # and host name verified.
+    mqtt_ca_file: str | None = None
+    mqtt_client_cert: str | None = None
+    mqtt_client_key: str | None = None
+    # Lets credentials go over a connection without TLS (local development brokers only).
+    # Refused under MODE=production, see _require_mqtt_auth_in_production below.
+    mqtt_allow_insecure: bool = False
+    # craftainer_crud's `GET <prefix>/events` limits (ADR 0010 of that package): the most
+    # concurrent streams one caller may hold open per process (the next gets 429), and
+    # whether a stream is durable (the broker queues events for a returning subscriber id,
+    # for MQTT_SESSION_TTL_SECONDS) instead of transient (the default: clean session, no
+    # replay, a client-sent subscriber_id is ignored).
+    sse_max_streams_per_caller: int = Field(default=5, ge=1)
+    sse_durable_sessions: bool = False
+    mqtt_session_ttl_seconds: int = Field(default=3600, ge=1)
     # craftainer_crud signs the event-stream subscriber ids it mints (a client cannot choose
     # one). Unset (the default) uses a random per-process secret: ids then survive neither a
     # restart nor a second worker. Set the same value (>= 32 characters) on every replica to
@@ -452,26 +481,34 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_mqtt_auth_in_production(self) -> Self:
-        """Refuse to construct production Settings with an unauthenticated MQTT broker.
+        """Refuse to construct production Settings with an insecure MQTT broker connection.
 
         craftainer_crud.interfaces.base.MQTTEventSink/MQTTEventSource connect with no
-        credentials/TLS unless these are set, matching mosquitto.conf's own
-        no-auth/no-TLS local-dev default (see .devcontainer/stack/mqtt/
-        mosquitto.conf's "Don't" section) -- a production broker reachable over
-        the network with that default would let anyone read or forge every
-        resource's create/update/delete events.
+        credentials/TLS unless these are set, matching a local-dev broker's own
+        defaults -- a production broker reachable over the network with that would let
+        anyone read or forge every resource's create/update/delete events. So production
+        needs TLS, a username and a password, and refuses `mqtt_allow_insecure` (the
+        library's escape hatch for credentials without TLS and for weak TLS contexts).
         """
-        if self.mode == "production" and (  # pragma: no cover
-            not self.mqtt_use_tls or self.mqtt_username is None or self.mqtt_password is None
-        ):
-            raise ValueError(
-                "mqtt_use_tls, mqtt_username, and mqtt_password must all be set "
-                "when MODE=production"
-            )
+        if self.mode == "production":  # pragma: no cover
+            if not self.mqtt_use_tls or self.mqtt_username is None or self.mqtt_password is None:
+                raise ValueError(
+                    "mqtt_use_tls, mqtt_username, and mqtt_password must all be set "
+                    "when MODE=production"
+                )
+            if self.mqtt_allow_insecure:
+                raise ValueError("mqtt_allow_insecure must not be set when MODE=production")
         return self
+
+    @property
+    def resolved_mqtt_port(self) -> int:
+        """`mqtt_port`, or the transport's conventional port (8883 TLS, 1883 plain) if unset."""
+        return self.mqtt_port or (8883 if self.mqtt_use_tls else 1883)
 
 
 @lru_cache
 def get_settings() -> Settings:
     """Return the process-wide cached Settings instance."""
-    return Settings()
+    # `mode` has no default (MODE must come from the environment), which mypy's constructor
+    # check cannot see: pydantic-settings fills it in at runtime.
+    return Settings()  # type: ignore[call-arg]

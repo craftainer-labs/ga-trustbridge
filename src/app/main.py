@@ -11,6 +11,7 @@ import debugpy
 from alembic.config import Config
 from craftainer_crud.controllers.crud_manifest import api_catalog_router, crud_manifest_router
 from craftainer_crud.controllers.crud_router import ROUTER_VERSION
+from craftainer_crud.interfaces.base import close_event_publishers
 from craftainer_crud.interfaces.cache import StatsCache
 from craftainer_observability.analytics import shutdown as analytics_shutdown
 from craftainer_observability.health.router import build_health_router
@@ -96,6 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     Once startup work is done (and `GC_FREEZE` isn't false), `gc.collect(); gc.freeze()`
     moves everything allocated so far out of the cyclic GC's reach. Shutdown ends with
+    `close_event_publishers()` (pending event deliveries, then the MQTT connection),
     `close_health_checks()` (the Redis check's client), a final analytics flush and
     `engine.dispose()`, so clients
     and pooled connections close cleanly.
@@ -114,14 +116,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             yield
     finally:
         try:
-            await close_health_checks()
+            # Waits for the after-commit event deliveries still in flight (a committed change
+            # is not lost to the shutdown), then disconnects the shared MQTT publisher.
+            await close_event_publishers()
         finally:
             try:
-                # Final flush of queued analytics events; joins the flusher thread (up to
-                # 5 s), so off the event loop. Never raises.
-                await asyncio.to_thread(analytics_shutdown)
+                await close_health_checks()
             finally:
-                await engine.dispose()
+                try:
+                    # Final flush of queued analytics events; joins the flusher thread (up
+                    # to 5 s), so off the event loop. Never raises.
+                    await asyncio.to_thread(analytics_shutdown)
+                finally:
+                    await engine.dispose()
 
 
 def _service_version() -> str:
@@ -214,6 +221,7 @@ app.include_router(
         get_health_registry,
         include_info=settings.health_info_enabled,
         info_package="template-fastapi",
+        ready_cache_ttl=settings.health_ready_cache_ttl_seconds,
     ),
     prefix="/health",
 )

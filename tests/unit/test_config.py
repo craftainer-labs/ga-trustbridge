@@ -30,14 +30,53 @@ _PRODUCTION_KWARGS: dict[str, object] = {
 
 @pytest.fixture(autouse=True)
 def _clear_oidc_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drop the devcontainer's http:// OIDC_* settings, which would override production kwargs."""
-    for name in ("OIDC_ISSUER", "OIDC_ISSUER_URL", "OIDC_DISCOVERY_URL"):
+    """Drop the devcontainer's OIDC_* and MQTT_* settings, which would override the kwargs.
+
+    The devcontainer's stack points OIDC at http:// URLs and the MQTT broker at TLS with
+    credentials; these tests assert the defaults and production kwargs, not that environment.
+    """
+    for name in (
+        "OIDC_ISSUER",
+        "OIDC_ISSUER_URL",
+        "OIDC_DISCOVERY_URL",
+        "MQTT_PORT",
+        "MQTT_USE_TLS",
+        "MQTT_USERNAME",
+        "MQTT_PASSWORD",
+        "MQTT_CA_FILE",
+        "MQTT_CLIENT_CERT",
+        "MQTT_CLIENT_KEY",
+        "MQTT_ALLOW_INSECURE",
+    ):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _mode_dev(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin MODE=dev for the tests that build `Settings` from the environment (no default)."""
+    monkeypatch.setenv("MODE", "dev")
+
+
+def test_mode_has_no_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With MODE unset the app refuses to start, rather than assuming dev or production."""
+    monkeypatch.delenv("MODE")
+    with pytest.raises(ValidationError, match="mode") as excinfo:
+        Settings(**{})
+    assert excinfo.value.errors()[0]["type"] == "missing"
+
+
+@pytest.mark.parametrize("value", ["", "prod", "Development"])
+def test_mode_rejects_an_unknown_value(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """MODE must be exactly dev, mock or production: an empty or misspelled value is an error."""
+    monkeypatch.setenv("MODE", value)
+    with pytest.raises(ValidationError, match="mode"):
+        Settings(**{})
 
 
 def test_database_url_assembles_dsn_from_pieces() -> None:
     """database_url combines user/password/host/port/db into one asyncpg DSN."""
     settings = Settings(
+        mode="dev",
         postgres_user="u",
         postgres_password="p",  # noqa: S106 -- test fixture value, not a real secret
         postgres_host="h",
@@ -65,7 +104,7 @@ def test_production_mode_requires_https_public_base_url() -> None:
 def test_public_base_url_must_be_an_origin(url: str) -> None:
     """A path, query or non-http(s) scheme is not an origin."""
     with pytest.raises(ValidationError, match="http\\(s\\) origin"):
-        Settings(public_base_url=url)
+        Settings(mode="dev", public_base_url=url)
 
 
 def test_production_mode_with_full_config_succeeds() -> None:
@@ -80,11 +119,11 @@ def test_production_mode_with_full_config_succeeds() -> None:
 def test_oidc_audience_defaults_on_and_cannot_be_blank(monkeypatch: pytest.MonkeyPatch) -> None:
     """The aud check has a default value and no way to switch it off."""
     monkeypatch.delenv("OIDC_AUDIENCE", raising=False)
-    assert Settings().oidc_audience == "api"
+    assert Settings(mode="dev").oidc_audience == "api"
     with pytest.raises(ValidationError, match="oidc_audience"):
-        Settings(oidc_audience="")
+        Settings(mode="dev", oidc_audience="")
     with pytest.raises(ValidationError, match="oidc_audience"):
-        Settings(oidc_audience=None)  # type: ignore[arg-type]
+        Settings(mode="dev", oidc_audience=None)  # type: ignore[arg-type]
 
 
 def test_legacy_issuer_url_alone_drives_issuer_and_discovery(
@@ -93,7 +132,7 @@ def test_legacy_issuer_url_alone_drives_issuer_and_discovery(
     """Only OIDC_ISSUER_URL set: expected issuer and discovery URL both derive from it."""
     for name in ("OIDC_ISSUER", "OIDC_DISCOVERY_URL"):
         monkeypatch.delenv(name, raising=False)
-    settings = Settings(oidc_issuer_url="http://idp.test/realms/r/")
+    settings = Settings(mode="dev", oidc_issuer_url="http://idp.test/realms/r/")
     assert settings.expected_issuer == "http://idp.test/realms/r/"
     assert settings.discovery_url == "http://idp.test/realms/r/.well-known/openid-configuration"
 
@@ -101,11 +140,12 @@ def test_legacy_issuer_url_alone_drives_issuer_and_discovery(
 def test_issuer_and_discovery_url_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
     """OIDC_ISSUER sets the expected `iss`; OIDC_DISCOVERY_URL sets where discovery is fetched."""
     monkeypatch.delenv("OIDC_DISCOVERY_URL", raising=False)
-    settings = Settings(oidc_issuer="http://localhost:8080/realms/r")
+    settings = Settings(mode="dev", oidc_issuer="http://localhost:8080/realms/r")
     assert (
         settings.discovery_url == "http://localhost:8080/realms/r/.well-known/openid-configuration"
     )
     settings = Settings(
+        mode="dev",
         oidc_issuer="http://localhost:8080/realms/r",
         oidc_discovery_url="http://keycloak:8080/realms/r/.well-known/openid-configuration",
     )
@@ -131,7 +171,7 @@ def _security_txt(**overrides: object) -> dict[str, object]:
 
 def test_security_txt_off_without_contact() -> None:
     """No contact: nothing to validate, nothing served."""
-    assert Settings().security_txt_contact is None
+    assert Settings(mode="dev").security_txt_contact is None
 
 
 def test_security_txt_valid_config_constructs() -> None:
@@ -180,8 +220,8 @@ def test_production_mode_rejects_default_credentials(field: str, default: str) -
 
 
 def test_dev_mode_allows_default_credentials() -> None:
-    """Settings(mode="dev") (the default) keeps every credential at its local default."""
-    settings = Settings()
+    """Settings under MODE=dev keeps every credential at its local default."""
+    settings = Settings(mode="dev")
     assert settings.postgres_password == "app"  # noqa: S105 -- asserting the local default
     assert settings.s3_access_key == "rustfsadmin"
 
@@ -194,8 +234,8 @@ def test_production_mode_requires_https_oidc_issuer() -> None:
 
 
 def test_dev_mode_allows_http_oidc_issuer() -> None:
-    """Settings(mode="dev") (the default) keeps the local http:// issuer URL default."""
-    assert Settings().oidc_issuer_url.startswith("http://")
+    """Settings under MODE=dev keeps the local http:// issuer URL default."""
+    assert Settings(mode="dev").oidc_issuer_url.startswith("http://")
 
 
 @pytest.mark.parametrize(
@@ -213,9 +253,49 @@ def test_production_mode_requires_authenticated_mqtt(override: dict[str, object]
         Settings(**kwargs)  # type: ignore[arg-type]
 
 
+def test_production_mode_refuses_mqtt_allow_insecure() -> None:
+    """MQTT_ALLOW_INSECURE (credentials without TLS, weak contexts) is dev-only."""
+    kwargs = {**_PRODUCTION_KWARGS, "mqtt_allow_insecure": True}
+    with pytest.raises(ValidationError, match="mqtt_allow_insecure must not be set"):
+        Settings(**kwargs)  # type: ignore[arg-type]
+
+
+def test_production_mode_accepts_a_private_ca_and_client_certificate() -> None:
+    """The TLS file options pass through; production stays valid."""
+    settings = Settings(
+        **{  # type: ignore[arg-type]
+            **_PRODUCTION_KWARGS,
+            "mqtt_ca_file": "/etc/ssl/mqtt-ca.pem",
+            "mqtt_client_cert": "/etc/ssl/client.pem",
+            "mqtt_client_key": "/etc/ssl/client.key",
+        }
+    )
+    assert settings.mqtt_ca_file == "/etc/ssl/mqtt-ca.pem"
+    assert settings.resolved_mqtt_port == 8883
+
+
+def test_mqtt_port_defaults_to_the_transports_conventional_port() -> None:
+    """Unset MQTT_PORT is 8883 with TLS and 1883 without; an explicit port always wins."""
+    assert Settings(mode="dev", mqtt_use_tls=False).resolved_mqtt_port == 1883
+    assert Settings(mode="dev", mqtt_use_tls=True).resolved_mqtt_port == 8883
+    assert Settings(mode="dev", mqtt_use_tls=True, mqtt_port=8884).resolved_mqtt_port == 8884
+
+
+def test_mqtt_password_is_kept_out_of_repr() -> None:
+    """Logging a Settings instance must not reveal the broker password."""
+    assert "hunter2" not in repr(Settings(mode="dev", mqtt_username="u", mqtt_password="hunter2"))  # noqa: S106
+
+
+def test_stream_limit_defaults_are_conservative() -> None:
+    """Five concurrent event streams per caller, and transient (non-durable) sessions."""
+    settings = Settings(mode="dev")
+    assert settings.sse_max_streams_per_caller == 5
+    assert settings.sse_durable_sessions is False
+
+
 def test_dev_mode_allows_unauthenticated_mqtt() -> None:
-    """Settings(mode="dev") (the default) keeps the local no-auth/no-TLS MQTT defaults."""
-    settings = Settings()
+    """Settings under MODE=dev keeps the local no-auth/no-TLS MQTT defaults."""
+    settings = Settings(mode="dev")
     assert settings.mqtt_use_tls is False
     assert settings.mqtt_username is None
     assert settings.mqtt_password is None
@@ -229,8 +309,8 @@ def test_production_mode_requires_https_s3_endpoint() -> None:
 
 
 def test_dev_mode_allows_http_s3_endpoint() -> None:
-    """Settings(mode="dev") (the default) keeps the local http:// S3 endpoint default."""
-    assert Settings().s3_endpoint_url.startswith("http://")
+    """Settings under MODE=dev keeps the local http:// S3 endpoint default."""
+    assert Settings(mode="dev").s3_endpoint_url.startswith("http://")
 
 
 def test_production_mode_requires_encrypted_redis_url() -> None:
@@ -241,8 +321,8 @@ def test_production_mode_requires_encrypted_redis_url() -> None:
 
 
 def test_dev_mode_allows_plain_redis_url() -> None:
-    """Settings(mode="dev") (the default) keeps the local redis:// URL default."""
-    assert Settings().redis_url.startswith("redis://")
+    """Settings under MODE=dev keeps the local redis:// URL default."""
+    assert Settings(mode="dev").redis_url.startswith("redis://")
 
 
 @pytest.mark.parametrize("sslmode", [None, "disable", "allow", "prefer"])
@@ -261,19 +341,19 @@ def test_production_mode_accepts_encrypting_postgres_sslmode(sslmode: str) -> No
 
 
 def test_dev_mode_allows_unset_postgres_sslmode() -> None:
-    """Settings(mode="dev") (the default) keeps postgres_sslmode unset (no TLS)."""
-    assert Settings().postgres_sslmode is None
+    """Settings under MODE=dev keeps postgres_sslmode unset (no TLS)."""
+    assert Settings(mode="dev").postgres_sslmode is None
 
 
 def test_postgres_sslmode_rejects_unknown_value() -> None:
     """A value outside libpq's sslmode set is rejected."""
     with pytest.raises(ValidationError, match="postgres_sslmode"):
-        Settings(postgres_sslmode="bogus")  # type: ignore[arg-type]
+        Settings(mode="dev", postgres_sslmode="bogus")  # type: ignore[arg-type]
 
 
 def test_db_settings_defaults_keep_todays_behavior() -> None:
     """Every new DB setting defaults to today's behavior (nothing consumes them yet)."""
-    settings = Settings()
+    settings = Settings(mode="dev")
     assert settings.db_pool_mode == "null"
     assert settings.db_pool_size is None
     assert settings.db_max_overflow is None
@@ -286,6 +366,7 @@ def test_db_settings_defaults_keep_todays_behavior() -> None:
 def test_db_settings_accept_valid_values() -> None:
     """Valid pool/timeout values are accepted as given."""
     settings = Settings(
+        mode="dev",
         db_pool_mode="local",
         db_pool_size=5,
         db_max_overflow=0,
@@ -328,7 +409,7 @@ def test_unrelated_env_vars_are_not_rejected(monkeypatch: pytest.MonkeyPatch) ->
     """
     monkeypatch.setenv("SOME_UNRELATED_ENV_VAR", "anything")
     monkeypatch.setenv("OIDC_AUDIANCE", "api")
-    Settings()
+    Settings(mode="dev")
 
 
 def test_unrecognized_constructor_keyword_is_rejected() -> None:
@@ -351,19 +432,19 @@ def test_mock_mode_with_allow_mock_mode_succeeds() -> None:
 
 def test_stats_cache_ttl_is_off_by_default_and_accepts_positive_seconds() -> None:
     """STATS_CACHE_TTL_SECONDS unset disables the shared stats cache; it must be positive."""
-    assert Settings().stats_cache_ttl_seconds is None
-    assert Settings(stats_cache_ttl_seconds=30).stats_cache_ttl_seconds == 30
+    assert Settings(mode="dev").stats_cache_ttl_seconds is None
+    assert Settings(mode="dev", stats_cache_ttl_seconds=30).stats_cache_ttl_seconds == 30
     with pytest.raises(ValidationError, match="stats_cache_ttl_seconds"):
-        Settings(stats_cache_ttl_seconds=0)
+        Settings(mode="dev", stats_cache_ttl_seconds=0)
 
 
 def test_gc_freeze_health_info_and_profiling_defaults_and_overrides() -> None:
     """gc_freeze is on; /health/info and profiling are off by default, each overridable."""
-    defaults = Settings()
+    defaults = Settings(mode="dev")
     assert defaults.gc_freeze is True
     assert defaults.health_info_enabled is False
     assert defaults.profiling_enabled is False
-    custom = Settings(gc_freeze=False, health_info_enabled=True, profiling_enabled=True)
+    custom = Settings(mode="dev", gc_freeze=False, health_info_enabled=True, profiling_enabled=True)
     assert custom.gc_freeze is False
     assert custom.health_info_enabled is True
     assert custom.profiling_enabled is True
@@ -371,10 +452,10 @@ def test_gc_freeze_health_info_and_profiling_defaults_and_overrides() -> None:
 
 def test_subscriber_secret_is_optional_but_must_be_a_real_key() -> None:
     """SUBSCRIBER_SECRET is unset by default; a set one must be at least 32 characters."""
-    assert Settings().subscriber_secret is None
-    assert Settings(subscriber_secret="k" * 32).subscriber_secret == "k" * 32
+    assert Settings(mode="dev").subscriber_secret is None
+    assert Settings(mode="dev", subscriber_secret="k" * 32).subscriber_secret == "k" * 32
     with pytest.raises(ValidationError, match="subscriber_secret"):
-        Settings(subscriber_secret="short")  # noqa: S106 -- a too-short test value, not a secret
+        Settings(mode="dev", subscriber_secret="short")  # noqa: S106 -- a too-short test value, not a secret
 
 
 def test_production_mode_requires_subscriber_secret() -> None:

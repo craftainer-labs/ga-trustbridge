@@ -21,7 +21,14 @@ exist immediately — no manual admin-console setup required.
     and `http://localhost:8081/bff/callback`, post-logout URIs the two
     origins (`##`-separated in the attribute), back-channel logout to
     `http://host.docker.internal:8787/bff/backchannel-logout`, refresh
-    tokens on, token exchange off. Its secret is **dev-only**: `BFF_CLIENT_SECRET`
+    tokens on, RFC 8693 standard token exchange (v2) on
+    (`standard.token.exchange.enabled`): the BFF, as the requester, may swap
+    a `bff`-issued access token for one scoped to `audience=api`. Least
+    privilege by construction: v2 has no per-target permissions, so what
+    `bff` can target is only the audiences its own mappers emit (`api`),
+    its secret is required (public clients are refused), and the subject
+    token must be issued to `bff`; refresh tokens stay off for exchanges
+    (`Allow refresh token in Standard Token Exchange` unset). Its secret is **dev-only**: `BFF_CLIENT_SECRET`
     in `keycloak.env`, substituted into the import as `${BFF_CLIENT_SECRET}`.
   - `test-cli` — **dev-only**, public, password grant only (no browser
     flow). Tests and perf scripts mint tokens with it; never create an

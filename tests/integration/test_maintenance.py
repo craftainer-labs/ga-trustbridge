@@ -41,8 +41,8 @@ async def test_purge_archived_deletes_only_rows_past_older_than() -> None:
             {"name": "Active Hero", "powers": ["Rust"], "owner_id": "tester"}
         )
 
-        assert await repository.delete(old_and_archived.id) is True
-        assert await repository.delete(recently_archived.id) is True
+        assert await repository.delete(old_and_archived.id, expected_version=None) is True
+        assert await repository.delete(recently_archived.id, expected_version=None) is True
 
         now = datetime.now(UTC).replace(tzinfo=None)
         # Backdate old_and_archived's own archived_at directly -- purge_archived only

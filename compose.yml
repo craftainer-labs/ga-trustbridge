@@ -5,9 +5,10 @@
 # never referenced by devcontainer.json) -- selenium is left out since
 # nothing here needs a browser driver.
 #
-# Unlike .devcontainer/compose.yml, this file leaves MODE at the runner
-# stage's own production default (Dockerfile) -- that's the whole point of
-# this smoke test -- which means it must also satisfy src/app/config.py's
+# Unlike .devcontainer/compose.yml, this file runs the api with MODE=production
+# (set explicitly below: the app and the Dockerfile have no MODE default) -- that's
+# the whole point of this smoke test -- which means it must also satisfy
+# src/app/config.py's
 # production-only guardrails: postgres_password/s3_access_key/s3_secret_key
 # can't be left at the stack fragments' shared local-dev defaults,
 # oidc_issuer_url/s3_endpoint_url/redis_url must all be encrypted, and
@@ -26,10 +27,6 @@ x-smoke-s3-access-key: &smoke_s3_access_key smoke-only-access-key
 x-smoke-s3-secret-key: &smoke_s3_secret_key smoke-only-secret-key-000
 x-smoke-mqtt-user: &smoke_mqtt_user smoke-only-mqtt-user
 x-smoke-mqtt-password: &smoke_mqtt_password smoke-only-mqtt-pw
-# Smoke-only database role passwords (ADR 0031): the migrate service runs as the owner, the api
-# connects as the runtime role; neither is the bootstrap superuser (`app`, postgres.env).
-x-smoke-owner-password: &smoke_owner_password smoke-only-owner-pw
-x-smoke-app-password: &smoke_app_password smoke-only-app-pw
 
 services:
   # One-shot: generates a single self-signed cert (with SANs for every
@@ -42,7 +39,7 @@ services:
   # writes the same key pair under RustFS's required filenames
   # (RUSTFS_TLS_PATH expects exactly rustfs_cert.pem/rustfs_key.pem).
   smoke-tls-cert:
-    image: alpine/openssl:latest
+    image: alpine/openssl:latest@sha256:6821afa2476e11be343f29275f2ca24291720ff0a7148bd131fd8e314ff26d9e
     entrypoint: ["sh", "-c"]
     command:
       # chmod: this container runs as root, but Keycloak's image runs as
@@ -79,11 +76,6 @@ services:
       -c ssl_key_file=/tls/postgres.key
     volumes:
       - smoke-tls:/tls:ro
-    # Creates the two roles on first start of an empty volume (ADR 0031: roles are created
-    # outside migrations, which only GRANT and refuse in production without them).
-    configs:
-      - source: smoke-postgres-roles
-        target: /docker-entrypoint-initdb.d/10-roles.sql
     depends_on:
       smoke-tls-cert:
         condition: service_completed_successfully
@@ -149,7 +141,7 @@ services:
   # inline (configs: below) and the password file is built at startup from
   # the smoke-only credentials, so no secret-shaped file is checked in.
   mqtt:
-    image: eclipse-mosquitto:2.0.22
+    image: eclipse-mosquitto:2.0.22@sha256:81a6193ae693942a3231cd3ac52875b02b7e3a19da671b2fb4b55cc874c5b279
     entrypoint: ["sh", "-c"]
     command:
       - >-
@@ -218,12 +210,12 @@ services:
       - ./.devcontainer/stack/postgres/postgres.env
       - ./.devcontainer/stack/s3/s3.env
       - ./.devcontainer/stack/keycloak/keycloak.env
-    environment: &smoke_api_env
+    environment:
       # Fixed in-network hostnames/ports, not credentials -- same values
-      # .devcontainer/compose.yml sets literally. No MODE override: the
-      # runner stage's own ENV MODE=production default (Dockerfile) is
-      # exactly what this smoke test wants to exercise against real
-      # dependencies, not MODE=mock's in-memory fakes.
+      # .devcontainer/compose.yml sets literally. MODE is explicit: the app refuses
+      # to start without it, and production is exactly what this smoke test wants to
+      # exercise against real dependencies, not MODE=mock's in-memory fakes.
+      MODE: production
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       # Satisfies the production postgres_sslmode guardrail; the postgres
@@ -240,12 +232,8 @@ services:
       S3_ENDPOINT_URL: https://s3:9000
       REDIS_URL: rediss://redis:6380/0
       # Match the postgres/s3 overrides above -- see this file's header
-      # comment for why these can't stay at the shared stack defaults. The runtime role is
-      # neither a superuser nor BYPASSRLS and owns nothing (the migrate service below owns the
-      # schema), so row-level security applies to it as it will in production.
-      POSTGRES_USER: trustbridge_app
-      POSTGRES_PASSWORD: *smoke_app_password
-      RUN_MIGRATIONS_ON_STARTUP: "false"
+      # comment for why these can't stay at the shared stack defaults.
+      POSTGRES_PASSWORD: *smoke_postgres_password
       RUSTFS_ACCESS_KEY: *smoke_s3_access_key
       RUSTFS_SECRET_KEY: *smoke_s3_secret_key
       # keycloak's/redis's/s3's TLS listeners (see smoke-tls-cert above) all
@@ -276,6 +264,10 @@ services:
       MQTT_HOST: mqtt
       MQTT_PORT: "8883"
       MQTT_USE_TLS: "true"
+      # The broker's self-signed certificate, trusted explicitly (not through the
+      # process-wide SSL_CERT_FILE): craftainer_crud builds a verifying TLS 1.2+ context
+      # from this file.
+      MQTT_CA_FILE: /tls/keycloak.crt
       MQTT_USERNAME: *smoke_mqtt_user
       MQTT_PASSWORD: *smoke_mqtt_password
       # Required under MODE=production (config.py); smoke-test-only value.
@@ -286,8 +278,6 @@ services:
     volumes:
       - smoke-tls:/tls:ro
     depends_on:
-      migrate:
-        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       s3:
@@ -323,49 +313,7 @@ services:
       # exists to be curled from the GitHub Actions runner (host).
       - "8000:8000"
 
-  # One-shot migrate Job (ADR 0028 "Processes and database roles"): the same runner image and
-  # settings as the api, as trustbridge_owner, running `alembic upgrade head` before the api
-  # starts. Smaller than giving the api's startup migration its own owner DSN (the template's
-  # lifespan reads one set of POSTGRES_* values), and it matches how production runs it.
-  migrate:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runner
-    env_file:
-      - ./.devcontainer/stack/postgres/postgres.env
-      - ./.devcontainer/stack/s3/s3.env
-      - ./.devcontainer/stack/keycloak/keycloak.env
-    entrypoint: ["alembic", "upgrade", "head"]
-    environment:
-      <<: *smoke_api_env
-      POSTGRES_USER: trustbridge_owner
-      POSTGRES_PASSWORD: *smoke_owner_password
-    volumes:
-      - smoke-tls:/tls:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-      smoke-tls-cert:
-        condition: service_completed_successfully
-
 configs:
-  # Runs once as the bootstrap superuser against POSTGRES_DB. SMOKE STACK ONLY: the default
-  # privileges below give the runtime role DML on every table the owner creates, because the
-  # template's frozen migrations (heroes, revisions) grant nothing and the perf run needs CRUD.
-  # Production grants come only from the migrations themselves (ADR 0031); the trustbridge
-  # revisions GRANT to the app role explicitly and this is not a model for a real deployment.
-  smoke-postgres-roles:
-    content: |
-      CREATE ROLE trustbridge_owner LOGIN PASSWORD 'smoke-only-owner-pw' NOSUPERUSER NOBYPASSRLS;
-      CREATE ROLE trustbridge_app LOGIN PASSWORD 'smoke-only-app-pw' NOSUPERUSER NOBYPASSRLS;
-      SELECT current_database() AS db \gset
-      ALTER DATABASE :"db" OWNER TO trustbridge_owner;
-      ALTER SCHEMA public OWNER TO trustbridge_owner;
-      ALTER DEFAULT PRIVILEGES FOR ROLE trustbridge_owner IN SCHEMA public
-        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO trustbridge_app;
-      ALTER DEFAULT PRIVILEGES FOR ROLE trustbridge_owner IN SCHEMA public
-        GRANT USAGE, SELECT ON SEQUENCES TO trustbridge_app;
   smoke-mosquitto-conf:
     content: |
       listener 8883

@@ -19,7 +19,7 @@ def _captured_kwargs(**overrides: object) -> dict[str, Any]:
 
 def test_null_mode_is_default_nullpool_without_connect_args() -> None:
     """Null mode is default nullpool without connect args."""
-    engine = db.build_engine(Settings())
+    engine = db.build_engine(Settings(mode="dev"))
     assert isinstance(engine.pool, NullPool)
     kwargs = _captured_kwargs()
     assert kwargs["poolclass"] is NullPool
@@ -29,7 +29,7 @@ def test_null_mode_is_default_nullpool_without_connect_args() -> None:
 
 def test_local_mode_uses_queue_pool_with_defaults_when_unset() -> None:
     """Local mode uses queue pool with defaults when unset."""
-    engine = db.build_engine(Settings(db_pool_mode="local"))
+    engine = db.build_engine(Settings(mode="dev", db_pool_mode="local"))
     assert isinstance(engine.pool, AsyncAdaptedQueuePool)
     kwargs = _captured_kwargs(db_pool_mode="local")
     assert kwargs["pool_pre_ping"] is True
@@ -55,7 +55,7 @@ def test_pool_sizing_is_ignored_outside_local_mode() -> None:
 
 def test_external_mode_uses_nullpool_with_unique_statement_names() -> None:
     """External mode uses nullpool with unique statement names."""
-    engine = db.build_engine(Settings(db_pool_mode="external"))
+    engine = db.build_engine(Settings(mode="dev", db_pool_mode="external"))
     assert isinstance(engine.pool, NullPool)
     kwargs = _captured_kwargs(db_pool_mode="external")
     assert kwargs["poolclass"] is NullPool
