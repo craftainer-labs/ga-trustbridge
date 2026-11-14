@@ -84,14 +84,20 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    adapter's delete or revoke operation through the normal write-ahead `credential_operations`
    path (so a crash is resumed, and the platform-side name is deterministic, 0029). **What is
    deleted is user decision 1.**
-   *Implemented (NG6h-5, `deletion/platform.py`, `worker/platform_deletion.py`).* One pass removes
-   one recorded item, in this order: credentials (`CredentialCore.delete_scope` with the deletion's
+   *Implemented (NG6h-5, `deletion/platform.py`, `worker/platform_deletion.py`).* One pass works
+   through the recorded items, in this order: credentials (`CredentialCore.delete_scope` with the deletion's
    `deletion_id` and `remove_outputs=False`), then webhooks, repositories, projects
-   (`ResourceCore.delete`). Resources are **not write-ahead** (only credentials are, through
+   (`ResourceCore.delete`). *NG6h-5b (no head-of-line blocking):* an item that fails is skipped for
+   the rest of the pass and the pass tries the next one, so a stuck item (a disabled adapter, say)
+   never holds up the rest; a project is never tried while one of its repositories remains. A pass
+   stops after 50 tries or when the run budget is spent (spent on failures alone it holds, which counts the attempt), and starts at item `attempts % len(items)` (wrapping) so stuck head items cannot starve the rest across retries. It reports progress (the cursor, which
+   resets the engine's attempts) only when something was removed; when every remaining item failed
+   it raises `PlatformStepHeldError` (class names and counts only), which is the transient failure
+   below. Per-item failures are logged by exception class only. Resources are **not write-ahead** (only credentials are, through
    `credential_operations`): a crash between the adapter call and forgetting the row repeats the
    adapter's idempotent `delete`. The work list is re-read from the rows on every pass, so a restart
    converges; a removed item is not removed twice, and after a crash `counts` is a lower bound by
-   at most one. Repositories and projects stay, and are recorded under `skipped` as
+   at most one pass's removals (50). Repositories and projects stay, and are recorded under `skipped` as
    `kept_by_request`, unless the request set `delete_platform_resources`. The GitHub outputs of a
    deleted credential stay recorded for step 3 (`remove_outputs=False`): step 2 makes no GitHub call,
    so an uninstalled App cannot block it. Nothing is read from the platform: only recorded rows are
