@@ -44,7 +44,7 @@ is a separate package under `adapters/<name>/` (NG5) that registers itself in th
   admin-disabled tenant with `TenantDisabledError`; an operation already in flight still resumes
   (ADR 0033 invariant 19). The one exception: `SqlTenantGate` admits `OperationKind.DELETE` only when
   the call carries a `deletion_id` (`delete_scope(..., deletion_id=)`, set only by the deletion engine's steps) of a
-  non-terminal deletion of the same tenant (ADR 0034).
+  non-terminal deletion of the same tenant (ADR 0034). `delete_scope(..., remove_outputs=False)` (also only the deletion's platform step) deletes the platform credential and leaves the recorded GitHub outputs for the deletion's GitHub step.
 
 ## Rotation when a scope switches kind (settles ADR 0029's open issue)
 

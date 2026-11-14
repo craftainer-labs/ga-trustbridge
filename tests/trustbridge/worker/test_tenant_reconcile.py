@@ -20,12 +20,14 @@ from trustbridge.adapters.fake import fake_capabilities
 from trustbridge.adapters.interface import AdapterError, IssuedSecret
 from trustbridge.adapters.store import OperationStatus, OutputError
 from trustbridge.worker.lease import LeaseBusy
+from trustbridge.worker.platform_deletion import SqlPlatformPort
 from trustbridge.worker.reconcile_queue import ClaimLostError
 from trustbridge.worker.runtime import Core
 from trustbridge.worker.tenant_reconcile import (
     CredentialReconciler,
     ReconcileIncompleteError,
     SweepThrottle,
+    build_platform_port,
     build_tenant_reconciler,
 )
 
@@ -240,6 +242,22 @@ def test_the_factory_composes_the_core_for_the_reconciler_only_with_a_database()
     body = build_tenant_reconciler(core, sessions, classes)
     assert isinstance(body, CredentialReconciler)
     assert body._adapters == ("a", "b")
+
+
+def test_the_platform_port_factory_needs_a_database() -> None:
+    """NG6h-5: the deletion's platform port is composed from the same collaborators."""
+    parts = SimpleNamespace(
+        runtime=SimpleNamespace(gateway=object()),
+        connections=object(),
+        parked=object(),
+        leases=object(),
+        tenants=object(),
+    )
+    core = cast("Core", parts)
+    classes: dict[str, Any] = {"a": object}
+    assert build_platform_port(core, None, classes) is None
+    sessions = cast("async_sessionmaker[AsyncSession]", object())
+    assert isinstance(build_platform_port(core, sessions, classes), SqlPlatformPort)
 
 
 async def test_the_global_parked_sweep_runs_once_per_interval() -> None:

@@ -200,3 +200,25 @@ async def test_delete_scope_removes_platform_credential_and_outputs(secret_world
     assert result.change is ChangeState.DELETED
     assert w.platform.credentials == {}
     assert {o.name for o in w.writer.removed} == {"FAKE_REGISTRY", "FAKE_TOKEN"}
+
+
+async def test_delete_scope_without_outputs_keeps_them_for_the_github_step(
+    secret_world: World,
+) -> None:
+    """`remove_outputs=False` deletes the platform credential only and keeps the output rows."""
+    w = secret_world
+    await w.core.ensure_scope(w.tenant, "fake", PUSH_PROD)
+    stored = await w.store.get_credential(w.tenant.id, "fake", _key(PUSH_PROD))
+    assert stored is not None
+    outputs = stored.outputs
+    assert outputs
+    result = await w.core.delete_scope(w.tenant, "fake", PUSH_PROD, remove_outputs=False)
+    assert result.change is ChangeState.DELETED
+    assert w.platform.credentials == {}
+    assert w.writer.removed == []
+    after = await w.store.get_credential(w.tenant.id, "fake", _key(PUSH_PROD))
+    assert after is not None
+    assert after.state.current is None
+    assert after.outputs == outputs
+    again = await w.core.delete_scope(w.tenant, "fake", PUSH_PROD, remove_outputs=False)
+    assert again.change is ChangeState.UNCHANGED

@@ -84,16 +84,38 @@ A tenant with a non-terminal deletion cannot be enabled (0033 invariant 19).
    adapter's delete or revoke operation through the normal write-ahead `credential_operations`
    path (so a crash is resumed, and the platform-side name is deterministic, 0029). **What is
    deleted is user decision 1.**
+   *Implemented (NG6h-5, `deletion/platform.py`, `worker/platform_deletion.py`).* One pass removes
+   one recorded item, in this order: credentials (`CredentialCore.delete_scope` with the deletion's
+   `deletion_id` and `remove_outputs=False`), then webhooks, repositories, projects
+   (`ResourceCore.delete`). Resources are **not write-ahead** (only credentials are, through
+   `credential_operations`): a crash between the adapter call and forgetting the row repeats the
+   adapter's idempotent `delete`. The work list is re-read from the rows on every pass, so a restart
+   converges; a removed item is not removed twice, and after a crash `counts` is a lower bound by
+   at most one. Repositories and projects stay, and are recorded under `skipped` as
+   `kept_by_request`, unless the request set `delete_platform_resources`. The GitHub outputs of a
+   deleted credential stay recorded for step 3 (`remove_outputs=False`): step 2 makes no GitHub call,
+   so an uninstalled App cannot block it. Nothing is read from the platform: only recorded rows are
+   removed. A failure (the platform down, an adapter not enabled or without connection data, a
+   delete waiting for a manual action, an unrecognised resource kind) is transient: the engine
+   records it, backs off, keeps the deletion in `platform` and raises the attempts alert; only an
+   operator's `skip-step` moves on (user decision 2). Counts are `platform_access_grants`,
+   `platform_webhooks`, `platform_repositories` and `platform_projects`.
 3. **GitHub.** Remove the secrets, variables and environments trustbridge wrote, as tracked in
    the tenant's resource and credential rows, using an installation token, per repository. If
    the installation no longer exists (the App was uninstalled), GitHub has already revoked
    access and the outputs cannot be removed from our side: they are recorded in `skipped` as
    `installation_gone`, with repository ids, so the customer can remove them. Nothing outside
    the tracked outputs is touched.
-4. **Secret store.** Remove the tenant's parked values and its per-tenant Argo CD webhook token.
+4. **Secret store.** Remove the tenant's parked values (the drain abandons them). *Settled
+   (NG6h-5):* the per-tenant Argo CD token is part of the operator-provisioned connection data and is
+   **not** deleted; there is no separate secret-store state, and the platform step records the
+   connection data as skipped (below).
    **The adapter connection data (`store:tenants/<uuid>/<adapter>`) is not deleted by the API**,
    consistent with it being operator-only (0033): the record lists the keys under `skipped` as
-   `operator_owned`, for the operator to remove. (User decision 4: it keeps the API from gaining any write path to that store.)
+   `operator_owned`, for the operator to remove. *Implemented (NG6h-5):* the platform step's last
+   pass lists `store:tenants/<uuid>/` (names only, `ConnectionNames`) and records one
+   `operator_owned_connections` / `operator_owned` skipped entry per adapter name, never a value
+   or a reference. (User decision 4: it keeps the API from gaining any write path to that store.)
 5. **Database.** In the tenant's context (0031), in batches and in the order
    `credential_operations`, `adapter_credentials`, `adapter_resources`, `scope_leases`,
    `tenant_repositories`, then the `tenants` row last through `tb_delete_tenant` (0031; the app

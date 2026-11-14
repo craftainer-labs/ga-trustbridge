@@ -183,6 +183,7 @@ class _Ctx:
     tenant: Tenant
     scope: CredentialScope
     stored: StoredCredential
+    remove_outputs: bool = True
 
 
 def _empty(
@@ -263,14 +264,21 @@ class CredentialCore:
         scope_id: ScopeId,
         *,
         deletion_id: UUID | None = None,
+        remove_outputs: bool = True,
     ) -> ScopeResult:
-        """Delete a scope's credential and its GitHub outputs.
+        """Delete a scope's credential and, by default, its GitHub outputs.
 
         `deletion_id` is the origin of a tenant deletion's own call (ADR 0034 B10): only the
         deletion engine's steps set it, and only with it does the gate let a delete through a
         disabled tenant. A user-initiated delete leaves it `None`.
+
+        `remove_outputs=False` deletes the platform credential only: no GitHub call is made and
+        the stored `outputs` rows stay, for the tenant deletion's GitHub step (ADR 0034 step 3),
+        which removes them or records `installation_gone`. It also holds when the call resumes an
+        open delete operation (it is a property of this call, not of the stored operation).
         """
         async with self._locked(tenant, adapter, scope_id) as ctx:
+            ctx.remove_outputs = remove_outputs
             open_op = await self._d.store.get_open_operation(tenant.id, adapter, ctx.scope.key)
             if open_op is not None:
                 result = await self._advance(ctx, open_op)
@@ -703,12 +711,14 @@ class CredentialCore:
         return new_op
 
     async def _finish_delete(self, ctx: _Ctx, op: Operation) -> Operation:
-        try:
-            await self._d.writer.remove(ctx.tenant, ctx.stored.outputs)
-        except OutputError as err:
-            await self._on_error(ctx, op, AdapterError(err.retryable, str(err)))
+        if ctx.remove_outputs:
+            try:
+                await self._d.writer.remove(ctx.tenant, ctx.stored.outputs)
+            except OutputError as err:
+                await self._on_error(ctx, op, AdapterError(err.retryable, str(err)))
         new_op = replace(op, status=OperationStatus.FINISHED, attempts=0)
-        stored = replace(ctx.stored, state=CredentialState(current=None), kind=None, outputs=())
+        kept = () if ctx.remove_outputs else ctx.stored.outputs
+        stored = replace(ctx.stored, state=CredentialState(current=None), kind=None, outputs=kept)
         await self._persist(ctx, stored, new_op)
         return new_op
 
