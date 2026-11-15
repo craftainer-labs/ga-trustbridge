@@ -49,7 +49,8 @@ The Helm chart that runs trustbridge's three processes on Kubernetes
   `mqtt.host`, `trustbridge.trustedProxies` (`[]` means no proxy),
   `subscriberSecret`, the S3 and MQTT secrets. `mqtt.allowInsecure` must not be
   true: the application refuses it in production, so the chart fails the render
-  rather than crash-looping (false or unset is fine). `RUN_MIGRATIONS_ON_STARTUP` is
+  rather than crash-looping (false or unset is fine; the values schema allows only a
+  boolean or null, so strings such as `yes` are refused). `RUN_MIGRATIONS_ON_STARTUP` is
   always `false` and `allow_mock_mode` is not offered.
 
 ## Settings to values
@@ -118,7 +119,8 @@ extraVolumeMounts:
 
 The image runs as UID 1000 with group 0, and the chart sets no `fsGroup`, so a
 `0440` Secret file is readable only if you set `podSecurityContext.fsGroup` to a
-GID (for example `1000`): Kubernetes adds it to the container's supplemental
+GID (any one works; `1000` is an example, and a platform that overrides
+`fsGroup`, such as OpenShift's restricted SCC, needs its own GID range): Kubernetes adds it to the container's supplemental
 groups and the mounted files become group-owned by it. A `defaultMode: 0444` also
 works but lets every process in the pod read the private key.
 `readOnlyRootFilesystem` does not affect a Secret volume.
