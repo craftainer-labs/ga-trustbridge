@@ -118,6 +118,9 @@ existing Secret. A null or empty value is not set, so the application default ap
 {{- $_ := required "oidc.issuerUrl is required when mode=production" $v.oidc.issuerUrl -}}
 {{- $_ := required "s3.endpointUrl is required when mode=production" $v.s3.endpointUrl -}}
 {{- $_ := required "mqtt.host is required when mode=production" $v.mqtt.host -}}
+{{- if eq (lower (toString $v.mqtt.allowInsecure)) "true" -}}
+{{- fail "mqtt.allowInsecure must not be true when mode=production (the application refuses it at start); set mqtt.allowInsecure=false, or use mode=dev" -}}
+{{- end -}}
 {{- if kindIs "invalid" $tb.trustedProxies -}}
 {{- fail "trustbridge.trustedProxies is required when mode=production (use [] for no proxy; list the ingress controller otherwise)" -}}
 {{- end -}}

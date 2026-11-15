@@ -41,6 +41,27 @@ helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yam
     --set worker.health=null --set reconciler.health=null >"$work/health-omitted.yaml"
 (cd "$repo" && uv run python -I deploy/helm/assert_render.py health-off "$work/health-omitted.yaml")
 
+# mqtt.allowInsecure is refused only in production: dev renders with it, and production
+# renders with it false (the default) or null (unset: the variable is then not set).
+mqtt_insecure_value() { # the value of MQTT_ALLOW_INSECURE in a render, empty when not set
+    awk '/name: MQTT_ALLOW_INSECURE/ { getline; gsub(/.*value: |"/, ""); print; exit }' "$1"
+}
+echo "==> render mqtt-insecure-dev"
+helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
+    --set mode=dev --set mqtt.allowInsecure=true >"$work/mqtt-insecure-dev.yaml"
+[ "$(mqtt_insecure_value "$work/mqtt-insecure-dev.yaml")" = "true" ] ||
+    { echo "mqtt-insecure-dev: MQTT_ALLOW_INSECURE is not true" >&2; exit 1; }
+echo "==> render mqtt-insecure-false"
+helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
+    --set mqtt.allowInsecure=false >"$work/mqtt-insecure-false.yaml"
+[ "$(mqtt_insecure_value "$work/mqtt-insecure-false.yaml")" = "false" ] ||
+    { echo "mqtt-insecure-false: MQTT_ALLOW_INSECURE is not false" >&2; exit 1; }
+echo "==> render mqtt-insecure-unset"
+helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
+    --set mqtt.allowInsecure=null >"$work/mqtt-insecure-unset.yaml"
+[ -z "$(mqtt_insecure_value "$work/mqtt-insecure-unset.yaml")" ] ||
+    { echo "mqtt-insecure-unset: MQTT_ALLOW_INSECURE is set" >&2; exit 1; }
+
 # Each of these must fail, and its output must match an extended regex that names the
 # problem (a message of the chart's own `required`/`fail`, or the values.schema.json error).
 # The output of every refused render is printed, so a CI log shows the wording.
@@ -72,6 +93,7 @@ expect_failure "trustedProxies is required" -- -f "$minimal" --set trustbridge.t
 expect_failure "database.runtime.existingSecret is required" -- -f "$minimal" --set database.runtime.existingSecret=
 expect_failure "valkey.existingSecret is required" -- -f "$minimal" --set valkey.existingSecret=
 expect_failure "trustbridge.signers is required" -- -f "$minimal" --set trustbridge.signers=null
+expect_failure "mqtt.allowInsecure must not be true when mode=production" -- -f "$minimal" --set mqtt.allowInsecure=true
 expect_failure "proxy.existingSecret is required" -- -f "$minimal" --set proxy.httpsProxyKey=https-proxy
 # values.schema.json: the output names the schema failure, the path and the rule. The wording
 # is helm 4's (santhosh-tekuri/jsonschema), as printed in CI above.
@@ -79,6 +101,7 @@ schema="values don't meet the specifications of the schema"
 expect_failure "$schema" "additional properties 'nonsense' not allowed" -- -f "$minimal" --set nonsense=1
 expect_failure "$schema" "at '/mode': value must be one of 'production', 'dev'" -- \
     -f "$minimal" --set mode=mock
+expect_failure "$schema" "/mqtt/allowInsecure" -- -f "$minimal" --set-string mqtt.allowInsecure=yes
 expect_failure "$schema" "at '/worker/health/port': maximum: got 70,000, want 65,535" -- \
     -f "$minimal" --set worker.health.port=70000
 echo "helm chart checks passed"
