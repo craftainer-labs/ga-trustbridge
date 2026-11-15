@@ -41,6 +41,15 @@ helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yam
     --set worker.health=null --set reconciler.health=null >"$work/health-omitted.yaml"
 (cd "$repo" && uv run python -I deploy/helm/assert_render.py health-off "$work/health-omitted.yaml")
 
+# mqtt.allowInsecure is refused only in production: dev renders with it, and production
+# renders with it false or null (the unset case).
+echo "==> render mqtt-insecure-dev"
+helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
+    --set mode=dev --set mqtt.allowInsecure=true >"$work/mqtt-insecure-dev.yaml"
+echo "==> render mqtt-insecure-unset"
+helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
+    --set mqtt.allowInsecure=null >"$work/mqtt-insecure-unset.yaml"
+
 # Each of these must fail, and its output must match an extended regex that names the
 # problem (a message of the chart's own `required`/`fail`, or the values.schema.json error).
 # The output of every refused render is printed, so a CI log shows the wording.
@@ -72,6 +81,7 @@ expect_failure "trustedProxies is required" -- -f "$minimal" --set trustbridge.t
 expect_failure "database.runtime.existingSecret is required" -- -f "$minimal" --set database.runtime.existingSecret=
 expect_failure "valkey.existingSecret is required" -- -f "$minimal" --set valkey.existingSecret=
 expect_failure "trustbridge.signers is required" -- -f "$minimal" --set trustbridge.signers=null
+expect_failure "mqtt.allowInsecure must not be true when mode=production" -- -f "$minimal" --set mqtt.allowInsecure=true
 expect_failure "proxy.existingSecret is required" -- -f "$minimal" --set proxy.httpsProxyKey=https-proxy
 # values.schema.json: the output names the schema failure, the path and the rule. The wording
 # is helm 4's (santhosh-tekuri/jsonschema), as printed in CI above.

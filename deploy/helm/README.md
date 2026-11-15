@@ -47,7 +47,9 @@ The Helm chart that runs trustbridge's three processes on Kubernetes
   at render time with a message that names the value, mirroring the settings
   validation: `publicBaseUrl`, `oidc.issuerUrl`, `s3.endpointUrl`,
   `mqtt.host`, `trustbridge.trustedProxies` (`[]` means no proxy),
-  `subscriberSecret`, the S3 and MQTT secrets. `RUN_MIGRATIONS_ON_STARTUP` is
+  `subscriberSecret`, the S3 and MQTT secrets, and `mqtt.allowInsecure: false`
+  (the application refuses it in production, so the chart fails the render
+  rather than crash-looping). `RUN_MIGRATIONS_ON_STARTUP` is
   always `false` and `allow_mock_mode` is not offered.
 
 ## Settings to values
@@ -89,6 +91,34 @@ The Helm chart that runs trustbridge's three processes on Kubernetes
 | `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `AWS_CA_BUNDLE`, `PGSSLROOTCERT` | `ca.existingConfigMap`, `.key`, `.mountPath` | all five point at the one mounted bundle |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and lowercase) | `proxy.httpProxy`, `.httpsProxy`, `.noProxy`; or `proxy.existingSecret` with `.httpProxyKey`, `.httpsProxyKey` | |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` | `otel.endpoint`, `otel.serviceName` | no export unless an endpoint is set |
+
+## MQTT TLS files
+
+`mqtt.caFile`, `mqtt.clientCert` and `mqtt.clientKey` are file paths inside the
+pod; the chart does not mount them. Mount them with `extraVolumes` and
+`extraVolumeMounts`, which apply to every pod including the migrate Job. Example
+with a Secret holding `ca.crt`, `tls.crt` and `tls.key`
+(`kubectl create secret generic tb-mqtt-tls --from-file=ca.crt --from-file=tls.crt --from-file=tls.key`):
+
+```yaml
+mqtt:
+  caFile: /etc/trustbridge/mqtt-tls/ca.crt
+  clientCert: /etc/trustbridge/mqtt-tls/tls.crt
+  clientKey: /etc/trustbridge/mqtt-tls/tls.key
+extraVolumes:
+  - name: mqtt-tls
+    secret:
+      secretName: tb-mqtt-tls
+      defaultMode: 0440
+extraVolumeMounts:
+  - name: mqtt-tls
+    mountPath: /etc/trustbridge/mqtt-tls
+    readOnly: true
+```
+
+The pods run as a non-root user with `fsGroup` from `podSecurityContext`, so the
+group-readable mode lets them read the key. `readOnlyRootFilesystem` does not
+affect a Secret volume.
 
 ## Known limits
 
