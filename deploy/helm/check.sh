@@ -42,19 +42,25 @@ helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yam
 (cd "$repo" && uv run python -I deploy/helm/assert_render.py health-off "$work/health-omitted.yaml")
 
 # mqtt.allowInsecure is refused only in production: dev renders with it, and production
-# renders with it false or null (the unset case).
+# renders with it false (the default) or null (unset: the variable is then not set).
+mqtt_insecure_value() { # the value of MQTT_ALLOW_INSECURE in a render, empty when not set
+    awk '/name: MQTT_ALLOW_INSECURE/ { getline; gsub(/.*value: |"/, ""); print; exit }' "$1"
+}
 echo "==> render mqtt-insecure-dev"
 helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
     --set mode=dev --set mqtt.allowInsecure=true >"$work/mqtt-insecure-dev.yaml"
-grep -A1 'name: MQTT_ALLOW_INSECURE' "$work/mqtt-insecure-dev.yaml" | grep -q 'value: "true"' ||
+[ "$(mqtt_insecure_value "$work/mqtt-insecure-dev.yaml")" = "true" ] ||
     { echo "mqtt-insecure-dev: MQTT_ALLOW_INSECURE is not true" >&2; exit 1; }
+echo "==> render mqtt-insecure-false"
+helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
+    --set mqtt.allowInsecure=false >"$work/mqtt-insecure-false.yaml"
+[ "$(mqtt_insecure_value "$work/mqtt-insecure-false.yaml")" = "false" ] ||
+    { echo "mqtt-insecure-false: MQTT_ALLOW_INSECURE is not false" >&2; exit 1; }
 echo "==> render mqtt-insecure-unset"
 helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
     --set mqtt.allowInsecure=null >"$work/mqtt-insecure-unset.yaml"
-if grep -q 'name: MQTT_ALLOW_INSECURE' "$work/mqtt-insecure-unset.yaml"; then
-    echo "mqtt-insecure-unset: MQTT_ALLOW_INSECURE is set" >&2
-    exit 1
-fi
+[ -z "$(mqtt_insecure_value "$work/mqtt-insecure-unset.yaml")" ] ||
+    { echo "mqtt-insecure-unset: MQTT_ALLOW_INSECURE is set" >&2; exit 1; }
 
 # Each of these must fail, and its output must match an extended regex that names the
 # problem (a message of the chart's own `required`/`fail`, or the values.schema.json error).
