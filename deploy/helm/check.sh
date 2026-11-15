@@ -46,9 +46,15 @@ helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yam
 echo "==> render mqtt-insecure-dev"
 helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
     --set mode=dev --set mqtt.allowInsecure=true >"$work/mqtt-insecure-dev.yaml"
+grep -A1 'name: MQTT_ALLOW_INSECURE' "$work/mqtt-insecure-dev.yaml" | grep -q 'value: "true"' ||
+    { echo "mqtt-insecure-dev: MQTT_ALLOW_INSECURE is not true" >&2; exit 1; }
 echo "==> render mqtt-insecure-unset"
 helm template tb "$chart" --namespace tb-system -f "$chart/ci/minimal-values.yaml" \
     --set mqtt.allowInsecure=null >"$work/mqtt-insecure-unset.yaml"
+if grep -q 'name: MQTT_ALLOW_INSECURE' "$work/mqtt-insecure-unset.yaml"; then
+    echo "mqtt-insecure-unset: MQTT_ALLOW_INSECURE is set" >&2
+    exit 1
+fi
 
 # Each of these must fail, and its output must match an extended regex that names the
 # problem (a message of the chart's own `required`/`fail`, or the values.schema.json error).

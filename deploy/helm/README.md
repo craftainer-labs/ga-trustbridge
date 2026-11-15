@@ -47,9 +47,9 @@ The Helm chart that runs trustbridge's three processes on Kubernetes
   at render time with a message that names the value, mirroring the settings
   validation: `publicBaseUrl`, `oidc.issuerUrl`, `s3.endpointUrl`,
   `mqtt.host`, `trustbridge.trustedProxies` (`[]` means no proxy),
-  `subscriberSecret`, the S3 and MQTT secrets, and `mqtt.allowInsecure: false`
-  (the application refuses it in production, so the chart fails the render
-  rather than crash-looping). `RUN_MIGRATIONS_ON_STARTUP` is
+  `subscriberSecret`, the S3 and MQTT secrets, and `mqtt.allowInsecure` being
+  true is refused (the application refuses it in production, so the chart fails
+  the render rather than crash-looping; unset or false is fine). `RUN_MIGRATIONS_ON_STARTUP` is
   always `false` and `allow_mock_mode` is not offered.
 
 ## Settings to values
@@ -116,11 +116,11 @@ extraVolumeMounts:
     readOnly: true
 ```
 
-The chart sets no `fsGroup`, and the pods run as a non-root user, so a `0440`
-Secret file is readable only if `podSecurityContext.fsGroup` is set to the
-group the container runs as; otherwise use `defaultMode: 0444` (the key is then
-readable by anyone who can exec into the pod). `readOnlyRootFilesystem` does
-not affect a Secret volume.
+The chart sets no `runAsUser`, `runAsGroup` or `fsGroup`, so a `0440` Secret file
+is readable only if you set `podSecurityContext.runAsGroup` and
+`podSecurityContext.fsGroup` to the same GID (the image's group). A
+`defaultMode: 0444` also works but lets every process in the pod read the private
+key. `readOnlyRootFilesystem` does not affect a Secret volume.
 
 ## Known limits
 
