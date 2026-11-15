@@ -117,11 +117,12 @@ extraVolumeMounts:
     readOnly: true
 ```
 
-The image runs as UID 1000 with group 0, and the chart sets no `fsGroup`, so a
-`0440` Secret file is readable only if you set `podSecurityContext.fsGroup` to a
-GID (any one works, for example `1000`): Kubernetes adds it to the container's
-supplemental groups and the mounted files become group-owned by it. A `defaultMode: 0444` also
-works but lets every process in the pod read the private key.
+The image runs as UID 1000 with primary group 0, and Secret files are owned by
+group 0, so a `0440` mode is readable as is. If you set
+`podSecurityContext.runAsGroup`, or the platform assigns another group, also set
+`podSecurityContext.fsGroup` to that group so the files stay readable. A
+`defaultMode: 0444` works in every case but lets every process in the pod read the
+private key.
 `readOnlyRootFilesystem` does not affect a Secret volume.
 
 ## Known limits
