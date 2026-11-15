@@ -116,9 +116,11 @@ extraVolumeMounts:
     readOnly: true
 ```
 
-The pods run as a non-root user with `fsGroup` from `podSecurityContext`, so the
-group-readable mode lets them read the key. `readOnlyRootFilesystem` does not
-affect a Secret volume.
+The chart sets no `fsGroup`, and the pods run as a non-root user, so a `0440`
+Secret file is readable only if `podSecurityContext.fsGroup` is set to the
+group the container runs as; otherwise use `defaultMode: 0444` (the key is then
+readable by anyone who can exec into the pod). `readOnlyRootFilesystem` does
+not affect a Secret volume.
 
 ## Known limits
 
