@@ -369,6 +369,9 @@ def test_the_deletion_sqlstate_is_not_mapped_on_a_disable(monkeypatch: pytest.Mo
     world = World(error=DBAPIError("SELECT 1", {}, _Driver("55000")))
     client = _client(monkeypatch, world, ADMIN, server_errors=False)
     problem(client.post(DISABLE, json={"reason": "r"}), 500, "internal")
+    (event,) = world.written
+    assert (event.action, event.outcome) == (Action.TENANT_DISABLE, Outcome.FAILURE)
+    assert event.after == {"reason": "internal"}
 
 
 def test_a_failure_event_that_cannot_be_written_does_not_hide_the_error(
