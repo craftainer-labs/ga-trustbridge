@@ -113,7 +113,9 @@ def free_text(value: str | None) -> str | None:
     return None if value is None else scrub_text(value)
 
 
-_ERROR_CLASS = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,63}")
+_ERROR_CLASS = re.compile(r"(?=.{1,64}$)(?:(?:[a-z][a-z_]*\.)*[A-Z][A-Za-z]*|[a-z][a-z_]*)")
+"""A class name (`KeyError`, `pkg.Error`) or a fixed lower-case code (`token_expired`). Digits and
+mixed case with underscores, the shape of a credential, never match."""
 _ENTRY_KEY_MAX = 64
 _ENTRY_LIST_MAX = 1000
 UNINSTALL_HINT = (
@@ -128,14 +130,15 @@ def error_code(last_error: str | None) -> str | None:
 
     `last_error` is `Class: message`, `code: message` or `code` for the engine and
     `operator <actor>: <reason>` for an operator's fail, which is reported as `operator_failed`.
-    Text that does not start with an identifier is `error`.
+    A head that is not a class name or a fixed lower-case code (it has digits, or mixes cases
+    with underscores, as a credential does) is `error`.
     """
     if not last_error:
         return None
     if last_error.startswith("operator "):
         return "operator_failed"
     head = last_error.split(":", 1)[0].strip()
-    return head if _ERROR_CLASS.fullmatch(head) and not has_secret_word(head) else "error"
+    return head if _ERROR_CLASS.fullmatch(head) else "error"
 
 
 def _entry_value(value: object) -> str | int | bool | list[int] | None:

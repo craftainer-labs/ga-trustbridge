@@ -381,6 +381,7 @@ def test_a_repeat_request_returns_the_open_record_and_audits_it(
     response = _client(monkeypatch, world, ADMIN).post(REQUEST, json=BODY)
     assert response.status_code == 202
     assert response.json()["state"] == "platform"
+    assert response.json()["delete_platform_resources"] is True  # the first request's flag
     (event,) = world.events
     assert event.before is not None
     assert event.before["deletion_id"] == str(DELETION)
@@ -846,7 +847,12 @@ def test_not_before_is_none_without_a_window_and_now_plus_it_with_one() -> None:
         ("something went wrong: x", "error"),
         ("9bad: x", "error"),
         (": x", "error"),
-        ("ghs_secret_token", "error"),
+        ("ghp_AbCdEfGh", "error"),
+        ("ghs_AbC123", "error"),
+        ("KeyError: 'x'", "KeyError"),
+        ("KeyboardInterrupt", "KeyboardInterrupt"),
+        ("token_expired: x", "token_expired"),
+        ("httpx.ConnectError: down", "httpx.ConnectError"),
     ],
 )
 def test_the_error_code_is_a_short_identifier_never_the_message(

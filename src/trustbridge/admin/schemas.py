@@ -132,7 +132,8 @@ class TenantDeletionOut(BaseModel):
     `counts` maps a category to what was removed so far and `skipped` lists what was left behind
     and why (each entry has a `category` and a `reason`; an operator's skip also names the
     `step` and who acknowledged it). `attempts` counts the failed attempts of the current step
-    and `last_error_code` is a short class name of the last failure, never its message.
+    and `last_error_code` is a class name or fixed code of the last failure (`error` for anything
+    else, `operator_failed` for an operator's fail), never its message.
     `hint` says what the operator still has to do outside trustbridge.
     """
 

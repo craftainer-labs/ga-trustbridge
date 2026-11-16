@@ -1407,7 +1407,7 @@
         "type": "object"
       },
       "TenantDeletionOut": {
-        "description": "A tenant deletion (ADR 0034): the record without its lease, holder, fence or cursor.\n\n`counts` maps a category to what was removed so far and `skipped` lists what was left behind\nand why (each entry has a `category` and a `reason`; an operator's skip also names the\n`step` and who acknowledged it). `attempts` counts the failed attempts of the current step\nand `last_error_code` is a short class name of the last failure, never its message.\n`hint` says what the operator still has to do outside trustbridge.",
+        "description": "A tenant deletion (ADR 0034): the record without its lease, holder, fence or cursor.\n\n`counts` maps a category to what was removed so far and `skipped` lists what was left behind\nand why (each entry has a `category` and a `reason`; an operator's skip also names the\n`step` and who acknowledged it). `attempts` counts the failed attempts of the current step\nand `last_error_code` is a class name or fixed code of the last failure (`error` for anything\nelse, `operator_failed` for an operator's fail), never its message.\n`hint` says what the operator still has to do outside trustbridge.",
         "properties": {
           "attempts": {
             "title": "Attempts",
