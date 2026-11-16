@@ -18,7 +18,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.oidc import get_current_claims
+from app.oidc import get_current_claims, settings
 from tests.trustbridge.admin import helpers
 from tests.trustbridge.admin.helpers import ACME, OTHER, build
 from trustbridge.admin import routes
@@ -53,6 +53,10 @@ def _bearer(token: str) -> dict[str, str]:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """The admin app with the real token validation (the helpers' fake claims are removed)."""
+    assert settings.expected_issuer == f"{KEYCLOAK}/realms/{REALM}", (
+        "run through .github/workflows/keycloak-e2e.yml: MODE=dev and OIDC_ISSUER_URL must "
+        "name the test realm before pytest starts"
+    )
     env = build()
     env.app.dependency_overrides.pop(get_current_claims)
 
@@ -143,6 +147,8 @@ def test_a_token_for_another_audience_is_401(client: TestClient) -> None:
 
 def test_an_expired_token_is_401(client: TestClient) -> None:
     """A two-second token works at first and is refused once it has expired."""
+    # the first request fetches discovery and the JWKS, which must not eat the token's two seconds
+    assert client.get(HOSTS, headers=_bearer(_token("kc-viewer"))).status_code == 200
     token = _token("kc-viewer", "e2e-short")
     assert client.get(HOSTS, headers=_bearer(token)).status_code == 200
 

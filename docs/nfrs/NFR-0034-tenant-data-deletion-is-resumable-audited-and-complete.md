@@ -94,7 +94,8 @@ Integration tests run as the app role against a real Postgres, in the Checks wor
 
 - Invariant 11 end to end: `test_a_canary_planted_through_a_whole_deletion_is_in_no_log_response_or_row`
   in `tests/trustbridge/deletion/test_canary_flow_integration.py` plants a canary in the credential
-  and connection data, in webhook headers and bodies, in the request reason and in a failing step's
+  core and the connection data the fakes hold (read only through the drain port and the connection
+  names), in webhook headers and bodies, in the request reason and in a failing step's
   error, runs a whole deletion, and asserts it is in no log record, response, audit row, deletion
   record or delivery row.
 

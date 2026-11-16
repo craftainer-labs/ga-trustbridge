@@ -12,11 +12,11 @@ on:
     branches: [main]
   pull_request:
     paths:
-      - src/app/oidc.py
-      - src/trustbridge/rbac/**
-      - src/trustbridge/admin/**
+      - src/**
       - tests/keycloak_e2e/**
-      - tests/trustbridge/admin/helpers.py
+      - tests/trustbridge/admin/**
+      - tests/trustbridge/helpers.py
+      - pyproject.toml
       - uv.lock
       - .github/workflows/keycloak-e2e.yml
   workflow_dispatch:
@@ -61,6 +61,11 @@ jobs:
       - name: Wait for the realm
         run: |
           for _ in $(seq 1 60); do
+            if [ "$(docker inspect -f '{{.State.Running}}' keycloak)" != true ]; then
+              docker logs keycloak
+              echo "::error::The Keycloak container exited"
+              exit 1
+            fi
             if curl -fsS http://localhost:8080/realms/trustbridge-e2e/.well-known/openid-configuration > /dev/null; then
               exit 0
             fi

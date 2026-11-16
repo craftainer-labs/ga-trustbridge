@@ -3,16 +3,17 @@
 Runs in CI's stack (integration). The setup is `test_full_flow_integration.py`'s: the admin
 routes (grace 0), the engine over the real store, drain port and database step, and the real
 worker over the real outbox, with fake platform and GitHub ports. A canary value is planted where
-a secret could travel: the credential core and the connection data the fakes hold, the headers and
-body of webhook deliveries (before, during and after the deletion), the reason of the request, and
-the error text of a failing platform step. After the run, the canary must not appear in any log
-record (message, arguments, extras and formatted exceptions, from every logger), any HTTP response
-(problem bodies included), any audit row, any deletion record or any delivery row.
+a secret could travel: the credential core the drain port is given, the connection data the
+platform step reads the names of, the headers and body of webhook deliveries (before, during and
+after the deletion), the reason of the request, and the error text of a failing platform step.
+After the run, the canary must not appear in any log record (message, arguments, extras and
+formatted exceptions, from every logger that propagates to the root), any HTTP response (problem
+bodies included), any audit row, any deletion record or any delivery row.
 """
 
 import json
 import logging
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, cast
@@ -134,7 +135,10 @@ class _CanaryCredentials(_Credentials):
 
 
 class _CanaryConnections(_Connections):
-    """Operator-owned connection data: only the name may leave."""
+    """Operator-owned connection data: the step reads the names (`names()`), nothing else."""
+
+    async def names(self, tenant_id: UUID) -> Sequence[str]:
+        return list(self.data)
 
     def __init__(self) -> None:
         self.data = {"argocd": {"url": "https://argocd.example", "token": CANARY}}
