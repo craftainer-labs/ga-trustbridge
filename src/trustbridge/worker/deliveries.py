@@ -11,7 +11,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Literal, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, Update, and_, delete, or_, select, tuple_, update
@@ -108,18 +108,16 @@ class DeliveryStore(Protocol):
         """The subset of `keys` that has a stored row."""
         ...
 
-    async def mark_processed(self, key: DeliveryKey, now: datetime, *, attempts: int) -> bool:
+    async def mark_processed(
+        self, key: DeliveryKey, now: datetime, *, attempts: int, drop_payload: bool = False
+    ) -> bool:
         """Mark a row processed only if it is still `pending` with this `attempts` (its claim).
+
+        `drop_payload` also clears the body and headers in the same update (a delivery dropped
+        unhandled keeps only its hash and metadata, which deduplicate a replay).
 
         `attempts` is the row's generation: it changes with every counted failure and a requeue
         resets it, so a claim whose row moved on affects nothing. Returns whether it updated.
-        """
-        ...
-
-    async def clear_payload(self, key: DeliveryKey) -> None:
-        """Drop the stored body and headers of a delivery that is being dropped unhandled.
-
-        The row stays, with its `body_sha256` and metadata, to deduplicate a redelivery.
         """
         ...
 
@@ -277,17 +275,17 @@ class InMemoryDeliveryStore:
         """Replace fields of a row."""
         self.rows[key] = replace(self.rows[key], **changes)  # type: ignore[arg-type]
 
-    async def mark_processed(self, key: DeliveryKey, now: datetime, *, attempts: int) -> bool:
+    async def mark_processed(
+        self, key: DeliveryKey, now: datetime, *, attempts: int, drop_payload: bool = False
+    ) -> bool:
         """Mark processed if the claim still holds."""
         row = self.rows[key]
         if row.status != PENDING or row.attempts != attempts:
             return False
         self._set(key, status=PROCESSED, processed_at=now, next_attempt_at=None)
+        if drop_payload:
+            self._set(key, body=None, headers={})
         return True
-
-    async def clear_payload(self, key: DeliveryKey) -> None:
-        """Drop the body and headers."""
-        self._set(key, body=None, headers={})
 
     async def record_failure(
         self,
@@ -541,20 +539,25 @@ class PgDeliveryStore:
             result = await session.execute(stmt)  # type: ignore[call-overload]
             return int(result.rowcount)
 
-    async def mark_processed(self, key: DeliveryKey, now: datetime, *, attempts: int) -> bool:
+    async def mark_processed(
+        self, key: DeliveryKey, now: datetime, *, attempts: int, drop_payload: bool = False
+    ) -> bool:
         """Mark processed if the row is still pending with the claimed `attempts`."""
+        values: dict[str, Any] = {
+            "status": PROCESSED,
+            "processed_at": now,
+            "next_attempt_at": None,
+        }
+        if drop_payload:
+            values.update(body=None, headers={})
         count = await self._exec(
             update(WebhookDelivery)
             .where(
                 _is(key), WebhookDelivery.status == PENDING, WebhookDelivery.attempts == attempts
             )
-            .values(status=PROCESSED, processed_at=now, next_attempt_at=None)
+            .values(**values)
         )
         return count == 1
-
-    async def clear_payload(self, key: DeliveryKey) -> None:
-        """Null the body and empty the headers (the row stays, with its hash, to deduplicate)."""
-        await self._exec(update(WebhookDelivery).where(_is(key)).values(body=None, headers={}))
 
     async def record_failure(
         self,

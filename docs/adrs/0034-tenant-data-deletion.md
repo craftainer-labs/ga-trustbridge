@@ -213,7 +213,10 @@ uninstalled), its events are **acknowledged and dropped**: a row in `tenant_tomb
 and the worker marks the delivery processed without running a handler (user decision B2, NG6h-2). The
 dropped delivery keeps no payload: the worker sets its `body` to NULL and its `headers` to `{}` before
 marking it processed (decision log 2026-11-16, NG6z-c), keeping only what the replay dedupe and the
-metadata need (`body_sha256`, ids, event, status, times). The columns are nullable, so no migration.
+metadata need (`body_sha256`, ids, event, status, times). The columns are nullable, so no migration. The clear is part of the same update that marks the
+delivery processed (one claim-guarded statement, so a crash cannot leave a pending row without its body).
+A delivery of an event type with no registered handler is never inspected and keeps its body until the
+ordinary retention purge, as for any tenant.
 The only answer to the installation's admins is the response to the deletion request and its
 record, which say the App must be uninstalled; a reinstall gets a new installation id and works.
 The worker has no tenant to answer through (no row, no installation token mapping), so it logs the
