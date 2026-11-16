@@ -196,7 +196,7 @@ class Worker:
             error = f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
             await self._failed(row, entry, error)
         else:
-            # A dropped delivery keeps no payload (ADR 0034 "After deletion"): cleared with the mark.
+            # A dropped delivery keeps no payload (ADR 0034): cleared with the mark.
             done = await store.mark_processed(
                 row.key, self._d.clock(), attempts=row.attempts, drop_payload=dropped
             )
