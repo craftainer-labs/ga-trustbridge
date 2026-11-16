@@ -111,8 +111,8 @@ class AuditEvent:
         """A key is printable text within `MAX_EVENT_KEY`, on a tenant event without a delivery."""
         if self.event_key is None:
             return
-        if not self.event_key:
-            raise ValueError("event_key must not be empty")
+        if not self.event_key or self.event_key != self.event_key.strip():
+            raise ValueError("event_key must not be empty or padded with whitespace")
         _check_text("event_key", self.event_key, MAX_EVENT_KEY)
         if self.tenant_id is None:
             raise ValueError("event_key needs a tenant_id")

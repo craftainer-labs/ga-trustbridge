@@ -284,7 +284,7 @@ def test_an_event_key_is_stored_and_validated() -> None:
     assert _event(tenant_id=tenant, event_key="req-1").event_key == "req-1"
     assert _event().event_key is None
     assert _event(tenant_id=tenant, event_key="k" * MAX_EVENT_KEY).event_key is not None
-    for bad in ("", "k" * (MAX_EVENT_KEY + 1), "bad\nkey"):
+    for bad in ("", " ", " k", "k" * (MAX_EVENT_KEY + 1), "bad\nkey"):
         with pytest.raises(ValueError, match="event_key"):
             _event(tenant_id=tenant, event_key=bad)
     with pytest.raises(ValueError, match="needs a tenant_id"):

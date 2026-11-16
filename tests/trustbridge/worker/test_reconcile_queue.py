@@ -771,6 +771,22 @@ async def test_an_event_that_cannot_be_written_leaves_the_request_inflight_and_r
     assert h.valkey.hashes == {}  # the claim, the attempts and the request id are gone
 
 
+async def test_an_audit_outage_does_not_use_up_the_attempts() -> None:
+    """The body ran each time; only the audit write failed, so the request is not dropped."""
+    h = await Harness({}, tenant_reconcile_enabled=True, tenant_reconcile_max_attempts=2).start()
+    tenant, events = uuid4(), Events()
+    events.fail = True
+    await _request(h.valkey, tenant)
+    recon = _duty(h, Refusals(), Body(), reconcile_audit=events)
+    for _ in range(4):  # more runs than the attempt limit
+        assert await recon.tenant_reconcile() == 0
+        h.advance(TTL + 1)
+    events.fail = False
+    assert await recon.tenant_reconcile() == 1
+    [event] = events.written
+    assert event["reason"] is None  # completed, not attempts_exceeded
+
+
 async def test_a_crash_between_the_write_and_the_ack_writes_the_same_key_again() -> None:
     """At-least-once: the rerun carries the same request id, so the database keeps one event."""
     h = await Harness({}, tenant_reconcile_enabled=True).start()

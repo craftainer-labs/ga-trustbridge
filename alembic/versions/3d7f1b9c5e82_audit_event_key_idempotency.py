@@ -81,11 +81,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
-    op.execute("SET lock_timeout = '5s'")
-    op.execute("SET statement_timeout = '120s'")
     with op.get_context().autocommit_block():
         op.execute("SET lock_timeout = '5s'")
         op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX}")
-        op.execute("RESET statement_timeout")
         op.execute("RESET lock_timeout")
+    # After the autocommit block, whose RESETs would otherwise leave the DROP COLUMN (ACCESS
+    # EXCLUSIVE) without a timeout.
+    op.execute("SET lock_timeout = '5s'")
+    op.execute("SET statement_timeout = '120s'")
     op.execute("ALTER TABLE audit_events DROP COLUMN IF EXISTS event_key")

@@ -119,9 +119,12 @@ async def append(session: AsyncSession, event: AuditEvent) -> UUID | None:
     plain `INSERT`) and returns its id.
     """
     keyed = event.on_behalf_of is not None and event.tenant_id is not None
-    statement = _INSERT_ONCE if keyed else _INSERT
-    if event.event_key is not None:
+    if event.event_key is not None:  # exclusive with `on_behalf_of` (`AuditEvent` validates it)
         statement = _INSERT_KEYED
+    elif keyed:
+        statement = _INSERT_ONCE
+    else:
+        statement = _INSERT
     result = await session.execute(
         statement,
         {

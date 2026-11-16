@@ -193,7 +193,10 @@ class ReconcileQueue:
 
     async def _run(self, script: str, *args: str) -> int:
         """Run one of the scripts over the four keys; its integer reply."""
-        return int(await self._eval(script, *args) or 0)
+        reply = await self._eval(script, *args)
+        if reply is None:
+            raise RuntimeError("a reconcile queue script returned no integer")
+        return int(reply)
 
     async def _eval(self, script: str, *args: str) -> str | bytes | int | None:
         keys = (RECONCILE_SET, INFLIGHT_SET, CLAIMS_HASH, REQUEST_IDS_HASH)
@@ -224,6 +227,10 @@ class ReconcileQueue:
     async def begin_attempt(self, claim: Claim) -> int:
         """Count one more run of the request's body; returns the number of runs so far."""
         return int(await self._r.hincrby(ATTEMPTS_HASH, str(claim.tenant_id), 1))
+
+    async def refund_attempt(self, claim: Claim) -> None:
+        """Give back the run `begin_attempt` counted (the body ran but its audit write failed)."""
+        await self._r.hincrby(ATTEMPTS_HASH, str(claim.tenant_id), -1)
 
     async def clear_attempts(self, claim: Claim) -> None:
         """Forget the request's attempts (it was acknowledged)."""

@@ -12,6 +12,12 @@ before the ack runs the request again, and the second write is absorbed by the d
 (`audit.store.append`, `event_key`). The event is written at least once and stored once; it is
 never lost to a crash between the ack and the write.
 
+Residuals, accepted: the key is `(tenant_id, action, event_key)`, so a request whose first run
+wrote `completed`, crashed before the ack, and settled as `failed` on the rerun (the tenant was
+disabled meanwhile) has both events, each true; and the request id lives in Valkey until the ack
+removes it, so a hand edit of the queue keys can leave one behind (the next request of that
+tenant would then reuse it and its event be absorbed).
+
 The payload is a fixed reason code (`FailureReason`) and counts; never an error text, a URL or a
 value. The event is written in the request's tenant context, also for a tenant that no longer
 exists (the insert policy admits the context tenant, and `audit_events` has no foreign key).

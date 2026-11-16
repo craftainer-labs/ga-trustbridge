@@ -441,6 +441,7 @@ class Reconciler:
         """Settle one claim; True when it was acknowledged, False when it was left pending."""
         tenant = str(claim.tenant_id)
         refusal = await refusals.refusal_of(claim.tenant_id)
+        ran = False
         if refusal is not None:
             logger.info(
                 "dropped a reconcile request: tenant is %s",
@@ -453,7 +454,15 @@ class Reconciler:
             return False
         else:
             settled = await self._run_body(queue, body, claim)  # a poison request is acked too
-        await self._record_settled(queue, claim, settled)  # before the ack; a failure raises
+            ran = settled.reason is not FailureReason.ATTEMPTS_EXCEEDED
+        try:
+            await self._record_settled(queue, claim, settled)  # before the ack
+        except ClaimLostError:
+            raise
+        except Exception:
+            if ran:  # the audit store is down, not the body: that run does not count as a failure
+                await queue.refund_attempt(claim)
+            raise
         if not await queue.ack(claim):
             logger.warning(
                 "reconcile claim was reclaimed while it ran; the request runs again",
