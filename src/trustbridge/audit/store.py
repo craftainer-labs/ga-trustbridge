@@ -46,15 +46,19 @@ _COLUMNS = (
     'resource_id, outcome, "before"::text AS "before", "after"::text AS "after", request_id, '
     "trace_id, schema_version"
 )
-_INSERT_SQL = (
-    "INSERT INTO audit_events (id, tenant_id, actor_type, actor_sub, actor_iss, on_behalf_of, "
+_INSERT_COLUMNS = (
+    "id, tenant_id, actor_type, actor_sub, actor_iss, on_behalf_of, "
     'source_ip, action, resource_type, resource_id, outcome, "before", "after", request_id, '
-    "trace_id, schema_version) VALUES (CAST(:id AS uuid), CAST(:tenant_id AS uuid), :actor_type, "
+    "trace_id, schema_version"
+)
+_INSERT_VALUES = (
+    "CAST(:id AS uuid), CAST(:tenant_id AS uuid), :actor_type, "
     ":actor_sub, :actor_iss, CAST(CAST(:on_behalf_of AS text) AS jsonb), "
     "CAST(CAST(:source_ip AS text) AS inet), :action, "
     ":resource_type, :resource_id, :outcome, CAST(CAST(:before AS text) AS jsonb), "
-    "CAST(CAST(:after AS text) AS jsonb), :request_id, :trace_id, :schema_version)"
+    "CAST(CAST(:after AS text) AS jsonb), :request_id, :trace_id, :schema_version"
 )
+_INSERT_SQL = f"INSERT INTO audit_events ({_INSERT_COLUMNS}) VALUES ({_INSERT_VALUES})"  # noqa: S608 -- constants only
 # `preserve_rowcount` (SQLAlchemy 2.0.28+) memoizes the DBAPI's count for an INSERT, which
 # SQLAlchemy otherwise keeps only for UPDATE and DELETE; `append` reads it for a no-op insert.
 _INSERT = text(_INSERT_SQL).execution_options(preserve_rowcount=True)
@@ -66,6 +70,15 @@ _INSERT = text(_INSERT_SQL).execution_options(preserve_rowcount=True)
 _INSERT_ONCE = text(
     _INSERT_SQL + " ON CONFLICT (tenant_id, action, (on_behalf_of->>'delivery_id')) "
     "WHERE on_behalf_of IS NOT NULL DO NOTHING"
+).execution_options(preserve_rowcount=True)
+# The idempotency key of an internal event (NG5r-d): `event_key` is set, so the target repeats the
+# partial unique index `ux_audit_events_event_key`. A separate statement, so every other insert
+# (and its column list) is unchanged. The same SELECT-policy note as above applies: the event
+# has a tenant and is written in its context.
+_INSERT_KEYED = text(
+    f"INSERT INTO audit_events ({_INSERT_COLUMNS}, event_key) "  # noqa: S608 -- constants only
+    f"VALUES ({_INSERT_VALUES}, :event_key)"
+    " ON CONFLICT (tenant_id, action, event_key) WHERE event_key IS NOT NULL DO NOTHING"
 ).execution_options(preserve_rowcount=True)
 _LIST_ALL = text(
     f"SELECT {_COLUMNS} FROM tb_audit_list("  # noqa: S608 -- constants only
@@ -101,11 +114,19 @@ async def append(session: AsyncSession, event: AuditEvent) -> UUID | None:
     A webhook-driven event (`on_behalf_of` set) is idempotent on `(tenant_id, action,
     delivery_id)`: a redelivery finds the row and inserts nothing, and this returns `None`
     (the count of inserted rows, not `RETURNING`, which a null-tenant row could not read back).
-    Every other event always inserts (with a plain `INSERT`) and returns its id.
+    An event with an `event_key` is idempotent on `(tenant_id, action, event_key)` the same way
+    (NG5r-d; the key is internal and never read back). Every other event always inserts (with a
+    plain `INSERT`) and returns its id.
     """
     keyed = event.on_behalf_of is not None and event.tenant_id is not None
+    if event.event_key is not None:  # exclusive with `on_behalf_of` (`AuditEvent` validates it)
+        statement = _INSERT_KEYED
+    elif keyed:
+        statement = _INSERT_ONCE
+    else:
+        statement = _INSERT
     result = await session.execute(
-        _INSERT_ONCE if keyed else _INSERT,
+        statement,
         {
             "id": event.id,
             "tenant_id": event.tenant_id,
@@ -123,6 +144,7 @@ async def append(session: AsyncSession, event: AuditEvent) -> UUID | None:
             "request_id": event.request_id,
             "trace_id": event.trace_id,
             "schema_version": event.schema_version,
+            **({"event_key": event.event_key} if event.event_key is not None else {}),
         },
     )
     return event.id if cast("CursorResult[Any]", result).rowcount else None

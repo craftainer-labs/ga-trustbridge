@@ -42,6 +42,7 @@ from trustbridge.worker.relay import Clock, Relay, utcnow
 logger = logging.getLogger(__name__)
 CORE_ADAPTER = "_core"
 HTTP_OK_LOW, HTTP_OK_HIGH = 200, 300
+NO_AUDIT_STORE = "tenant reconcile request settled without an audit event: no audit store composed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,12 +380,13 @@ class Reconciler:
         was reclaimed (`ClaimLostError` from its `extend`) stops before its next write step. A run
         starts no body after half the claim TTL (the rest of its claims go back to pending), so a
         claim never expires before its body starts.
-        Each acknowledged request then gets one terminal audit event (`ReconcileAudit`, actor
-        `reconciler`): `tenant.reconcile.completed` with the counts, or `.failed` with a fixed
-        reason code (a dropped tenant, a tenant disabled mid-run, the attempts used up). It is
-        written only after the acknowledgement succeeded, so a request whose claim was reclaimed
-        (it runs again) gets its event from the run that finishes it, never twice; a crash
-        between the acknowledgement and the write loses the event (logged when the write fails).
+        Each request gets one terminal audit event (`ReconcileAudit`, actor `reconciler`):
+        `tenant.reconcile.completed` with the counts, or `.failed` with a fixed reason code (a
+        dropped tenant, a tenant disabled mid-run, the attempts used up). It is written BEFORE
+        the acknowledgement, keyed by the request's id (`ReconcileQueue.request_id`, the same for
+        every run of the request), and a failed write leaves the claim inflight, so the request
+        is retried after the claim TTL and the database absorbs a duplicate (ADR 0032, NG5r-d): a
+        crash at any point loses nothing and an event is stored once.
         Returns the number of requests acknowledged.
         """
         queue, refusals = self._d.reconcile_requests, self._d.refusals
@@ -439,6 +441,7 @@ class Reconciler:
         """Settle one claim; True when it was acknowledged, False when it was left pending."""
         tenant = str(claim.tenant_id)
         refusal = await refusals.refusal_of(claim.tenant_id)
+        ran = False
         if refusal is not None:
             logger.info(
                 "dropped a reconcile request: tenant is %s",
@@ -451,6 +454,16 @@ class Reconciler:
             return False
         else:
             settled = await self._run_body(queue, body, claim)  # a poison request is acked too
+            ran = settled.reason is not FailureReason.ATTEMPTS_EXCEEDED
+        try:
+            await self._record_settled(queue, claim, settled)  # before the ack
+        except ClaimLostError:
+            raise
+        except Exception:
+            if ran:  # the audit store is down, not the body: that run does not count as a failure
+                with contextlib.suppress(Exception):  # best effort; the audit error is the cause
+                    await queue.refund_attempt(claim)
+            raise
         if not await queue.ack(claim):
             logger.warning(
                 "reconcile claim was reclaimed while it ran; the request runs again",
@@ -458,26 +471,28 @@ class Reconciler:
             )
         else:
             await queue.clear_attempts(claim)
-            await self._record_settled(claim, settled)
         return True
 
-    async def _record_settled(self, claim: Claim, settled: _Settled) -> None:
-        """The terminal event of an acknowledged request; a failure is logged, never raised."""
+    async def _record_settled(self, queue: ReconcileQueue, claim: Claim, settled: _Settled) -> None:
+        """Write the request's terminal event, idempotently; raises when it cannot be written.
+
+        `ClaimLostError` when the claim was reclaimed (the run that holds it records the request).
+        With no audit store composed it logs and writes nothing.
+        """
         audit = self._d.reconcile_audit
         if audit is None:
+            logger.warning(NO_AUDIT_STORE, extra={"tenant": str(claim.tenant_id)})
             return
-        try:
-            await audit.settled(
-                claim.tenant_id,
-                reason=settled.reason,
-                summary=settled.summary,
-                attempts=settled.attempts,
-            )
-        except Exception:
-            logger.exception(
-                "could not record the reconcile request's terminal event",
-                extra={"tenant": str(claim.tenant_id)},
-            )
+        request_id = await queue.request_id(claim)
+        if request_id is None:
+            raise ClaimLostError(str(claim.tenant_id))
+        await audit.settled(
+            claim.tenant_id,
+            request_id,
+            reason=settled.reason,
+            summary=settled.summary,
+            attempts=settled.attempts,
+        )
 
     async def _run_body(
         self, queue: ReconcileQueue, body: TenantReconciler, claim: Claim

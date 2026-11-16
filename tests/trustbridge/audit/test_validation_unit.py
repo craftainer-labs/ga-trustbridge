@@ -24,7 +24,7 @@ from trustbridge.audit import (
     scrub_text,
     truncate,
 )
-from trustbridge.audit.model import MAX_DELIVERY_ID, MAX_SENDER_ID
+from trustbridge.audit.model import MAX_DELIVERY_ID, MAX_EVENT_KEY, MAX_SENDER_ID
 
 CANARY = "canary-secret-7f3a9c1e"
 PEM_KIND = "PRIVATE " + "KEY"  # split so secret scanners ignore this file
@@ -276,3 +276,22 @@ def test_events_built_from_projection_carry_the_canary_nowhere() -> None:
     """Inv. 6 at the model: serialized, the event contains none of the planted values."""
     event = _event(after=project("tenant", {"state": "active", "secret": CANARY}))
     assert CANARY not in repr(event)
+
+
+def test_an_event_key_is_stored_and_validated() -> None:
+    """NG5r-d: a printable key within `MAX_EVENT_KEY` on a tenant event without a delivery."""
+    tenant = uuid4()
+    assert _event(tenant_id=tenant, event_key="req-1").event_key == "req-1"
+    assert _event().event_key is None
+    assert _event(tenant_id=tenant, event_key="k" * MAX_EVENT_KEY).event_key is not None
+    for bad in ("", " ", " k", "k" * (MAX_EVENT_KEY + 1), "bad\nkey"):
+        with pytest.raises(ValueError, match="event_key"):
+            _event(tenant_id=tenant, event_key=bad)
+    with pytest.raises(ValueError, match="needs a tenant_id"):
+        _event(event_key="req-1")
+    with pytest.raises(ValueError, match="exclusive"):
+        _event(
+            tenant_id=tenant,
+            event_key="req-1",
+            on_behalf_of={"github_sender_id": 1, "delivery_id": "d"},
+        )

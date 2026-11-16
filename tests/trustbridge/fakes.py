@@ -180,14 +180,14 @@ class FakeRedis:
             del self.hashes[name]
         return gone
 
-    async def eval(self, script: str, numkeys: int, *args: str) -> int:
+    async def eval(self, script: str, numkeys: int, *args: str) -> int | str | None:
         """Run one of the reconcile queue's scripts: a Python mirror of each (no Lua here).
 
         The scripts' real behaviour is checked against Valkey in
         `tests/trustbridge/worker/test_reconcile_queue_integration.py`.
         """
         self._check()
-        pending, inflight, claims = args[:3]
+        pending, inflight, claims, request_ids = args[:4]
         member, extra = args[numkeys], args[numkeys + 1]
         entry = self.hashes.get(claims, {}).get(member)
         if script == reconcile_queue._STAMP:
@@ -203,18 +203,33 @@ class FakeRedis:
                 await self.hset(claims, member, extra)
             return int(moved)
         token = None if entry is None else entry.partition("|")[2]
-        if script == reconcile_queue._EXTEND:
-            if token == extra:
-                await self.hset(claims, member, args[numkeys + 2])
-            return int(token == extra)
+        if script in (reconcile_queue._EXTEND, reconcile_queue._REQUEST_ID):
+            return await self._held_script(
+                script, (claims, request_ids, member), token, args[numkeys + 1 :]
+            )
         # reclaim compares the whole entry, ack and release the token
         held = entry == extra if script == reconcile_queue._RECLAIM else token == extra
         if not held:
             return 0
         await self.hdel(claims, member)
         if script == reconcile_queue._ACK:
+            await self.hdel(request_ids, member)
             return await self.srem(inflight, member)
         return int(await self.smove(inflight, pending, member))
+
+    async def _held_script(
+        self, script: str, names: tuple[str, str, str], token: str | None, rest: tuple[str, ...]
+    ) -> int | str | None:
+        """The scripts that act only for the holder of the claim: extend and request id."""
+        claims, request_ids, member = names
+        held = token == rest[0]
+        if script == reconcile_queue._EXTEND:
+            if held:
+                await self.hset(claims, member, rest[1])
+            return int(held)
+        if not held:
+            return None
+        return self.hashes.setdefault(request_ids, {}).setdefault(member, rest[1])
 
     async def flushall(self) -> None:
         """Lose everything (restart without persistence)."""

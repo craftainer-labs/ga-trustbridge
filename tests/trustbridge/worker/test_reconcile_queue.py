@@ -22,11 +22,12 @@ from trustbridge.worker.reconcile_queue import (
     ATTEMPTS_HASH,
     CLAIMS_HASH,
     INFLIGHT_SET,
+    Claim,
     ClaimLostError,
     Extend,
     ReconcileQueue,
 )
-from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
+from trustbridge.worker.reconciler import NO_AUDIT_STORE, Reconciler, ReconcilerDeps
 
 TTL = 300.0
 
@@ -239,13 +240,18 @@ class Events:
     def __init__(self) -> None:
         """Start empty; `fail` makes the next write raise."""
         self.written: list[dict[str, Any]] = []
+        self.keys: set[str] = set()
+        self.calls = 0
         self.fail = False
 
-    async def settled(self, tenant_id: UUID, **kwargs: Any) -> None:  # noqa: ANN401
-        """Keep the call, or fail."""
+    async def settled(self, tenant_id: UUID, request_id: str, **kwargs: Any) -> None:  # noqa: ANN401
+        """Keep the call (a repeated request id stores nothing, as the database does), or fail."""
         if self.fail:
             raise ConnectionError("database down")
-        self.written.append({"tenant": tenant_id, **kwargs})
+        self.calls += 1
+        if request_id not in self.keys:
+            self.keys.add(request_id)
+            self.written.append({"tenant": tenant_id, **kwargs})
 
 
 def _duty(
@@ -730,7 +736,7 @@ async def test_a_failing_run_writes_nothing_until_the_attempts_are_used_up() -> 
 
 
 async def test_a_reclaimed_request_gets_its_event_from_the_run_that_finishes_it() -> None:
-    """The slow holder's ack fails, so it writes nothing; the second run writes the one event."""
+    """The slow holder finds its claim gone and writes nothing; the second run writes the event."""
     h = await Harness({}, tenant_reconcile_enabled=True).start()
     tenant, events = uuid4(), Events()
     await _request(h.valkey, tenant)
@@ -740,22 +746,150 @@ async def test_a_reclaimed_request_gets_its_event_from_the_run_that_finishes_it(
         h.valkey.hashes[CLAIMS_HASH].pop(str(tenant))  # the claim is reclaimed under it
 
     slow.hook = reclaimed
-    assert await _duty(h, Refusals(), slow, reconcile_audit=events).tenant_reconcile() == 1
-    assert events.written == []  # its ack found the claim gone
+    assert await _duty(h, Refusals(), slow, reconcile_audit=events).tenant_reconcile() == 0
+    assert events.written == []  # it found the claim gone before writing
     await _request(h.valkey, tenant)  # (a reclaim puts it back to pending; here it is re-asked)
     assert await _duty(h, Refusals(), Body(), reconcile_audit=events).tenant_reconcile() == 1
     assert len(events.written) == 1
 
 
-async def test_an_event_that_cannot_be_written_is_logged_and_the_request_stays_acked(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The audit write is after the ack: a database outage does not make the request run again."""
+async def test_an_event_that_cannot_be_written_leaves_the_request_inflight_and_retried() -> None:
+    """The write is before the ack: a database outage keeps the claim, so the request runs again."""
     h = await Harness({}, tenant_reconcile_enabled=True).start()
     tenant, events = uuid4(), Events()
     events.fail = True
     await _request(h.valkey, tenant)
-    with caplog.at_level(logging.ERROR):
-        assert await _duty(h, Refusals(), Body(), reconcile_audit=events).tenant_reconcile() == 1
-    assert "could not record the reconcile request's terminal event" in caplog.text
+    recon = _duty(h, Refusals(), Body(), reconcile_audit=events)
+    assert await recon.tenant_reconcile() == 0
+    assert events.written == []
+    assert h.valkey.sets.get(INFLIGHT_SET) == {str(tenant)}  # not acknowledged
+    events.fail = False
+    h.advance(TTL + 1)
+    assert await recon.tenant_reconcile() == 1
+    assert len(events.written) == 1
     assert h.valkey.sets == {}
+    assert h.valkey.hashes == {}  # the claim, the attempts and the request id are gone
+
+
+async def test_an_audit_outage_does_not_use_up_the_attempts() -> None:
+    """The body ran each time; only the audit write failed, so the request is not dropped."""
+    h = await Harness({}, tenant_reconcile_enabled=True, tenant_reconcile_max_attempts=2).start()
+    tenant, events = uuid4(), Events()
+    events.fail = True
+    await _request(h.valkey, tenant)
+    recon = _duty(h, Refusals(), Body(), reconcile_audit=events)
+    for _ in range(4):  # more runs than the attempt limit
+        assert await recon.tenant_reconcile() == 0
+        h.advance(TTL + 1)
+    events.fail = False
+    assert await recon.tenant_reconcile() == 1
+    [event] = events.written
+    assert event["reason"] is None  # completed, not attempts_exceeded
+
+
+async def test_a_crash_between_the_write_and_the_ack_writes_the_same_key_again() -> None:
+    """At-least-once: the rerun carries the same request id, so the database keeps one event."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, events = uuid4(), Events()
+    await _request(h.valkey, tenant)
+
+    class CrashingAck(ReconcileQueue):
+        async def ack(self, claim: Claim) -> bool:
+            raise ConnectionError("valkey went away")
+
+    crashing = CrashingAck(as_redis(h.valkey))
+    assert (
+        await _duty(
+            h, Refusals(), Body(), queue=crashing, reconcile_audit=events
+        ).tenant_reconcile()
+        == 0
+    )
+    assert len(events.written) == 1
+    h.advance(TTL + 1)  # the claim is reclaimed and the request runs again
+    assert await _duty(h, Refusals(), Body(), reconcile_audit=events).tenant_reconcile() == 1
+    assert events.calls == 2  # written twice ...
+    assert len(events.written) == 1  # ... stored once
+    assert h.valkey.sets == {}
+    assert h.valkey.hashes == {}
+
+
+async def test_a_request_made_again_after_the_ack_gets_a_new_request_id() -> None:
+    """The id belongs to one request, not to the tenant: the next request is a new event."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, events = uuid4(), Events()
+    recon = _duty(h, Refusals(), Body(), reconcile_audit=events)
+    for _ in range(2):
+        await _request(h.valkey, tenant)
+        assert await recon.tenant_reconcile() == 1
+    assert len(events.written) == 2
+
+
+async def test_a_holder_that_lost_its_claim_gets_no_request_id() -> None:
+    """The id is only handed to the holder of the claim (so it can never leave a stale one)."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant = uuid4()
+    await _request(h.valkey, tenant)
+    queue = ReconcileQueue(as_redis(h.valkey))
+    [claim] = await queue.claim(h.clock(), 5)
+    first = await queue.request_id(claim)
+    assert first is not None
+    assert await queue.request_id(claim) == first  # stable while the claim is held
+    assert await queue.request_id(Claim(tenant, "someone-else")) is None
+    h.valkey.hashes[CLAIMS_HASH].pop(str(tenant))
+    assert await queue.request_id(claim) is None
+
+
+async def test_without_an_audit_store_the_request_is_acked_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No audit store composed: the request is settled and the missing event is said, not silent."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    await _request(h.valkey, uuid4())
+    with caplog.at_level(logging.WARNING):
+        assert await _duty(h, Refusals(), Body()).tenant_reconcile() == 1
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == [
+        NO_AUDIT_STORE
+    ]
+    assert h.valkey.sets == {}
+
+
+async def test_a_refund_never_leaves_a_negative_count() -> None:
+    """A refund for a request whose attempts were already cleared leaves no field behind."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant = uuid4()
+    await _request(h.valkey, tenant)
+    queue = ReconcileQueue(as_redis(h.valkey))
+    [claim] = await queue.claim(h.clock(), 5)
+    assert await queue.begin_attempt(claim) == 1
+    await queue.refund_attempt(claim)
+    assert h.valkey.hashes[ATTEMPTS_HASH][str(tenant)] == "0"
+    await queue.clear_attempts(claim)
+    await queue.refund_attempt(claim)  # the count is already gone
+    assert ATTEMPTS_HASH not in h.valkey.hashes
+
+
+async def test_a_script_without_an_integer_reply_is_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the request id may be empty; any other script answering nothing is not read as 0."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    queue = ReconcileQueue(as_redis(h.valkey))
+
+    async def nothing(self: ReconcileQueue, script: str, *args: str) -> None:
+        return None
+
+    monkeypatch.setattr(ReconcileQueue, "_eval", nothing)
+    with pytest.raises(RuntimeError, match="no integer"):
+        await queue.ack(Claim(uuid4(), "token"))
+
+
+async def test_an_audit_outage_for_a_dropped_request_keeps_it_inflight() -> None:
+    """A refused tenant's request is settled without a body run: nothing to refund, not acked."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, events = uuid4(), Events()
+    events.fail = True
+    await _request(h.valkey, tenant)
+    recon = _duty(h, Refusals(**{str(tenant): "gone"}), Body(), reconcile_audit=events)
+    assert await recon.tenant_reconcile() == 0
+    assert h.valkey.sets.get(INFLIGHT_SET) == {str(tenant)}
+    assert ATTEMPTS_HASH not in h.valkey.hashes
