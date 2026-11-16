@@ -1,0 +1,87 @@
+# Admin API against real Keycloak tokens (NFR-0030): starts Keycloak with the
+# test realm of tests/keycloak_e2e/ (the ADR 0033 client roles, a password-grant
+# client, a two-second-token client and a client whose tokens carry another
+# audience) and runs that directory, which calls the real admin router with
+# real access tokens. CI-only: the directory is outside pytest's default
+# collection, and nothing here uses the devcontainer's own Keycloak (whose
+# realm has the template personas, not the trustbridge roles).
+name: Keycloak e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - src/app/oidc.py
+      - src/trustbridge/rbac/**
+      - src/trustbridge/admin/**
+      - tests/keycloak_e2e/**
+      - tests/trustbridge/admin/helpers.py
+      - uv.lock
+      - .github/workflows/keycloak-e2e.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keycloak-e2e:
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same image, tag and digest as .devcontainer/stack/keycloak/compose.yml.
+      # Not a `services:` container: those cannot mount the realm file or pass
+      # `start-dev --import-realm`. KC_HOSTNAME makes every token's `iss`
+      # http://localhost:8080/realms/trustbridge-e2e, the issuer the tests set.
+      - name: Start Keycloak with the test realm
+        run: |
+          docker run -d --name keycloak -p 8080:8080 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+            -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+            -e KC_HOSTNAME=http://localhost:8080 \
+            -v "$PWD/tests/keycloak_e2e/realm-trustbridge-e2e.json:/opt/keycloak/data/import/realm-trustbridge-e2e.json:ro" \
+            quay.io/keycloak/keycloak:26.7.4@sha256:82a77884f3af238beab1e7afd63b5f530e1b5c0590bd7aa60b40a40463e29b2c \
+            start-dev --import-realm
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          # Same minor as the devcontainer's CPython (.devcontainer/Dockerfile).
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras
+
+      - name: Wait for the realm
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/realms/trustbridge-e2e/.well-known/openid-configuration > /dev/null; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::Keycloak did not serve the trustbridge-e2e realm in time"
+          exit 1
+
+      # addopts is cleared because the default one ignores this directory and
+      # enforces the unit suites' coverage gate.
+      - name: Run the Keycloak e2e tests
+        env:
+          MODE: dev
+          OIDC_ISSUER_URL: http://localhost:8080/realms/trustbridge-e2e
+          KEYCLOAK_E2E_URL: http://localhost:8080
+        run: uv run pytest -o addopts="" -o cache_dir=/tmp/pytest-keycloak tests/keycloak_e2e
+
+      - name: Dump Keycloak logs on failure
+        if: failure()
+        run: docker logs keycloak
+
+      - name: Stop Keycloak
+        if: always()
+        run: docker rm -f keycloak

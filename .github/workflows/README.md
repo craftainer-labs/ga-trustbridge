@@ -43,6 +43,10 @@
   `PYPI_PUBLISH`, `NPM_PUBLISH` or `CARGO_PUBLISH`. A partial registry
   failure therefore never withholds the release.
 - `migration-compat.yml` — see "Migration compatibility" below.
+- `keycloak-e2e.yml` — starts Keycloak (the devcontainer's image, by digest) with
+  `tests/keycloak_e2e/`'s realm fixture and runs that directory: the admin API called with
+  real access tokens (NFR-0030). The realm is a test-only fixture because the
+  devcontainer's has the template personas, not the trustbridge client roles.
 - `moderate-bug-triage.yml` / `moderate-bug-fix.yml` /
   `moderate-feature-triage.yml` / `moderate-feature-build.yml` /
   `moderate-cleanup.yml` / `moderate-setup.yml` — see "Issue moderation"

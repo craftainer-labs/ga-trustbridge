@@ -73,5 +73,12 @@ Run in the Checks workflow's prek job (pytest, 100% coverage gate).
   `test_a_tenant_scoped_admin_cannot_disable_through_the_stack` in
   `tests/trustbridge/admin/test_reads_integration.py`.
 
-Known gap: no end-to-end test against a real Keycloak token for the namespaced client roles; the
-claim shape is tested with synthetic tokens only.
+- Real Keycloak tokens (`tests/keycloak_e2e/test_admin_api_keycloak_e2e.py`, run by
+  `.github/workflows/keycloak-e2e.yml` against the devcontainer's Keycloak image and a test-only
+  realm with the ADR 0033 client roles): `test_a_viewer_reads_and_cannot_mutate`,
+  `test_the_ladder_holds_for_a_real_operator`,
+  `test_a_tenant_scoped_role_reaches_only_its_tenant`,
+  `test_a_tenant_scoped_admin_cannot_reach_instance_actions`,
+  `test_an_instance_admin_reads_every_tenant`, `test_no_token_and_a_garbage_token_are_401`,
+  `test_a_token_for_another_audience_is_401` and `test_an_expired_token_is_401`. This workflow is
+  not part of the Checks workflow's prek job.
