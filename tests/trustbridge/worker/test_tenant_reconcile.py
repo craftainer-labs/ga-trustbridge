@@ -19,11 +19,13 @@ from trustbridge.adapters.core import (
 from trustbridge.adapters.fake import fake_capabilities
 from trustbridge.adapters.interface import AdapterError, IssuedSecret
 from trustbridge.adapters.store import OperationStatus, OutputError
+from trustbridge.audit.redact import FailureReason
 from trustbridge.github.environments import SqlEnvironmentStore
 from trustbridge.worker.drain_deletion import SqlWritersPort
 from trustbridge.worker.github_deletion import SqlGithubPort
 from trustbridge.worker.lease import LeaseBusy
 from trustbridge.worker.platform_deletion import SqlPlatformPort
+from trustbridge.worker.reconcile_audit import ReconcileSummary
 from trustbridge.worker.reconcile_queue import ClaimLostError
 from trustbridge.worker.runtime import Core
 from trustbridge.worker.tenant_reconcile import (
@@ -126,6 +128,29 @@ async def test_orphans_and_parked_values_are_swept() -> None:
     assert w.values.parked == {}
 
 
+async def test_the_summary_counts_what_the_run_did() -> None:
+    """Resumed operations, ensured scopes, swept orphans and parked values; a repeat counts none."""
+    w = build_world(fake_capabilities(oidc=False))
+    w.writer.fail_next = [OutputError("down")]
+    with pytest.raises(RetryableOperationError):
+        await w.core.ensure_scope(w.tenant, "fake", PULL)  # leaves one open operation
+    orphan = f"tb-{w.tenant.id.hex}-deadbeefdeadbeef-g1"
+    w.platform.credentials[orphan] = {"id": "x", "kind": "secret", "secret": "s"}
+    await w.values.put(uuid4(), IssuedSecret({"token": SecretStr("b")}))
+    first = await _body(w).reconcile(w.tenant.id, Extender())
+    assert first == ReconcileSummary(
+        operations_resumed=1, scopes_ensured=1, orphans_swept=1, parked_values_swept=1
+    )
+    again = await _body(w).reconcile(w.tenant.id, Extender())
+    assert again == ReconcileSummary(scopes_ensured=1)
+
+
+async def test_a_tenant_without_credentials_reports_zero_counts() -> None:
+    """Option A: nothing is created, so nothing is counted."""
+    w = build_world(fake_capabilities(oidc=False))
+    assert await _body(w).reconcile(w.tenant.id, Extender()) == ReconcileSummary()
+
+
 async def test_a_lost_claim_aborts_before_the_next_write_step() -> None:
     """`extend` raising stops the body at once: the step after it never runs."""
     w = build_world(fake_capabilities(oidc=False))
@@ -218,9 +243,10 @@ async def test_a_tenant_disabled_mid_run_stops_quietly(caplog: pytest.LogCapture
     core = StubCore(ensure=TenantDisabledError())
     body = await _stubbed(w, core)
     with caplog.at_level(logging.INFO):
-        await body.reconcile(w.tenant.id, Extender())
+        summary = await body.reconcile(w.tenant.id, Extender())
     assert core.steps == ["resume", "ensure"]
     assert "tenant reconcile stopped: tenant is disabled" in caplog.text
+    assert summary.stopped is FailureReason.TENANT_DISABLED
 
 
 async def test_an_unexpected_error_is_not_swallowed() -> None:

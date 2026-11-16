@@ -5,6 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,8 +14,10 @@ from pydantic import ValidationError
 from tests.trustbridge.fakes import Clock, FakeRedis
 from tests.trustbridge.helpers import as_redis, make_settings
 from tests.trustbridge.worker.harness import Harness
+from trustbridge.audit.redact import FailureReason
 from trustbridge.worker.health import Heartbeat
 from trustbridge.worker.ports import RECONCILE_SET, ReconcileRequests
+from trustbridge.worker.reconcile_audit import ReconcileSummary
 from trustbridge.worker.reconcile_queue import (
     ATTEMPTS_HASH,
     CLAIMS_HASH,
@@ -217,8 +220,9 @@ class Body:
         self.error: Exception | None = None
         self.hook: Callable[[], Awaitable[None]] | None = None
         self.extend: Extend | None = None
+        self.summary = ReconcileSummary(operations_resumed=1, scopes_ensured=2)
 
-    async def reconcile(self, tenant_id: UUID, extend: Extend) -> None:
+    async def reconcile(self, tenant_id: UUID, extend: Extend) -> ReconcileSummary:
         """Record, then maybe fail."""
         self.calls.append(tenant_id)
         self.extend = extend
@@ -226,6 +230,22 @@ class Body:
             await self.hook()
         if self.error is not None:
             raise self.error
+        return self.summary
+
+
+class Events:
+    """A `ReconcileAudit` stand-in that keeps what it was asked to write."""
+
+    def __init__(self) -> None:
+        """Start empty; `fail` makes the next write raise."""
+        self.written: list[dict[str, Any]] = []
+        self.fail = False
+
+    async def settled(self, tenant_id: UUID, **kwargs: Any) -> None:  # noqa: ANN401
+        """Keep the call, or fail."""
+        if self.fail:
+            raise ConnectionError("database down")
+        self.written.append({"tenant": tenant_id, **kwargs})
 
 
 def _duty(
@@ -234,7 +254,7 @@ def _duty(
     body: Body | None,
     *,
     queue: ReconcileQueue | None = None,
-    beat: Heartbeat | None = None,
+    **extra: Any,  # noqa: ANN401 -- more `ReconcilerDeps` fields (`heartbeat`, `reconcile_audit`)
 ) -> Reconciler:
     return Reconciler(
         h.settings,
@@ -246,10 +266,10 @@ def _duty(
             leases=h.leases,
             deliveries=None,
             clock=h.clock,
-            heartbeat=beat,
             reconcile_requests=queue if queue is not None else ReconcileQueue(as_redis(h.valkey)),
             refusals=refusals,
             tenant_reconciler=body,
+            **extra,
         ),
     )
 
@@ -304,7 +324,7 @@ async def test_an_enabled_body_runs_once_per_request_and_the_request_is_acked() 
     await _request(h.valkey, tenant, tenant)
     beat = Heartbeat()
     beat.register("tenant-reconcile", 60)
-    assert await _duty(h, Refusals(), body, beat=beat).tenant_reconcile() == 1
+    assert await _duty(h, Refusals(), body, heartbeat=beat).tenant_reconcile() == 1
     assert body.calls == [tenant]
     assert h.valkey.sets == {}
 
@@ -543,7 +563,7 @@ async def test_the_body_extends_the_claim_and_the_loop_beats() -> None:
         stamps.append(h.valkey.hashes[CLAIMS_HASH][str(tenant)].partition("|")[0])
 
     body.hook = hook
-    assert await _duty(h, Refusals(), body, beat=beat).tenant_reconcile() == 1
+    assert await _duty(h, Refusals(), body, heartbeat=beat).tenant_reconcile() == 1
     assert stamps == [f"{h.clock().timestamp():.3f}"]
 
 
@@ -633,3 +653,109 @@ def test_the_settings_enable_the_reconcile_by_default_with_a_bounded_attempt_cou
     for bad in (0, 101):
         with pytest.raises(ValidationError):
             make_settings(tenant_reconcile_max_attempts=bad)
+
+
+# ---- the terminal event of a request (NG5r-c) ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("refusal", "reason"),
+    [
+        ("gone", FailureReason.TENANT_GONE),
+        ("deleting", FailureReason.TENANT_DELETING),
+        ("disabled", FailureReason.TENANT_DISABLED),
+    ],
+)
+async def test_a_dropped_request_writes_one_failed_event_with_a_fixed_reason(
+    refusal: str, reason: FailureReason
+) -> None:
+    """A tenant that is gone, deleting or disabled ends the request with its reason code."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, events = uuid4(), Events()
+    await _request(h.valkey, tenant)
+    assert (
+        await _duty(
+            h, Refusals(**{str(tenant): refusal}), Body(), reconcile_audit=events
+        ).tenant_reconcile()
+        == 1
+    )
+    assert events.written == [
+        {"tenant": tenant, "reason": reason, "summary": None, "attempts": None}
+    ]
+
+
+async def test_a_finished_body_writes_one_completed_event_with_its_counts() -> None:
+    """The counts of the run are the payload; no reason."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, body, events = uuid4(), Body(), Events()
+    await _request(h.valkey, tenant)
+    assert await _duty(h, Refusals(), body, reconcile_audit=events).tenant_reconcile() == 1
+    assert events.written == [
+        {"tenant": tenant, "reason": None, "summary": body.summary, "attempts": None}
+    ]
+
+
+async def test_a_body_stopped_by_a_disable_writes_a_failed_event_with_the_partial_counts() -> None:
+    """`stopped` is the reason; the counts are what ran before the stop."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, body, events = uuid4(), Body(), Events()
+    body.summary = ReconcileSummary(operations_resumed=1, stopped=FailureReason.TENANT_DISABLED)
+    await _request(h.valkey, tenant)
+    assert await _duty(h, Refusals(), body, reconcile_audit=events).tenant_reconcile() == 1
+    [event] = events.written
+    assert event["reason"] is FailureReason.TENANT_DISABLED
+    assert event["summary"].operations_resumed == 1
+
+
+async def test_a_failing_run_writes_nothing_until_the_attempts_are_used_up() -> None:
+    """Retries are silent; the dropped request gets one failed event, with the attempt count."""
+    h = await Harness({}, tenant_reconcile_enabled=True, tenant_reconcile_max_attempts=2).start()
+    tenant, body, events = uuid4(), Body(), Events()
+    body.error = RuntimeError("platform down")
+    await _request(h.valkey, tenant)
+    recon = _duty(h, Refusals(), body, reconcile_audit=events)
+    for _ in range(2):
+        assert await recon.tenant_reconcile() == 0
+        h.advance(TTL + 1)
+    assert events.written == []
+    assert await recon.tenant_reconcile() == 1
+    assert events.written == [
+        {
+            "tenant": tenant,
+            "reason": FailureReason.ATTEMPTS_EXCEEDED,
+            "summary": None,
+            "attempts": 2,
+        }
+    ]
+
+
+async def test_a_reclaimed_request_gets_its_event_from_the_run_that_finishes_it() -> None:
+    """The slow holder's ack fails, so it writes nothing; the second run writes the one event."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, events = uuid4(), Events()
+    await _request(h.valkey, tenant)
+    slow = Body()
+
+    async def reclaimed() -> None:
+        h.valkey.hashes[CLAIMS_HASH].pop(str(tenant))  # the claim is reclaimed under it
+
+    slow.hook = reclaimed
+    assert await _duty(h, Refusals(), slow, reconcile_audit=events).tenant_reconcile() == 1
+    assert events.written == []  # its ack found the claim gone
+    await _request(h.valkey, tenant)  # (a reclaim puts it back to pending; here it is re-asked)
+    assert await _duty(h, Refusals(), Body(), reconcile_audit=events).tenant_reconcile() == 1
+    assert len(events.written) == 1
+
+
+async def test_an_event_that_cannot_be_written_is_logged_and_the_request_stays_acked(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The audit write is after the ack: a database outage does not make the request run again."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, events = uuid4(), Events()
+    events.fail = True
+    await _request(h.valkey, tenant)
+    with caplog.at_level(logging.ERROR):
+        assert await _duty(h, Refusals(), Body(), reconcile_audit=events).tenant_reconcile() == 1
+    assert "could not record the reconcile request's terminal event" in caplog.text
+    assert h.valkey.sets == {}

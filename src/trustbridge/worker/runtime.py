@@ -48,6 +48,7 @@ from trustbridge.worker.ports import (
     SqlTenants,
 )
 from trustbridge.worker.queue import StreamQueue
+from trustbridge.worker.reconcile_audit import ReconcileAudit
 from trustbridge.worker.reconcile_queue import ReconcileQueue
 from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps, TenantReconciler
 from trustbridge.worker.relay import Relay
@@ -307,6 +308,9 @@ async def run_process(
                     record_purger=wiring.record_purger,
                     reconcile_requests=ReconcileQueue(client),
                     refusals=core.tenant_gate,
+                    reconcile_audit=(
+                        ReconcileAudit(AuditWriter(sessions)) if sessions is not None else None
+                    ),
                     tenant_reconciler=chosen.tenant_reconciler
                     or (
                         build_tenant_reconciler(

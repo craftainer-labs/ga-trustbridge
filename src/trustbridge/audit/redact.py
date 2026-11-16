@@ -52,6 +52,10 @@ class FailureReason(StrEnum):
     UPSTREAM = "upstream"
     UNAVAILABLE = "unavailable"
     CANCELLED = "cancelled"
+    # NG5r-c: why the reconciler dropped a tenant reconcile request (`tenant.reconcile.failed`)
+    TENANT_DELETING = "tenant_deleting"
+    TENANT_GONE = "tenant_gone"
+    ATTEMPTS_EXCEEDED = "attempts_exceeded"
     INTERNAL = "internal"
 
     @classmethod
@@ -106,6 +110,18 @@ ALLOW_LISTS: Mapping[str, frozenset[str]] = {
             "installation_id",
             "delete_platform_resources",
             "not_before",
+        }
+    ),
+    # NG5r-c: the summary of one processed tenant reconcile request (`tenant.reconcile.completed`
+    # and `.failed`, actor `reconciler`): a fixed reason code and counts, never an error text.
+    "tenant_reconcile": frozenset(
+        {
+            "reason",
+            "attempts",
+            "operations_resumed",
+            "scopes_ensured",
+            "orphans_swept",
+            "parked_values_swept",
         }
     ),
     "authz_denial": frozenset(

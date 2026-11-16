@@ -39,6 +39,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import Settings
 from app.db import build_engine
+from tests.trustbridge.helpers import as_redis
 from tests.trustbridge.worker.harness import Harness
 from trustbridge.adapters.interface import CredentialSlot, CredentialState
 from trustbridge.adapters.store import (
@@ -71,6 +72,9 @@ from trustbridge.audit.credentials import (
 )
 from trustbridge.audit.denial import Denial
 from trustbridge.tenancy import install_tenant_hook, tenant_session
+from trustbridge.worker.ports import ReconcileRequests
+from trustbridge.worker.reconcile_audit import ReconcileAudit, ReconcileSummary
+from trustbridge.worker.reconcile_queue import Extend, ReconcileQueue
 from trustbridge.worker.reconciler import Reconciler, ReconcilerDeps
 
 pytestmark = pytest.mark.integration
@@ -555,6 +559,81 @@ async def test_the_reconciler_purge_job_removes_old_rows_in_bounded_runs(
     assert await _count(db, "resource_id IN ('age-150', 'age-10')") == 2
     assert await recon.audit_purge() == 0
     assert await _count(db, "action = 'audit.purge'") == 3  # the database's own summaries
+
+
+class _Refusals:
+    """`TenantRefusals` that refuses only the listed tenants."""
+
+    def __init__(self, **by_tenant: str) -> None:
+        self._by_tenant = by_tenant
+
+    async def refusal_of(self, tenant_id: UUID) -> str | None:
+        return self._by_tenant.get(str(tenant_id))
+
+
+class _Body:
+    """A `TenantReconciler` that reports fixed counts."""
+
+    async def reconcile(self, tenant_id: UUID, extend: Extend) -> ReconcileSummary:
+        del tenant_id, extend
+        return ReconcileSummary(operations_resumed=2, scopes_ensured=3, orphans_swept=1)
+
+
+async def test_the_reconcile_duty_writes_its_terminal_events_in_the_requests_tenant(
+    fresh_db: Db,
+) -> None:  # NG5r-c
+    """A completed and a dropped request each leave one event, visible only to their tenant."""
+    db = fresh_db
+    done, gone = uuid4(), uuid4()  # `gone` has no tenant row at all
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    queue = ReconcileQueue(as_redis(h.valkey))
+    recon = Reconciler(
+        h.settings,
+        ReconcilerDeps(
+            store=h.store,
+            queue=h.queue,
+            relay=h.relay,
+            hosts=h.hosts,
+            leases=h.leases,
+            deliveries=None,
+            clock=h.clock,
+            reconcile_requests=queue,
+            refusals=_Refusals(**{str(gone): "gone"}),
+            tenant_reconciler=_Body(),
+            reconcile_audit=ReconcileAudit(AuditWriter(db.app)),
+        ),
+    )
+    requests = ReconcileRequests(as_redis(h.valkey))
+    for tenant in (done, gone):
+        await requests.schedule(tenant)
+    assert await recon.tenant_reconcile() == 2
+    for tenant, action, outcome, after in (
+        (
+            done,
+            "tenant.reconcile.completed",
+            Outcome.SUCCESS,
+            {
+                "operations_resumed": 2,
+                "scopes_ensured": 3,
+                "orphans_swept": 1,
+                "parked_values_swept": 0,
+            },
+        ),
+        (gone, "tenant.reconcile.failed", Outcome.FAILURE, {"reason": "tenant_gone"}),
+    ):
+        async with tenant_session(db.app, tenant) as session:
+            page = await list_events(session, AuditQuery(), tenant_id=tenant)
+        [item] = page.items
+        assert (item.action, item.outcome, item.after) == (action, outcome, after)
+        assert (item.actor_type, item.actor_sub, item.tenant_id) == (
+            ActorType.SYSTEM,
+            "reconciler",
+            tenant,
+        )
+        assert (item.resource_type, item.resource_id) == ("tenant", str(tenant))
+    async with tenant_session(db.app, done) as session:  # another tenant's context sees no row
+        rows = (await session.execute(text("SELECT action FROM audit_events"))).scalars().all()
+    assert list(rows) == ["tenant.reconcile.completed"]
 
 
 async def _count(db: Db, where: str) -> int:
