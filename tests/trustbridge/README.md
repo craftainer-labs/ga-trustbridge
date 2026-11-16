@@ -42,6 +42,10 @@ Tests for the instance package `src/trustbridge/` (instance-added files under th
   definer functions' transition rules), `test_sql_unit.py` (the SQL sent and the transaction
   boundaries over a scripted session) and `test_sql_integration.py` (marked `integration`: the
   engine over the real functions and RLS, including `completed` after the tenant row is gone).
+- `deletion/test_full_flow_integration.py` (marked `integration`) is the end-to-end deletion (NG6h-7c): the admin routes
+  (grace 0), the engine over the real store, drain port and database step with fake platform and GitHub ports, and the
+  real worker, outbox and gate for deliveries that arrive before, during and after the deletion; it also covers the
+  skip-step path and the 409 for enabling a tenant that is being deleted.
 - `test_main.py` runs the real `trustbridge.main:app` in a subprocess (the entrypoint mutates the
   template app at import, which must not leak into the template's own tests).
 

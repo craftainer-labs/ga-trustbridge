@@ -109,7 +109,7 @@ is left.
   that nothing is left (including any `webhook_deliveries` row of the tenant not yet `deleted`).
 - **A late delivery** (a webhook accepted for the tenant after the step cleared its rows) makes
   `tb_delete_tenant` refuse with `55000`; the engine retries the database step, which marks it `deleted`, so the deletion
-  converges. `tests/trustbridge/deletion/test_flow_integration.py` (NG6h-7a) covers a delivery recorded after the last table was cleared; the delivery that arrives after the deletion started or completed through the worker is NG6h-7c.
+  converges. `tests/trustbridge/deletion/test_flow_integration.py` (NG6h-7a) covers a delivery recorded after the last table was cleared, and `test_full_flow_integration.py` (NG6h-7c) runs the whole deletion from the admin route with the real worker: a delivery that arrives while the tenant is `deleting` is deferred, left `pending` with its `tenant_id` and cleared by the database step; one that lands after the last pass is cleared by the retry; one after the deletion is acknowledged and dropped (tombstone). It also covers a skipped platform step and a skipped database step, which does not finish while rows remain.
 - **Webhook deliveries** recorded for the tenant keep their row with status `deleted` and the dedupe key (`host`, `delivery_id`, `body_sha256`) and the
   non-personal `event`; `body`, `headers` (allow-listed request headers; NOT NULL, so `{}`) and `last_error` (handler
   error text, which may name tenant data) are cleared. Nothing reads the headers of a `deleted` row.

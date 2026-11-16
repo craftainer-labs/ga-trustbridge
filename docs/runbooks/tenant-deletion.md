@@ -115,6 +115,17 @@ Prefer the admin route, which does the same and audits it
 instance `admin`; it is a 409 while a live lease is held). The function writes
 no audit event: if you call it directly, record the action in your change log.
 
+## 3b. Webhooks and `enable` while a deletion runs
+
+- A webhook delivery for the tenant is stored and **deferred** while the deletion is in progress (the worker records
+  the tenant on the row and re-checks it at a longer interval); no handler runs. The database step clears the row
+  (status `deleted`, body and headers removed). A delivery that arrives after the database step's last pass makes
+  `tb_delete_tenant` refuse once; the engine retries and clears it, so `attempts` may show 1 for a moment.
+- After the deletion is `done`, a delivery for the installation is acknowledged and dropped (status `processed`, no
+  handler, nothing sent to GitHub). The record's `hint` says the same: uninstall the GitHub App.
+- `POST /admin/v1/tenants/{id}/enable` is refused with a 409 (`conflict`) while a deletion of the tenant is open.
+  Cancel the deletion first (only while `requested`), then enable.
+
 ## 4. After a database restore
 
 A restore from a backup returns the database to the backup's moment

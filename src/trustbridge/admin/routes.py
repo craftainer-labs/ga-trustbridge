@@ -21,6 +21,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters.interface import SCOPE_KEY_LENGTH
@@ -268,6 +269,8 @@ _GET_TENANT = text(
     "admin_disabled_by, admin_disable_reason FROM tb_get_tenant(:id)"
 )
 _REASON_MAX = 500
+DELETION_IN_PROGRESS = "55000"
+"""The SQLSTATE `tb_set_tenant_disabled` raises when enabling a tenant that has a deletion."""
 
 
 def _admin_state(at: datetime | None, by: str | None, reason: str | None) -> dict[str, Any]:
@@ -351,7 +354,14 @@ async def _set_disabled(  # noqa: PLR0913 - the request, the caller and what to 
     params = {"id": tenant_id, "by": principal.sub, "reason": reason or "", "disable": disable}
     try:
         async with factory() as session, session.begin():
-            row = (await session.execute(_SET_DISABLED, params)).one()
+            try:
+                row = (await session.execute(_SET_DISABLED, params)).one()
+            except DBAPIError as error:
+                if getattr(error.orig, "sqlstate", None) == DELETION_IN_PROGRESS:
+                    raise AdminProblem(
+                        409, "conflict", "A deletion is in progress; the tenant cannot be enabled"
+                    ) from None
+                raise
             if not row.tenant_found:
                 raise AdminProblem(404, "not-found", "Tenant not found")
             event = _tenant_event(
