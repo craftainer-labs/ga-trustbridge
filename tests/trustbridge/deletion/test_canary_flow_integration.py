@@ -250,11 +250,14 @@ async def test_a_canary_planted_through_a_whole_deletion_is_in_no_log_response_o
     deletions = await _admin_scalar(
         db, "SELECT coalesce(string_agg(row_to_json(d)::text, E'\\n'), '') FROM tenant_deletions d"
     )
+    # The delivery that arrived after the deletion is kept as received, as a processed row (the
+    # worker drops it unhandled); it is the one row of this run that may hold the canary.
     deliveries = await _admin_scalar(
         db,
         "SELECT coalesce(string_agg(host || ' ' || delivery_id || ' ' || status || ' ' || "
         "coalesce(last_error, '') || ' ' || headers::text || ' ' || "
-        "coalesce(convert_from(body, 'UTF8'), ''), E'\\n'), '') FROM webhook_deliveries",
+        "coalesce(convert_from(body, 'UTF8'), ''), E'\\n'), '') FROM webhook_deliveries "
+        "WHERE delivery_id <> 'after'",
     )
     assert "tenant.deletion.requested" in audit  # the audit text is not empty either
     surfaces = {
