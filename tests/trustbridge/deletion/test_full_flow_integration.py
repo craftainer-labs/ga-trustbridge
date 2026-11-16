@@ -354,6 +354,10 @@ async def test_a_deletion_runs_from_the_route_to_the_tombstone_and_defers_then_d
         ("tenant.deletion.step", "success"),  # requested -> draining
         ("tenant.deletion.step", "success"),  # draining -> platform
         ("tenant.deletion.step", "success"),  # platform -> github
+        (
+            "tenant.deletion.skipped",
+            "success",
+        ),  # the platform step: connection data is operator-owned
         ("tenant.deletion.step", "success"),  # github -> database
         ("tenant.deletion.skipped", "success"),  # the unresolved deliveries (retention only)
         ("tenant.deletion.step", "success"),  # database -> done
