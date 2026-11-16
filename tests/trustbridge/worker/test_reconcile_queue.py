@@ -851,3 +851,45 @@ async def test_without_an_audit_store_the_request_is_acked_with_a_warning(
         NO_AUDIT_STORE
     ]
     assert h.valkey.sets == {}
+
+
+async def test_a_refund_never_leaves_a_negative_count() -> None:
+    """A refund for a request whose attempts were already cleared leaves no field behind."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant = uuid4()
+    await _request(h.valkey, tenant)
+    queue = ReconcileQueue(as_redis(h.valkey))
+    [claim] = await queue.claim(h.clock(), 5)
+    assert await queue.begin_attempt(claim) == 1
+    await queue.refund_attempt(claim)
+    assert h.valkey.hashes[ATTEMPTS_HASH][str(tenant)] == "0"
+    await queue.clear_attempts(claim)
+    await queue.refund_attempt(claim)  # the count is already gone
+    assert ATTEMPTS_HASH not in h.valkey.hashes
+
+
+async def test_a_script_without_an_integer_reply_is_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the request id may be empty; any other script answering nothing is not read as 0."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    queue = ReconcileQueue(as_redis(h.valkey))
+
+    async def nothing(self: ReconcileQueue, script: str, *args: str) -> None:
+        return None
+
+    monkeypatch.setattr(ReconcileQueue, "_eval", nothing)
+    with pytest.raises(RuntimeError, match="no integer"):
+        await queue.ack(Claim(uuid4(), "token"))
+
+
+async def test_an_audit_outage_for_a_dropped_request_keeps_it_inflight() -> None:
+    """A refused tenant's request is settled without a body run: nothing to refund, not acked."""
+    h = await Harness({}, tenant_reconcile_enabled=True).start()
+    tenant, events = uuid4(), Events()
+    events.fail = True
+    await _request(h.valkey, tenant)
+    recon = _duty(h, Refusals(**{str(tenant): "gone"}), Body(), reconcile_audit=events)
+    assert await recon.tenant_reconcile() == 0
+    assert h.valkey.sets.get(INFLIGHT_SET) == {str(tenant)}
+    assert ATTEMPTS_HASH not in h.valkey.hashes
