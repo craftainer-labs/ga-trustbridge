@@ -13,9 +13,12 @@ Availability, security (abuse resistance), scalability.
 - **Buckets and defaults** (fixed window, `ADMIN_RATE_LIMIT_*`, window 60 s): reads 600 per
   principal, mutations 60, exports 6, and 30 per source address for unauthenticated requests.
   Reads, mutations and exports count in separate buckets. The key is the authenticated principal
-  `(iss, sub)` once known and the source address before; a 401 counts against the address, and a
-  403 or 404 for an authenticated principal against that principal, so callers behind one
-  address do not use up each other's budget. Configured exempt addresses are never limited.
+  `(iss, sub)` once known and the source address before; a 401, or a request to a route that does
+  not exist, counts against the address, and a 403 or 404 for an authenticated principal against
+  that principal's bucket for the route's kind (the limit runs before the role check), so callers
+  behind one address do not use up each other's budget. A scanner hitting unknown paths can
+  exhaust the address bucket; behind the BFF the address is the BFF's unless `TRUSTED_PROXIES`
+  lists it. Configured exempt addresses are never limited.
 - **Over the limit.** The response is a 429 problem document with `Retry-After` set to the
   whole seconds left in the window, at least 1.
 - **Shared across replicas.** The counters live in Valkey under the prefix `tb:rl:admin:`, so
