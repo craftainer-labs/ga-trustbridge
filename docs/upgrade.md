@@ -70,3 +70,33 @@ be undone, restore the database from the backup taken in step 1.
 Tenancy and RLS use a two-release N-1 rollout
 ([ADR 0031](adrs/0031-tenancy-and-row-level-security.md), NFR-0027): do not
 skip releases between versions that change the same table.
+
+## Reconciler rollout
+
+Roll the reconciler out as a single version: replace all reconciler pods
+in one step rather than running old and new reconcilers side by side. The
+chart leaves `reconciler.strategy` empty, which renders the Kubernetes
+default rolling update and so overlaps old and new pods; set
+`reconciler.strategy.type: Recreate` for that release.
+
+The reconcile queue's Lua scripts went from three keys to four when the
+reconcile terminal event started to be written before the acknowledgement,
+keyed by a per-request id kept in the Valkey hash `tb:reconcile:request_ids`
+([ADR 0032](adrs/0032-audit-log.md),
+[NFR-0031](nfrs/NFR-0031-audit-log-is-append-only-complete-and-exportable.md)).
+A release that mixes old and new reconcilers leaves stale ids in that hash:
+an old pod acknowledges a request without removing its id. Draining the old
+pods does not clear them. A stale id is reused by the tenant's next reconcile
+request, whose terminal audit event is then dropped as a duplicate of the
+earlier one. When that request is acknowledged on a new pod the id is
+removed, so on the happy path one event per affected tenant is lost; a request
+that is released rather than acknowledged keeps the id, and later requests for
+that tenant keep losing their terminal event. To avoid that, once the old pods
+are gone, scale the reconciler to zero, check that `tb:reconcile:inflight` and
+`tb:reconcile:claims` are empty, delete the hash (`DEL
+tb:reconcile:request_ids` in Valkey) and scale it back. Deleting the hash
+under a running reconciler, or with a claim outstanding, could give a request
+a second id, and its terminal event could then be written twice.
+The notes of the first release that carries this
+change must say "single-version reconciler rollout". The application is
+unreleased, so no deployed fleet is affected yet.
