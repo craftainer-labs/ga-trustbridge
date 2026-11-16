@@ -74,14 +74,22 @@ skip releases between versions that change the same table.
 ## Reconciler rollout
 
 Roll the reconciler out as a single version: replace all reconciler pods
-in one step rather than running old and new reconcilers side by side.
+in one step rather than running old and new reconcilers side by side. The
+chart leaves `reconciler.strategy` empty, which renders the Kubernetes
+default rolling update and so overlaps old and new pods; set
+`reconciler.strategy.type: Recreate` for that release.
 
 The reconcile queue's Lua scripts went from three keys to four when the
 reconcile terminal event started to be written before the acknowledgement,
 keyed by a per-request id kept in the Valkey hash `tb:reconcile:request_ids`
 ([ADR 0032](adrs/0032-audit-log.md),
 [NFR-0031](nfrs/NFR-0031-audit-log-is-append-only-complete-and-exportable.md)).
-A release that mixes old and new reconcilers leaves stale ids in that hash
-until the old pods drain. The notes of the first release that carries this
+A release that mixes old and new reconcilers leaves stale ids in that hash:
+an old pod acknowledges a request without removing its id, and nothing else
+removes it. Draining the old pods does not clear them. A stale id is reused
+by the tenant's next reconcile request, whose terminal audit event is then
+dropped as a duplicate of the earlier one. After the old pods are gone and
+the queue is idle, delete the hash (`DEL tb:reconcile:request_ids` in
+Valkey); a request in flight then simply gets a new id. The notes of the first release that carries this
 change must say "single-version reconciler rollout". The application is
 unreleased, so no deployed fleet is affected yet.

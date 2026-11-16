@@ -26,7 +26,10 @@ Security (authentication, authorization, least privilege), portability.
   names at once.
 - **Order and denials.** Authentication, then the rate limit, then the role check, then the
   tenant context; the context is entered only after the role check passes. A 403 or a tenant 404
-  writes an `authz.denied` audit row carrying the `sub`.
+  writes an `authz.denied` audit row carrying the `sub`, subject to the denial throttle of
+  [NFR-0031](NFR-0031-audit-log-is-append-only-complete-and-exportable.md): after a burst of five
+  per subject and reason in a window, further denials are counted into a summary row, not
+  written one by one.
 - **Portability limit (NFR-0014).** The role source is Keycloak-shaped. Other IdPs reach it
   through a Keycloak broker or a protocol mapper that writes the same claim shape; only `sub` is
   assumed otherwise.
