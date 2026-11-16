@@ -461,7 +461,8 @@ class Reconciler:
             raise
         except Exception:
             if ran:  # the audit store is down, not the body: that run does not count as a failure
-                await queue.refund_attempt(claim)
+                with contextlib.suppress(Exception):  # best effort; the audit error is the cause
+                    await queue.refund_attempt(claim)
             raise
         if not await queue.ack(claim):
             logger.warning(
