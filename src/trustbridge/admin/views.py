@@ -7,7 +7,8 @@ through. Free text (`error`, `manual_action`, reference values) goes through the
 `scrub_text`, so it is shown no more openly than it is logged (ADR 0032, ADR 0007).
 """
 
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from trustbridge.audit.redact import has_secret_word, printable, scrub_text, truncate
@@ -110,3 +111,90 @@ def resource_state(value: object) -> dict[str, Any]:
 def free_text(value: str | None) -> str | None:
     """An error or manual-action string, scrubbed and bounded."""
     return None if value is None else scrub_text(value)
+
+
+_ERROR_HEAD = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,63}")
+_ENTRY_KEY_MAX = 64
+_ENTRY_LIST_MAX = 1000
+UNINSTALL_HINT = (
+    "Uninstall the GitHub App from the organisation: until then its events for this "
+    "installation are acknowledged and dropped (a reinstall gets a new installation id)."
+)
+"""ADR 0034 B2: what the installation's admins still have to do."""
+
+
+def error_code(last_error: str | None) -> str | None:
+    """The short code of a stored failure: a class name or fixed code, never its message.
+
+    The engine writes `last_error` as `ClassName: message` for a retry, `code: message` or a bare
+    `code` for a non-retryable error (a constant of ours), and `operator <actor>: <reason>` for an
+    operator's fail, which is reported as `operator_failed`. Only the head before the first colon
+    is shown, and only when it is an identifier; a bare head (no colon: a fixed code, never an
+    exception text) must also name no secret word. Anything else is `error`.
+    """
+    if not last_error:
+        return None
+    if last_error.startswith("operator "):
+        return "operator_failed"
+    head, colon, _rest = last_error.partition(":")
+    head = head.strip()
+    if not _ERROR_HEAD.fullmatch(head) or (not colon and has_secret_word(head)):
+        return "error"
+    return head
+
+
+def _entry_value(value: object) -> str | int | bool | list[int] | None:
+    """One value of a `skipped` entry: a scalar, or a bounded list of numbers (repository ids)."""
+    if isinstance(value, bool | int):
+        return value
+    if isinstance(value, str):
+        return scrub_text(value)
+    if isinstance(value, list):
+        numbers = [n for n in value if isinstance(n, int) and not isinstance(n, bool)]
+        return numbers[:_ENTRY_LIST_MAX]
+    return None
+
+
+def skipped_entries(value: object) -> list[dict[str, Any]]:
+    """The record's `skipped` list with every key and value held to a short, safe shape.
+
+    Keys are short identifiers that name no secret; values are scalars (strings scrubbed) or a
+    list of numbers. Anything else is dropped, never passed through.
+    """
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        entry: dict[str, Any] = {}
+        for key, raw in item.items():
+            if (
+                not isinstance(key, str)
+                or len(key) > _ENTRY_KEY_MAX
+                or not key.isidentifier()
+                or has_secret_word(key)
+            ):
+                continue
+            shown = _entry_value(raw)
+            if shown is not None:
+                entry[key] = shown
+        out.append(entry)
+    return out
+
+
+def deletion_counts_view(value: object) -> dict[str, int]:
+    """The record's `counts`: short category names to non-negative integers; the rest is dropped."""
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        key: number
+        for key, number in value.items()
+        if isinstance(key, str)
+        and len(key) <= _ENTRY_KEY_MAX
+        and key.isidentifier()
+        and not has_secret_word(key)
+        and isinstance(number, int)
+        and not isinstance(number, bool)
+        and number >= 0
+    }

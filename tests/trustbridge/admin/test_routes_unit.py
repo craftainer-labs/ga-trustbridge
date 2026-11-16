@@ -388,7 +388,7 @@ def test_no_database_is_a_503_problem() -> None:
 
 
 def test_no_audit_route_writes_or_deletes() -> None:
-    """ADR 0032 inv. 14: no audit route writes; the only POSTs are the NG6e mutations."""
+    """ADR 0032 inv. 14: no audit route writes; the only POSTs are the NG6e and NG6h mutations."""
     posts = {
         r.path
         for r in routes.router.routes
@@ -403,6 +403,10 @@ def test_no_audit_route_writes_or_deletes() -> None:
         "/admin/v1/hosts/{host}/registration/complete",
         "/admin/v1/hosts/{host}/registration/manual",
         "/admin/v1/tenants/{tenant_id}/credentials/{adapter}/{scope_key}/rotate",
+        "/admin/v1/tenants/{tenant_id}/deletion",
+        "/admin/v1/tenant-deletions/{deletion_id}/cancel",
+        "/admin/v1/tenant-deletions/{deletion_id}/skip-step",
+        "/admin/v1/tenant-deletions/{deletion_id}/fail",
     }
     others = {
         m

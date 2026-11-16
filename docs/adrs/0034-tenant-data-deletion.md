@@ -4,8 +4,8 @@
 
 Proposed. The user decided on 2026-11-03 (G-api) that tenant data deletion is **in NG6**,
 overriding the earlier lean to defer it; this ADR holds its design and the user's answers on
-the remaining items ("User decisions"). The engine, its steps and their composition are implemented (NG6h-1 to NG6h-7a); it becomes Accepted when
-the admin routes (NG6h-7b) and the end-to-end test (NG6h-7c) merge. Builds on
+the remaining items ("User decisions"). The engine, its steps, their composition and the admin routes are implemented (NG6h-1 to NG6h-7b); it becomes Accepted when
+the end-to-end test (NG6h-7c) merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (write-ahead operations, leases,
 parked values, retention),
 [0029](0029-adapter-plugin-interface.md) (adapter `delete` operations),
@@ -59,6 +59,26 @@ reconciler resumes a non-terminal deletion.
   request returns the existing record. `GET /admin/v1/tenant-deletions` and
   `GET /admin/v1/tenant-deletions/{id}` read the record (a tenant-keyed path would 404 once the
   tenant row is gone). The response to `POST` is 202 with the record.
+- **Routes (NG6h-7b; shapes decided by the user, G-api 2026-11-16).** `viewer` reads, instance `admin` writes
+  (a tenant-scoped role gets 403). `POST /tenants/{t}/deletion` takes `{host, installation_id, organization,
+  reason, delete_platform_resources=false}` and nothing else (a body that names `not_before` is a 422): the
+  server computes `not_before` from `DELETION_GRACE_SECONDS` (default 86400, 24 hours; 0 means no wait) and the caller cannot set it.
+  `POST /tenant-deletions/{id}/cancel` (no body; 200; 409 once past `requested`; idempotent),
+  `POST /tenant-deletions/{id}/skip-step` and `POST /tenant-deletions/{id}/fail` (body `{reason}`; 200).
+  An unknown id is a 404 and a wrong state a 409, Problem types as `POST /tenants/{t}/disable`
+  (`not-found`, `conflict`). The record view has `id`, `tenant_id`, `host`, `installation_id`, `state`,
+  `delete_platform_resources`, `not_before`, `requested_at`, `requested_by` (the `sub`), `counts`, `skipped`,
+  `attempts`, `last_error_code` (a class name or fixed code, `operator_failed` for an operator's fail, never the
+  message), `updated_at` and `hint` (the B2 text: uninstall the App). The lease, holder, fence, retry time and
+  cursor are never shown. **skip-step** is allowed only in `platform`, `github` or `database`, only after the step
+  failed at least once (`attempts` at least 1) and only while no live lease is held (`tb_skip_tenant_deletion_step`,
+  migration `2c8e5b1f7d34`). It appends a `skipped` entry (`category` `step`, `reason` `operator_skipped`, the
+  `step`, `acknowledged_by` the actor's `sub`, `acknowledged_at`), resets the retry state, bumps the fence and
+  moves to the next step. Skipping `database` has no next state: the cursor becomes `{"operator_skipped": true}`,
+  the batches stop and the engine goes straight to removing the `tenants` row, which `tb_delete_tenant` still
+  refuses while any row is left, so a skip never ends a deletion with data remaining. **fail** is
+  `tb_operator_fail_tenant_deletion` (409 for a live lease, an ended deletion, or a `database` step whose tenant
+  row is gone).
 
 ### Preconditions
 
@@ -175,7 +195,10 @@ host and installation id; **no organisation login and no tenant content**, `befo
 states and counts only, so no organisation name or other tenant content survives in the append-only trail (only the
 opaque identifiers, see Open issues)), one `tenant.deletion.step`
 per transition (including `requested` to `draining`, the first destructive step) with cumulative counts, `tenant.deletion.skipped` per skipped category, and
-`tenant.deletion.completed`. They carry the tenant id, are inserted in the same transaction as
+`tenant.deletion.completed`. The admin routes write their own events in the transaction of the change
+(and a `failure` event with a fixed reason code for a refusal): `tenant.deletion.requested`,
+`tenant.deletion.cancelled`, `tenant.deletion.step_skipped` and `tenant.deletion.operator_failed` (an operator's `fail`; the
+engine's own non-retryable failure stays `tenant.deletion.failed`). They carry the tenant id, are inserted in the same transaction as
 the step they record, and **survive the deletion**: `audit_events` has no foreign key to the
 tenant and the database step never touches it. The reconciler's audit purge (0032) removes the events
 only at retention. What happens to the **other** audit rows of the tenant is user decision 3.
@@ -339,8 +362,8 @@ adapter fakes.
   (`DELETION_STEP_BATCH_SIZE`, default 500), and the `SqlRecordPurger` (budget half `LEASE_TTL_SECONDS`).
   Mock mode composes nothing and logs one line. Webhook deliveries are not scanned by the drain: a disabled
   tenant's handlers skip them and `tb_delete_tenant` refuses while one is left. The admin routes (request,
-  reads, cancel, skip-step, operator-fail) are NG6h-7b and the late-delivery end-to-end test is NG6h-7c;
-  until they land this ADR stays Proposed.
+  reads, cancel, skip-step, operator-fail) are NG6h-7b (merged; see "Routes") and the late-delivery end-to-end
+  test is NG6h-7c; until it lands this ADR stays Proposed.
 - **Re-creation (decided, NG6h-1; the table moved in NG6h-3c-1).** A row in `tenant_tombstones` for
   `(host, installation_id)` (until NG6h-3c-1 a `done` row in `tenant_deletions`; or a
   `database`-step deletion row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` creates nothing (NG6h-1 returned NULL; NG6h-2 raises, below), and `SqlTenants` and

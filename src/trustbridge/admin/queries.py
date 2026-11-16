@@ -27,6 +27,7 @@ from trustbridge.admin.schemas import (
     OperationOut,
     RepositoryOut,
     ResourceOut,
+    TenantDeletionOut,
 )
 from trustbridge.worker.deliveries import DeliveryKey, requeue_statement
 
@@ -76,6 +77,19 @@ _LOCK_DELIVERY = text(
     "body IS NOT NULL AS has_body "
     "FROM webhook_deliveries WHERE host = :host AND delivery_id = :delivery_id FOR UPDATE"
 )
+_DELETION_COLUMNS = (
+    "id, tenant_id, host, installation_id, state, delete_platform_resources, not_before, "
+    "requested_at, requested_by_sub, counts, skipped, attempts, last_error, updated_at"
+)
+# `tenant_deletions` is host-scoped and outside row-level security; the lease, holder, fence,
+# retry time and cursor columns are never selected.
+_DELETIONS = text(
+    f"SELECT {_DELETION_COLUMNS} FROM tenant_deletions "  # noqa: S608 -- constants only
+    "WHERE (CAST(:since AS timestamptz) IS NULL "
+    "OR (requested_at, id) < (CAST(:since AS timestamptz), CAST(:id AS uuid))) "
+    "ORDER BY requested_at DESC, id DESC LIMIT :limit"
+)
+_DELETION = text(f"SELECT {_DELETION_COLUMNS} FROM tenant_deletions WHERE id = :id")  # noqa: S608 -- constants only
 _EPOCH_ID = UUID(int=0)
 
 
@@ -335,3 +349,49 @@ async def requeue_delivery(session: AsyncSession, host: str, delivery_id: str) -
         "next_attempt_at": None,
     }
     return Requeue(before, after, changed=True)
+
+
+def _deletion(row: Mapping[Any, Any]) -> TenantDeletionOut:
+    values = _json_columns(row, "counts", "skipped")
+    return TenantDeletionOut(
+        id=values["id"],
+        tenant_id=values["tenant_id"],
+        host=values["host"],
+        installation_id=values["installation_id"],
+        state=values["state"],
+        delete_platform_resources=values["delete_platform_resources"],
+        not_before=values["not_before"],
+        requested_at=values["requested_at"],
+        requested_by=values["requested_by_sub"],
+        counts=views.deletion_counts_view(values["counts"]),
+        skipped=views.skipped_entries(values["skipped"]),
+        attempts=values["attempts"],
+        last_error_code=views.error_code(values["last_error"]),
+        updated_at=values["updated_at"],
+        hint=views.UNINSTALL_HINT,
+    )
+
+
+async def tenant_deletions(
+    session: AsyncSession, *, limit: int, cursor: str | None
+) -> tuple[list[TenantDeletionOut], str | None]:
+    """Tenant deletions, newest request first (host-scoped, outside tenant row-level security)."""
+    since, ident = _time_pair(cursor)
+    rows = (
+        await session.execute(
+            _DELETIONS,
+            {
+                "since": since,
+                "id": _uuid(ident) if since is not None else _EPOCH_ID,
+                "limit": limit + 1,
+            },
+        )
+    ).mappings()
+    items = [_deletion(row) for row in rows]
+    return _cut(items, limit, lambda r: encode_cursor(r.requested_at.isoformat(), str(r.id)))
+
+
+async def tenant_deletion(session: AsyncSession, deletion_id: UUID) -> TenantDeletionOut | None:
+    """One tenant deletion, or None."""
+    row = (await session.execute(_DELETION, {"id": deletion_id})).mappings().first()
+    return None if row is None else _deletion(row)

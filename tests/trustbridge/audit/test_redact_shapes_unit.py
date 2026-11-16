@@ -123,6 +123,10 @@ def test_failure_reason_for_status_maps_refusals_and_defaults_to_unavailable() -
         (Action.TENANT_DELETION_SKIPPED, "tenant.deletion.skipped"),
         (Action.TENANT_DELETION_COMPLETED, "tenant.deletion.completed"),
         (Action.TENANT_DELETION_FAILED, "tenant.deletion.failed"),
+        (Action.TENANT_DELETION_REQUESTED, "tenant.deletion.requested"),
+        (Action.TENANT_DELETION_CANCELLED, "tenant.deletion.cancelled"),
+        (Action.TENANT_DELETION_STEP_SKIPPED, "tenant.deletion.step_skipped"),
+        (Action.TENANT_DELETION_OPERATOR_FAILED, "tenant.deletion.operator_failed"),
     ],
 )
 def test_the_deletion_action_names_are_the_adr_ones(member: Action, value: str) -> None:
@@ -160,6 +164,29 @@ def test_the_deletion_shape_records_ids_states_and_codes_and_drops_the_rest() ->
         "reason": "operator_owned",
         "step": "platform",
         "to_state": "github",
+    }
+
+
+def test_the_deletion_shape_records_the_request_without_the_organisation() -> None:
+    """NG6h-7b: ids, the flag and the grace end; the confirmation's login is not a field."""
+    out = project(
+        "deletion",
+        {
+            "deletion_id": "d-1",
+            "host": "github.com",
+            "installation_id": 7,
+            "delete_platform_resources": True,
+            "not_before": datetime(2026, 11, 16, 9, 0, tzinfo=UTC),
+            "organization": "acme-corp",
+            "org": "acme-corp",
+        },
+    )
+    assert out == {
+        "delete_platform_resources": True,
+        "deletion_id": "d-1",
+        "host": "github.com",
+        "installation_id": 7,
+        "not_before": "2026-11-16T09:00:00Z",
     }
 
 

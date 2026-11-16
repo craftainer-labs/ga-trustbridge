@@ -56,7 +56,7 @@ cursor leaves them alone.
   sets `retry_at = now + min(cap, base * 2**attempts)` and frees the lease; the engine increments
   `trustbridge.deletion.attempts` (tag `step`), and `tenant_deletions.attempts` is the alertable
   value. `failed` is written only for a `NonRetryableError(code, message)` (`tb_fail`, with the
-  lease) or by an operator (`tb_operator_fail`, whose admin route is NG6h-7b). An invalid step output (a `ValueError`
+  lease) or by an operator (`tb_operator_fail`, whose admin route is `POST /admin/v1/tenant-deletions/{id}/fail`, NG6h-7b). An invalid step output (a `ValueError`
   while the audit events are built, including a bad `counts` value, checked on every pass so it is
   never saved) is a step bug and becomes `NonRetryableError("invalid_step_output")`. A blocked step holds the deletion; it
   never advances on its own. An error recording the retry or the failure itself (the database
@@ -214,9 +214,19 @@ definer transition and its events are ONE session transaction through `audit.app
 the transaction that removed the `tenants` row, and a rolled-back transition leaves no event. The
 `deletion` shape allows ids, state and step names, a category, a count and a fixed code; `counts`
 go through `deletion_counts`. Free text (`NonRetryableError.message`, an exception message) reaches
-only `last_error`, scrubbed and cut, never the audit trail. `tenant.deletion.requested` and the
-cancel event are written by the request path (the admin routes, NG6h-7b). Leaving `requested` writes a `step` event too (draining is the first destructive step, so every
+only `last_error`, scrubbed and cut, never the audit trail. The request, cancel,
+skip and operator-fail events (`tenant.deletion.requested`, `.cancelled`, `.step_skipped`,
+`.operator_failed`) are written by the admin routes, not the engine (NG6h-7b). Leaving `requested` writes a `step` event too (draining is the first destructive step, so every
 transition is audited); `counts` on a step event are cumulative.
+
+## Operator skip (NG6h-7b)
+
+`POST /admin/v1/tenant-deletions/{id}/skip-step` (`tb_skip_tenant_deletion_step`, migration
+`2c8e5b1f7d34`) moves a `platform` or `github` deletion that has failed at least once and holds no
+lease to the next step, with a `skipped` entry naming who acknowledged it. For `database` there is no
+next state: the cursor becomes `{"operator_skipped": true}` and `SqlDatabaseStep` then returns done
+at once without a batch, so the engine goes straight to `finish` (`tb_delete_tenant`, which still
+refuses while a tenant row is left, so the deletion retries until the rows are gone by other means).
 
 ## Writing step output
 

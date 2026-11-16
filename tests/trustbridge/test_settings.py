@@ -371,6 +371,7 @@ def test_deletion_defaults_fit_the_engine_and_the_drain_step() -> None:
     assert (s.deletion_backoff_base_seconds, s.deletion_backoff_cap_seconds) == (30, 3600)
     assert (s.deletion_drain_max_passes, s.deletion_drain_poll_seconds) == (30, 2)
     assert s.deletion_step_batch_size == 500
+    assert s.deletion_grace_seconds == 86400  # a 24 hour window to cancel (user decision)
     EngineConfig(
         "holder",
         s.deletion_lease_ttl_seconds,
@@ -403,6 +404,8 @@ def test_deletion_defaults_fit_the_engine_and_the_drain_step() -> None:
         {"deletion_step_pass_seconds": 0},
         {"deletion_step_batch_size": 0},
         {"deletion_step_batch_size": 10001},
+        {"deletion_grace_seconds": -1},
+        {"deletion_grace_seconds": 2_592_001},
     ],
 )
 def test_deletion_settings_are_bounded(bad: dict[str, Any]) -> None:

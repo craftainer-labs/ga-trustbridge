@@ -89,6 +89,78 @@ class DisableIn(BaseModel):
         return value
 
 
+class DeletionReasonIn(DisableIn):
+    """The body of `POST /tenant-deletions/{id}/skip-step` and `/fail`: why the operator acts.
+
+    The reason is recorded in the audit event (secret-shaped parts masked), not in the record.
+    """
+
+
+class DeletionRequestIn(DeletionReasonIn):
+    """The body of `POST /tenants/{t}/deletion`: the typed confirmation, the reason and the flag.
+
+    `host`, `installation_id` and `organization` must equal the tenant's (the organisation is
+    compared without regard to case); they are checked and not stored. There is no `not_before`:
+    the server computes it from its configured grace window, and a body that names it is a 422.
+    """
+
+    host: str = Field(min_length=1, max_length=255, description="The tenant's host name")
+    installation_id: int = Field(
+        gt=0, le=2**63 - 1, description="The tenant's GitHub installation id"
+    )
+    organization: str = Field(
+        min_length=1, max_length=255, description="The tenant's organisation login"
+    )
+    delete_platform_resources: bool = Field(
+        default=False,
+        description="Also delete the platform projects and repositories (default: credentials "
+        "and trust only)",
+    )
+
+    @field_validator("host", "organization")
+    @classmethod
+    def _printable_confirmation(cls, value: str) -> str:
+        """Printable text only: a control character can never be part of a confirmation."""
+        if not value.isprintable():
+            raise PydanticCustomError("printable", "must be printable text")
+        return value
+
+
+class TenantDeletionOut(BaseModel):
+    """A tenant deletion (ADR 0034): the record without its lease, holder, fence or cursor.
+
+    `counts` maps a category to what was removed so far and `skipped` lists what was left behind
+    and why (each entry has a `category` and a `reason`; an operator's skip also names the
+    `step` and who acknowledged it). `attempts` counts the failed attempts of the current step
+    and `last_error_code` is a class name or fixed code of the last failure (`error` for anything
+    else, `operator_failed` for an operator's fail), never its message.
+    `hint` says what the operator still has to do outside trustbridge.
+    """
+
+    id: UUID
+    tenant_id: UUID
+    host: str
+    installation_id: int
+    state: str
+    delete_platform_resources: bool
+    not_before: datetime | None
+    requested_at: datetime
+    requested_by: str
+    counts: dict[str, int]
+    skipped: list[dict[str, Any]]
+    attempts: int
+    last_error_code: str | None
+    updated_at: datetime
+    hint: str
+
+
+class TenantDeletionPage(BaseModel):
+    """A page of tenant deletions, newest request first."""
+
+    items: list[TenantDeletionOut]
+    next_cursor: str | None
+
+
 class TenantOut(BaseModel):
     """A tenant: one GitHub installation on one host.
 

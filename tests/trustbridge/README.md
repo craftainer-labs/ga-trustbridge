@@ -34,6 +34,9 @@ Tests for the instance package `src/trustbridge/` (instance-added files under th
   and `test_admin_integration.py` (marked `integration`, reuses `tenancy/test_rls_integration.py`'s scratch
   database): the tenant context under the async-generator dependency, denial rows and the export
   against real RLS. `audit/test_throttle_unit.py` covers the denial throttle.
+- `admin/test_tenant_deletion_unit.py` covers the tenant-deletion routes over a scripted database (guards, bodies,
+  problem types, events and the tenant context); `admin/test_tenant_deletion_integration.py` (marked `integration`)
+  runs `tb_skip_tenant_deletion_step` (its outcomes, the migration round trip) and the whole flow under real RLS.
 - `deletion/` covers the deletion engine: `test_engine_unit.py`, `test_drain_unit.py` and
   `test_audit_unit.py` over the fakes in `deletion/fakes.py` (an in-memory store applying the
   definer functions' transition rules), `test_sql_unit.py` (the SQL sent and the transaction

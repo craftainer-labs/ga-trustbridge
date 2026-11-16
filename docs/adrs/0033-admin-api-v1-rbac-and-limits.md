@@ -16,10 +16,9 @@ Implemented on main (NG6, see `src/trustbridge/admin/README.md` for the as-shipp
   registration (start, complete, manual); credential rotate, run in the api.
 - Failure events of every mutating call (registration, rotation, disable, enable, requeue, reconcile) carry a fixed reason code (NG6e-6, 0032).
 
-Not implemented, so this stays Proposed: the tenant-deletion routes, reads and writes
-(`GET /tenant-deletions`, `GET /tenant-deletions/{id}`, `POST /tenants/{t}/deletion`,
-`POST /tenant-deletions/{id}/cancel`, `POST /tenant-deletions/{id}/skip-step`; NG6h, with
-[0034](0034-tenant-data-deletion.md)).
+The tenant-deletion routes, reads and writes (`GET /tenant-deletions`, `GET /tenant-deletions/{id}`,
+`POST /tenants/{t}/deletion`, `POST /tenant-deletions/{id}/cancel`, `.../skip-step` and `.../fail`;
+NG6h-7b, with [0034](0034-tenant-data-deletion.md)) are implemented.
 It becomes Accepted when the implementation (NG6b RBAC, NG6d read endpoints, NG6e mutating
 endpoints) merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (instance layout, the abuse
@@ -233,7 +232,7 @@ The numbers are starting points to measure with the UI.
 
 **Endpoint list.** Base `/admin/v1`; `{t}` is a tenant id. Roles are the four of decision 2.
 
-Read-only (NG6d; all implemented except the `/tenant-deletions` row, NG6h):
+Read-only (NG6d, and the `/tenant-deletions` rows, NG6h-7b; all implemented):
 
 | Endpoint | Scope | Min role |
 | --- | --- | --- |
@@ -249,8 +248,8 @@ Read-only (NG6d; all implemented except the `/tenant-deletions` row, NG6h):
 | `GET /audit-events`, `GET /audit-events/{id}`, `GET /audit-events/export` (all tenants and null-tenant events) | instance | auditor |
 | `GET /openapi.json` | any | any |
 
-Mutating (NG6e, except the rows marked NG6h, which belong to the deletion item because they need
-the `tenant_deletions` table of 0034):
+Mutating (NG6e, and the rows marked NG6h, which belong to the deletion item because they need
+the `tenant_deletions` table of 0034; all implemented):
 
 | Endpoint | Scope | Min role | Implemented |
 | --- | --- | --- | --- |
@@ -261,8 +260,9 @@ the `tenant_deletions` table of 0034):
 | `POST /hosts/{host}/registration/complete` (the BFF forwards the manifest flow's `code` and `state`; 0030) | instance | operator | NG6e-4 |
 | `POST /hosts/{host}/registration/manual` (App id, PEM, webhook secret; 0030) | instance | admin | NG6e-4 |
 | `POST /tenants/{t}/disable`, `POST /tenants/{t}/enable` | instance | admin | NG6e-2 |
-| `POST /tenants/{t}/deletion` (0034; the tenant must be disabled), `POST /tenant-deletions/{id}/cancel` (before the first destructive step) **(NG6h)** | instance | admin | not yet (NG6h) |
-| `POST /tenant-deletions/{id}/skip-step` (0034, user decision 2) **(NG6h)** | instance | admin | not yet (NG6h) |
+| `POST /tenants/{t}/deletion` (0034; the tenant must be disabled; 202), `POST /tenant-deletions/{id}/cancel` (before the first destructive step) | instance | admin | NG6h-7b |
+| `POST /tenant-deletions/{id}/skip-step` (0034, user decision 2; body `{reason}`) | instance | admin | NG6h-7b |
+| `POST /tenant-deletions/{id}/fail` (0034; body `{reason}`; ends a stuck deletion as `failed`, refused while an engine holds the lease) | instance | admin | NG6h-7b |
 
 Not in v1 by design: any write of adapter connection data (decided), a policies endpoint (no
 policy table exists yet; the UI's "policies" screen needs a separate item and ADR), and any

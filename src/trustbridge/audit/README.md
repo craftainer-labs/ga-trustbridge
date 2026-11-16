@@ -4,8 +4,7 @@ The append-only audit log ([ADR 0032](../../../docs/adrs/0032-audit-log.md), Acc
 2026-11-04 with #18 and #21; the remaining flows arrive with NG6e and NG6h (the read routes and the export arrived with NG6d), per the
 deferred table below): the storage layer (NG6c), event value validation, redaction and the
 emitters at the call sites that exist today (NG6f). Out of scope
-here: the mutating endpoints' events (NG6e)
-and the deletion's request path (the admin routes, NG6h-7b). SIEM push is a follow-up.
+here: the mutating endpoints' events (NG6e, NG6h-7b). SIEM push is a follow-up.
 
 - `model.py`: `AuditEvent` (what to write; validates every value at construction), `AuditRecord`
   (what is read; `to_json` and `to_ndjson_line` are the export shape), `AuditQuery` (filters and
@@ -143,7 +142,7 @@ ADR names them, with no emitter:
 | Event | Owner |
 | --- | --- |
 | (none left for the admin API.) The router walk `admin.guards.mutations_without_emitter` fails any mutating route without an `emits` marker. Emitted since NG6e-2 to NG6e-5: `credential.rotate`, `tenant.disable`, `tenant.enable`, `tenant.reconcile`, `delivery.requeue` and `host.registration.start`, `.manual`, `.complete` (the `host_registration` shape); the credential events of a rotation made through the API have the system actor `api` | done |
-| `tenant.deletion.requested` and `.cancelled` (0034) | NG6h-7b (the admin routes) |
+| (none left for the deletion's admin routes.) `tenant.deletion.requested`, `tenant.deletion.cancelled`, `tenant.deletion.step_skipped` and `tenant.deletion.operator_failed` (0034; an operator's `fail`, unlike the engine's `tenant.deletion.failed`) are emitted by `admin.routes` since NG6h-7b, in the transaction of the change, in the deletion's tenant context | done |
 | The reconciler duty calling `purge_expired` (ADR 0032 "Retention") | done (NG6h-3a): the `audit-purge` job |
 | A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export") | done (NG6h-3b): the `after_begin` hook and `tenancy.timeout_check`, see `tenancy/README.md` "Transaction time bound" |
 

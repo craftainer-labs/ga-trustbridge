@@ -8,7 +8,7 @@ handlers only read.
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -24,7 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from trustbridge.adapters.interface import SCOPE_KEY_LENGTH
-from trustbridge.admin import credentials, queries, registration
+from trustbridge.admin import credentials, deletions, queries, registration
 from trustbridge.admin.access import tenants_page
 from trustbridge.admin.cursor import MAX_SEQ, decode_cursor, encode_cursor, invalid_cursor, paginate
 from trustbridge.admin.guards import BoundedRoute, emits, guard, guard_any_grant
@@ -36,6 +36,8 @@ from trustbridge.admin.schemas import (
     AuditEventPage,
     CompleteIn,
     CredentialPage,
+    DeletionReasonIn,
+    DeletionRequestIn,
     DeliveryDetailOut,
     DeliveryPage,
     DisableIn,
@@ -51,6 +53,8 @@ from trustbridge.admin.schemas import (
     RegistrationStartOut,
     RepositoryPage,
     ResourcePage,
+    TenantDeletionOut,
+    TenantDeletionPage,
     TenantOut,
     TenantPage,
     TenantRefOut,
@@ -72,6 +76,7 @@ from trustbridge.audit.store import append, get_event
 from trustbridge.rbac import Principal, Role, get_principal, instance_roles
 from trustbridge.rbac.deps import client_ip, safe_request_id
 from trustbridge.tenancy import TenantInfo, get_tenant, tenant_session
+from trustbridge.tenancy.context import tenant_context
 from trustbridge.worker.secrets import SecretUnavailable
 
 logger = logging.getLogger(__name__)
@@ -80,6 +85,9 @@ MAX_LIMIT = 200
 _PROBLEMS: dict[int | str, dict[str, Any]] = {
     code: {"model": ProblemOut, "description": "Problem Details (application/problem+json)"}
     for code in (400, 401, 403, 404, 422, 429)
+}
+_CONFLICT: dict[int | str, dict[str, Any]] = {
+    409: {"model": ProblemOut, "description": "Problem Details (application/problem+json)"}
 }
 router = APIRouter(prefix="/admin/v1", responses=_PROBLEMS, route_class=BoundedRoute)
 
@@ -458,6 +466,327 @@ async def enable_tenant(
 ) -> TenantOut:
     """Enable a tenant again (instance `admin`). Idempotent: an enabled tenant is a no-op."""
     return await _set_disabled(request, principal, runtime, tenant_id, disable=False, reason=None)
+
+
+# ---- tenant deletion (ADR 0034, NG6h-7b) ------------------------------------------------------
+
+_DELETION_RESOURCE = "tenant_deletion"
+
+
+def _deletion_event(  # noqa: PLR0913 - one value per recorded fact
+    request: Request,
+    principal: Principal,
+    action: Action,
+    outcome: Outcome,
+    *,
+    tenant_id: UUID | None,
+    deletion_id: UUID,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+) -> AuditEvent:
+    return _event(
+        request,
+        principal,
+        action,
+        outcome,
+        tenant_id=tenant_id,
+        resource_type=_DELETION_RESOURCE,
+        resource_id=str(deletion_id),
+        before=before,
+        after=after,
+    )
+
+
+async def _audited[T](
+    runtime: AdminRuntime,
+    action: Action,
+    failure: Callable[[FailureReason], AuditEvent],
+    work: Callable[[], Awaitable[T]],
+) -> T:
+    """Run `work`; a refusal or an error leaves a `failure` event in its own transaction.
+
+    The change and its success event are `work`'s own transaction, so they commit or roll back
+    together; `failure` builds the event from a fixed reason code, never from the error's text.
+    """
+    try:
+        return await work()
+    except AdminProblem as problem:
+        reason = _problem_reason(problem)
+        await _record_failure(runtime, action, lambda: failure(reason))
+        raise
+    except Exception:
+        await _record_failure(runtime, action, lambda: failure(FailureReason.INTERNAL))
+        raise
+
+
+@router.post(
+    "/tenants/{tenant_id}/deletion",
+    response_model=TenantDeletionOut,
+    status_code=202,
+    responses=_CONFLICT,
+    dependencies=guard(Role.ADMIN, "mutation", tenant_param="tenant_id", instance_only=True),
+)
+@emits(Action.TENANT_DELETION_REQUESTED)
+async def request_tenant_deletion(
+    tenant_id: UUID,
+    body: DeletionRequestIn,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> TenantDeletionOut:
+    """Request the irreversible deletion of a tenant's data (instance `admin`).
+
+    The tenant must be disabled and the body must echo its host, installation id and organisation
+    login (checked, not stored). The record is written before any step runs and the deletion
+    starts when the reconciler claims it, after the server's grace window if one is configured
+    (`not_before`; it is not settable here). Idempotent: while a deletion of the tenant is open
+    the same record is returned, with the flag it was first requested with (a later
+    request cannot change it; read `delete_platform_resources` in the answer). The record says the
+    App must be uninstalled.
+    """
+    action = Action.TENANT_DELETION_REQUESTED
+    reason = scrub_text(body.reason, _REASON_MAX)
+    factory = _factory(runtime)
+
+    async def work() -> TenantDeletionOut:
+        async with factory() as session, session.begin():
+            record, created = await deletions.request(
+                session, tenant_id, body, principal, runtime.deletion_grace_seconds
+            )
+            event = _deletion_event(
+                request,
+                principal,
+                action,
+                Outcome.SUCCESS,
+                tenant_id=tenant_id,
+                deletion_id=record.id,
+                before=None if created else deletions.state_of(record),
+                after=deletions.state_of(record, to_state=record.state, reason=reason),
+            )
+            await append(session, with_trace(event))
+        return record
+
+    return await _audited(
+        runtime,
+        action,
+        lambda why: _tenant_event(
+            request, principal, tenant_id, action, Outcome.FAILURE, after=failure_after(why)
+        ),
+        work,
+    )
+
+
+@router.get("/tenant-deletions", response_model=TenantDeletionPage, dependencies=guard(Role.VIEWER))
+async def list_tenant_deletions(
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+    limit: Limit = DEFAULT_LIMIT,
+    cursor: Cursor = None,
+) -> TenantDeletionPage:
+    """Tenant deletions, newest request first: state, counts, what was skipped and the last
+    failure's code. Never the lease, holder, fence or cursor."""
+    async with _factory(runtime)() as session, session.begin():
+        items, next_cursor = await queries.tenant_deletions(session, limit=limit, cursor=cursor)
+    return TenantDeletionPage(items=items, next_cursor=next_cursor)
+
+
+@router.get(
+    "/tenant-deletions/{deletion_id}",
+    response_model=TenantDeletionOut,
+    dependencies=guard(Role.VIEWER),
+)
+async def get_tenant_deletion(
+    deletion_id: UUID, runtime: Annotated[AdminRuntime, Depends(admin_runtime)]
+) -> TenantDeletionOut:
+    """One tenant deletion (readable after the tenant row is gone, unlike a tenant path)."""
+    async with _factory(runtime)() as session, session.begin():
+        found = await queries.tenant_deletion(session, deletion_id)
+    if found is None:
+        raise AdminProblem(404, "not-found", deletions.NOT_FOUND)
+    return found
+
+
+Change = Callable[
+    [AsyncSession, TenantDeletionOut], Awaitable[tuple[dict[str, Any], dict[str, Any]]]
+]
+
+
+async def _change_deletion(  # noqa: PLR0913 - the request, the caller and what to do
+    request: Request,
+    principal: Principal,
+    runtime: AdminRuntime,
+    action: Action,
+    *,
+    deletion_id: UUID,
+    change: Change,
+) -> TenantDeletionOut:
+    """Apply `change` to a deletion and audit it in the same transaction.
+
+    The record is outside row-level security but its events are not: the deletion's tenant is
+    read first (it never changes) so the transaction runs in that tenant's context. An unknown
+    id is a 404 with a `failure` event that has no tenant.
+    """
+    factory = _factory(runtime)
+    async with factory() as session, session.begin():
+        known = await queries.tenant_deletion(session, deletion_id)
+    tenant_id = None if known is None else known.tenant_id
+
+    async def work() -> TenantDeletionOut:
+        if known is None:
+            raise AdminProblem(404, "not-found", deletions.NOT_FOUND)
+        with tenant_context(known.tenant_id):
+            async with factory() as session, session.begin():
+                current = await queries.tenant_deletion(session, deletion_id)
+                if current is None:  # purged between the two reads
+                    raise AdminProblem(404, "not-found", deletions.NOT_FOUND)
+                before, after = await change(session, current)
+                event = _deletion_event(
+                    request,
+                    principal,
+                    action,
+                    Outcome.SUCCESS,
+                    tenant_id=tenant_id,
+                    deletion_id=deletion_id,
+                    before=before,
+                    after=after,
+                )
+                await append(session, with_trace(event))
+                fresh = await queries.tenant_deletion(session, deletion_id)
+        if fresh is None:  # read in the transaction that wrote it: unreachable
+            raise AdminProblem(404, "not-found", deletions.NOT_FOUND)
+        return fresh
+
+    return await _audited(
+        runtime,
+        action,
+        lambda why: _deletion_event(
+            request,
+            principal,
+            action,
+            Outcome.FAILURE,
+            tenant_id=tenant_id,
+            deletion_id=deletion_id,
+            after=failure_after(why),
+        ),
+        work,
+    )
+
+
+@router.post(
+    "/tenant-deletions/{deletion_id}/cancel",
+    response_model=TenantDeletionOut,
+    responses=_CONFLICT,
+    dependencies=guard(Role.ADMIN, "mutation"),
+)
+@emits(Action.TENANT_DELETION_CANCELLED)
+async def cancel_tenant_deletion(
+    deletion_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> TenantDeletionOut:
+    """Cancel a deletion before its first destructive step (instance `admin`).
+
+    Only a deletion still `requested` (including one waiting for its grace window) can be
+    cancelled; later it is a 409. The tenant stays disabled and a new request makes a new
+    record. Idempotent: a cancelled deletion is a 200 no-op.
+    """
+
+    async def change(
+        session: AsyncSession, current: TenantDeletionOut
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        await deletions.cancel(session, deletion_id)
+        return deletions.transition(deletion_id, current.state, "cancelled")
+
+    return await _change_deletion(
+        request,
+        principal,
+        runtime,
+        Action.TENANT_DELETION_CANCELLED,
+        deletion_id=deletion_id,
+        change=change,
+    )
+
+
+@router.post(
+    "/tenant-deletions/{deletion_id}/skip-step",
+    response_model=TenantDeletionOut,
+    responses=_CONFLICT,
+    dependencies=guard(Role.ADMIN, "mutation"),
+)
+@emits(Action.TENANT_DELETION_STEP_SKIPPED)
+async def skip_tenant_deletion_step(
+    deletion_id: UUID,
+    body: DeletionReasonIn,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> TenantDeletionOut:
+    """Acknowledge that a failing step is left incomplete and move on (instance `admin`).
+
+    Only the `platform`, `github` or `database` step, only after it has failed at least once, and
+    only while no engine holds the lease. The record gains a `skipped` entry naming the step and
+    who acknowledged it, and the next step runs. Skipping `database` makes the deletion go
+    straight to removing the tenant row, which still waits until no tenant row is left.
+    """
+    reason = scrub_text(body.reason, _REASON_MAX)
+
+    async def change(
+        session: AsyncSession, current: TenantDeletionOut
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        del current
+        from_state, to_state = await deletions.skip_step(session, deletion_id, principal.sub)
+        return deletions.transition(
+            deletion_id, from_state, to_state, step=from_state, reason=reason
+        )
+
+    return await _change_deletion(
+        request,
+        principal,
+        runtime,
+        Action.TENANT_DELETION_STEP_SKIPPED,
+        deletion_id=deletion_id,
+        change=change,
+    )
+
+
+@router.post(
+    "/tenant-deletions/{deletion_id}/fail",
+    response_model=TenantDeletionOut,
+    responses=_CONFLICT,
+    dependencies=guard(Role.ADMIN, "mutation"),
+)
+@emits(Action.TENANT_DELETION_OPERATOR_FAILED)
+async def fail_tenant_deletion(
+    deletion_id: UUID,
+    body: DeletionReasonIn,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+    runtime: Annotated[AdminRuntime, Depends(admin_runtime)],
+) -> TenantDeletionOut:
+    """End a stuck deletion as `failed` (instance `admin`), for the operator to resolve.
+
+    Refused while an engine holds the lease, for a deletion that has ended, and for one whose
+    tenant row is already gone (that one can only finish). The tenant stays disabled and a new
+    request makes a new record.
+    """
+    reason = scrub_text(body.reason, _REASON_MAX)
+
+    async def change(
+        session: AsyncSession, current: TenantDeletionOut
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        await deletions.fail(session, deletion_id, principal.sub, reason)
+        return deletions.transition(
+            deletion_id, current.state, "failed", step=current.state, reason=reason
+        )
+
+    return await _change_deletion(
+        request,
+        principal,
+        runtime,
+        Action.TENANT_DELETION_OPERATOR_FAILED,
+        deletion_id=deletion_id,
+        change=change,
+    )
 
 
 # ---- host registration (ADR 0030 "Registration", NG6e-4) ------------------------------------

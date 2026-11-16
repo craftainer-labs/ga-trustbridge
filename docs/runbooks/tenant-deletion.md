@@ -14,13 +14,11 @@ admin-disabled the whole time, and for good after `failed` or `cancelled`.
 
 The statements below run as the application role (`trustbridge_app`), which
 holds `SELECT` on `tenant_deletions` and `EXECUTE` on the functions named.
-The admin API routes that wrap cancel and operator-fail arrive with the
-request endpoint (NG6h-7b); the functions are the break-glass path after that.
-
-**Cancel and operator-fail are unaudited until NG6h-7b's admin routes exist.**
-The SQL functions below write no audit event, so record each use in your
-change log. Once the routes exist, prefer them: they audit the action, and the
-functions stay as the break-glass path.
+The admin API routes wrap them (`POST /admin/v1/tenant-deletions/{id}/cancel`,
+`/skip-step` and `/fail`; instance `admin`): prefer them, because they audit
+the action (`tenant.deletion.cancelled`, `tenant.deletion.step_skipped`,
+`tenant.deletion.operator_failed`). **The SQL functions below write no audit event**, so
+if you use one as the break-glass path, record it in your change log.
 
 ## 1. Watch a deletion
 
@@ -54,6 +52,10 @@ ORDER BY updated_at;
 
 ## 2. Cancel a deletion
 
+A request waits `DELETION_GRACE_SECONDS` (default 86400, 24 hours; Helm
+`deletion.graceSeconds`) before the reconciler starts it: `not_before` in the
+record shows when. The deletion stays `requested`, and so cancellable, until then.
+
 A deletion can be cancelled only while it is `requested` (nothing destructive
 has run: draining is the first destructive step), and a request with a future
 `not_before` stays `requested` until then.
@@ -64,9 +66,25 @@ SELECT tb_cancel_tenant_deletion('<deletion id>');
 
 It returns `cancelled`, `not_cancellable` (a later state) or `not_found`. The
 tenant **stays admin-disabled**; enable it through the admin API when the
-cancellation is intended. A new request makes a new record. Cancelling writes
-no audit event itself: record it in your change log until the admin route
-audits it.
+cancellation is intended. A new request makes a new record. Prefer the admin
+route, which does the same and audits it (`POST
+/admin/v1/tenant-deletions/<id>/cancel`, no body; a 409 once past `requested`).
+The function itself writes no audit event: if you call it directly, record it
+in your change log.
+
+## 2b. Skip a step that cannot complete
+
+A step that keeps failing holds the deletion and retries with backoff (an
+alert fires on `attempts`). If you have fixed or accepted what it could not do,
+acknowledge it with `POST /admin/v1/tenant-deletions/<id>/skip-step` and
+`{"reason": "..."}` (instance `admin`). It is allowed only for the `platform`,
+`github` or `database` step, only after the step has failed at least once, and
+only while no engine holds the lease (a 409 otherwise: wait for the backoff or
+`DELETION_LEASE_TTL_SECONDS`). The record gains a `skipped` entry with the step
+and who acknowledged it, and the next step runs; the event is
+`tenant.deletion.step_skipped`. Skipping `database` does not remove rows: the
+engine goes on to remove the tenant row, which still refuses while any
+tenant-keyed row is left, so clear those by hand first.
 
 ## 3. Fail a stuck deletion
 
@@ -92,8 +110,10 @@ undone, and what was already removed stays removed. The tenant stays disabled.
 4. Scale the reconciler back up. To try again, request a new deletion for the
    tenant (the old record is kept).
 
-The function writes no audit event: record the action in your change log until
-the admin route audits the acknowledgement.
+Prefer the admin route, which does the same and audits it
+(`POST /admin/v1/tenant-deletions/<id>/fail` with `{"reason": "..."}`, as an
+instance `admin`; it is a 409 while a live lease is held). The function writes
+no audit event: if you call it directly, record the action in your change log.
 
 ## 4. After a database restore
 
@@ -125,11 +145,7 @@ not stay restored, so replay those deletions before the system takes traffic.
    A deletion that was still running at the backup is in `tenant_deletions`
    with its saved state and resumes by itself when the reconciler starts
    (each step is idempotent).
-4. For each tenant that came back, with only the api running (until NG6h-7b
-   adds the request route, run the SQL functions instead:
-   `tb_set_tenant_disabled` and `tb_request_tenant_deletion(tenant, host,
-   installation id, org, by_sub, by_iss, delete_platform, not_before)` as the
-   application role, and record the actions in your change log): disable it
+4. For each tenant that came back, with only the api running: disable it
    (`POST /admin/v1/tenants/{id}/disable`, reason "restore replay of
    deletion <old id>"), then request its deletion again
    (`POST /admin/v1/tenants/{id}/deletion`, echoing host, installation id and

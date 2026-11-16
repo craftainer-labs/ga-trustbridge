@@ -111,6 +111,17 @@ async def test_a_full_batch_asks_for_another_pass_on_the_same_table() -> None:
     assert outcome.cursor == {"table": "adapter_credentials", "removed": 6}
 
 
+async def test_a_skipped_database_step_runs_no_batch_and_is_done() -> None:
+    """NG6h-7b: after an admin's skip the cursor says so; nothing is touched, `finish` decides."""
+    log = _Log(removed=3)
+    outcome = await _step(log).run(_ctx({"operator_skipped": True}))
+    assert (outcome.done, outcome.counts, outcome.skipped) == (True, {}, ())
+    assert log.statements == []
+    # only the exact marker counts: anything else is an ordinary (restarted) cursor
+    again = await _step(_Log(removed=1)).run(_ctx({"operator_skipped": "yes"}))
+    assert again.done is False
+
+
 async def test_a_short_batch_moves_to_the_next_table() -> None:
     """Fewer rows than the limit means the table is clear: the cursor points at the next one."""
     log = _Log(removed=2)
