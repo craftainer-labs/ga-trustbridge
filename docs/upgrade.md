@@ -88,11 +88,14 @@ A release that mixes old and new reconcilers leaves stale ids in that hash:
 an old pod acknowledges a request without removing its id. Draining the old
 pods does not clear them. A stale id is reused by the tenant's next reconcile
 request, whose terminal audit event is then dropped as a duplicate of the
-earlier one; that request's acknowledgement (on a new pod) removes the id, so
-one event per affected tenant is lost. To avoid that, after the old pods are
-gone and while no reconcile claim is in flight, delete the hash
-(`DEL tb:reconcile:request_ids` in Valkey). Deleting it during a claim would
-give that request a second id, and its terminal event could be written twice.
+earlier one. When that request is acknowledged on a new pod the id is
+removed, so on the happy path one event per affected tenant is lost; a request
+that is released or dropped keeps the id, and later requests keep losing their
+terminal event. To avoid that, once the old pods are gone, scale the
+reconciler to zero, delete the hash (`DEL tb:reconcile:request_ids` in
+Valkey) and scale it back. Deleting the hash under a running reconciler could
+give a request in flight a second id, and its terminal event could then be
+written twice.
 The notes of the first release that carries this
 change must say "single-version reconciler rollout". The application is
 unreleased, so no deployed fleet is affected yet.
