@@ -95,6 +95,7 @@ class CheckPathsTest(unittest.TestCase):
             ".github/scripts/run_claude.sh",
             ".github/renovate.json",
             ".devcontainer/Dockerfile",
+            ".devcontainer.json",
             ".devcontainer/stack/x/compose.yml",
             ".claude/settings.json",
             ".mcp.json",
@@ -128,6 +129,8 @@ class CheckPathsTest(unittest.TestCase):
             "docs/Makefile.md",
             "scripts/other.sh",
             ".githubx/y",
+            "sub/.devcontainer.json",
+            ".devcontainerx/y",
             "github/workflows/x.yml",
             "README.md",
         ]
@@ -141,6 +144,53 @@ class CheckPathsTest(unittest.TestCase):
         """Paths are NUL-separated, so a newline inside one cannot hide a denied name."""
         self.assertEqual(self.verdict("a\n.github/x"), 0)
         self.assertEqual(self.verdict(".github/x\nb"), 1)
+
+
+class IsAncestorTest(unittest.TestCase):
+    """``is_ancestor`` retries a failing compare call but not a definite answer."""
+
+    def answer(self, outcomes: str) -> tuple[int, int]:
+        """Return (exit status, number of gh calls) when gh yields these outcomes in turn.
+
+        Each character is one call: ``a`` prints ahead, ``d`` prints diverged, ``x`` fails.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        gh = root / "bin" / "gh"
+        gh.parent.mkdir()
+        gh.write_text(
+            "#!/usr/bin/env bash\n"
+            f'n=$(cat "{root}/n" 2>/dev/null || echo 0); echo $((n+1)) > "{root}/n"\n'
+            f'c=$(printf %s "{outcomes}" | cut -c$((n+1)))\n'
+            'case "$c" in a) echo ahead;; d) echo diverged;; *) exit 1;; esac\n'
+        )
+        gh.chmod(0o755)
+        proc = run(
+            ["bash", "-c", f'. "{SCRIPTS}/moderate_lib.sh"; is_ancestor a b'],
+            env={
+                "PATH": f"{gh.parent}:{os.environ['PATH']}",
+                "GITHUB_REPOSITORY": "o/r",
+                "MODERATE_RETRY_DELAY": "0",
+            },
+        )
+        return proc.returncode, int((root / "n").read_text())
+
+    def test_success_is_not_retried(self) -> None:
+        """An ahead answer needs one call."""
+        self.assertEqual(self.answer("a"), (0, 1))
+
+    def test_transient_errors_are_retried(self) -> None:
+        """Two failed calls then success still succeeds."""
+        self.assertEqual(self.answer("xxa"), (0, 3))
+
+    def test_persistent_errors_fail_closed_after_three_calls(self) -> None:
+        """A call that never works refuses, after exactly three attempts."""
+        self.assertEqual(self.answer("xxxa"), (1, 3))
+
+    def test_a_definite_no_is_not_retried(self) -> None:
+        """A diverged answer is final."""
+        self.assertEqual(self.answer("da"), (1, 1))
 
 
 @unittest.skipUnless(shutil.which("jq") and shutil.which("git"), "jq and git are required")
@@ -253,6 +303,20 @@ class PackageResultTest(unittest.TestCase):
         meta = self.package("triage")
         self.assertEqual((meta["action"], meta["comment"]), ("repro-ready", "it fails"))
         self.assertTrue((self.out / "patch.diff").exists())
+
+    def test_triage_patch_over_the_cap_keeps_its_reason(self) -> None:
+        """An oversized patch is dropped, but the triage result says why it failed."""
+        (self.ws / "big.txt").write_text("x" * 2_200_000 + "\n")
+        self.git("add", "big.txt")
+        self.git("commit", "-q", "-m", "feat: big")
+        (self.ws / ".moderation-out" / "triage.json").write_text(
+            json.dumps({"action": "repro-ready", "comment": "it fails"})
+        )
+        self.package("triage")
+        meta = json.loads((self.out / "meta.json").read_text())
+        self.assertEqual(meta["action"], "failed")
+        self.assertIn("larger than", meta["comment"])
+        self.assertFalse((self.out / "patch.diff").exists())
 
     def test_triage_result_bad_shapes(self) -> None:
         """Invalid JSON, wrong types and a symlinked file all become `failed`."""
