@@ -357,7 +357,7 @@ async def _set_disabled(  # noqa: PLR0913 - the request, the caller and what to 
             try:
                 row = (await session.execute(_SET_DISABLED, params)).one()
             except DBAPIError as error:
-                if getattr(error.orig, "sqlstate", None) == DELETION_IN_PROGRESS:
+                if not disable and getattr(error.orig, "sqlstate", None) == DELETION_IN_PROGRESS:
                     raise AdminProblem(
                         409, "conflict", "A deletion is in progress; the tenant cannot be enabled"
                     ) from None

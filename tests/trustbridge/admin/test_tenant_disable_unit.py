@@ -364,6 +364,13 @@ def test_another_database_error_on_enable_stays_a_500(monkeypatch: pytest.Monkey
     assert event.after == {"reason": "internal"}
 
 
+def test_the_deletion_sqlstate_is_not_mapped_on_a_disable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 409 is the enable's: a disable never means "a deletion is in progress"."""
+    world = World(error=DBAPIError("SELECT 1", {}, _Driver("55000")))
+    client = _client(monkeypatch, world, ADMIN, server_errors=False)
+    problem(client.post(DISABLE, json={"reason": "r"}), 500, "internal")
+
+
 def test_a_failure_event_that_cannot_be_written_does_not_hide_the_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

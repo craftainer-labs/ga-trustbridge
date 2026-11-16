@@ -370,7 +370,7 @@ adapter fakes.
   and gate beside it. A delivery that arrives while the tenant is `deleting` is deferred (left `pending`, `tenant_id`
   recorded, no handler run) and the database step clears it; one that lands after the database step's last pass is refused by
   `tb_delete_tenant`'s backstop and cleared by the retry; one after the deletion is acknowledged and dropped (the tombstone).
-  The trail is `tenant.deletion.requested`, five `tenant.deletion.step`, `tenant.deletion.skipped` (retention only) and
+  The trail is `tenant.deletion.requested`, five `tenant.deletion.step`, `tenant.deletion.skipped` (one per skipped category: the platform step's operator-owned connection data, and the unresolved deliveries kept by retention) and
   `tenant.deletion.completed`, in that order. A second test skips a failing platform step and a database step, which does
   not finish while rows remain. Enabling a tenant that has a deletion in progress answers 409 `conflict` (the definer's
   SQLSTATE 55000), not 500.
