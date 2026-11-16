@@ -230,7 +230,9 @@ class ReconcileQueue:
 
     async def refund_attempt(self, claim: Claim) -> None:
         """Give back the run `begin_attempt` counted (the body ran but its audit write failed)."""
-        await self._r.hincrby(ATTEMPTS_HASH, str(claim.tenant_id), -1)
+        field = str(claim.tenant_id)
+        if await self._r.hincrby(ATTEMPTS_HASH, field, -1) < 0:  # already cleared: no count
+            await self._r.hdel(ATTEMPTS_HASH, field)
 
     async def clear_attempts(self, claim: Claim) -> None:
         """Forget the request's attempts (it was acknowledged)."""
