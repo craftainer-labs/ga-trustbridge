@@ -752,6 +752,7 @@ async def _seed_environments(db: Db) -> None:
 
 async def _clear_environments(db: Db) -> None:
     async with db.admin.begin() as conn:
+        await conn.execute(text("ALTER TABLE github_environments NO FORCE ROW LEVEL SECURITY"))
         await conn.execute(text("ALTER TABLE github_environments DISABLE ROW LEVEL SECURITY"))
         await conn.execute(text("DELETE FROM github_environments"))
 
@@ -761,10 +762,11 @@ async def test_github_environments_is_isolated_per_tenant_once_rls_is_enabled(
 ) -> None:  # inv. 1, 2, 9 for the table NG6h-6a added
     """With RLS enabled on it, its policies scope reads and writes to the context's tenant."""
     db = enforced_db
-    await _seed_environments(db)
-    async with db.admin.begin() as conn:  # what release N+1's migration does for the six
-        await conn.execute(text("ALTER TABLE github_environments ENABLE ROW LEVEL SECURITY"))
     try:
+        await _seed_environments(db)
+        async with db.admin.begin() as conn:  # what release N+1's migration does for the six
+            await conn.execute(text("ALTER TABLE github_environments ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text("ALTER TABLE github_environments FORCE ROW LEVEL SECURITY"))
         async with tenant_session(db.app, db.a) as session:
             assert await _values(session, GITHUB_ENVIRONMENTS, "tenant_id") == [db.a]
             own = await session.execute(ENVIRONMENT_INSERT_STATEMENT, {"t": db.a, "k": "x", "n": 2})
@@ -799,8 +801,8 @@ async def test_github_environments_policies_filter_nothing_in_the_release_n_sche
         "WHERE relname = 'github_environments' AND relkind = 'r'",
     )
     assert [tuple(r) for r in flags] == [(False, False)]
-    await _seed_environments(db)
     try:
+        await _seed_environments(db)
         async with db.app() as session:
             assert await _count(session, GITHUB_ENVIRONMENTS) == 2
     finally:

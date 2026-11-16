@@ -167,7 +167,7 @@ another's context. Rules:
 | | Release N ("expand") | Release N+1 ("enforce") |
 | --- | --- | --- |
 | Code | `tenant_context`, the `after_begin` hook, every tenant-owned access inside a context, the four functions' callers, `iterate_tenants` | requires `REQUIRED_SCHEMA_VERSION = 2` |
-| Migration | creates `tb_current_tenant`, the four functions and the policies **while RLS is still disabled** on the tables (so the policies exist but filter nothing); grants `EXECUTE`; writes `schema_compat` 1 (`GREATEST`, no bump) | `ALTER TABLE ... ENABLE` and `FORCE ROW LEVEL SECURITY` on the six tables; bumps `schema_compat` to 2 |
+| Migration | creates `tb_current_tenant`, the four functions and the policies **while RLS is still disabled** on the tables (so the policies exist but filter nothing); grants `EXECUTE`; writes `schema_compat` 1 (`GREATEST`, no bump) | `ALTER TABLE ... ENABLE` and `FORCE ROW LEVEL SECURITY` on the six tables and `github_environments`; bumps `schema_compat` to 2 |
 | App role | not RLS-bound: queries behave as before | RLS-bound |
 | Why safe | N-1 code never sets the setting and, with RLS off, does not need to | N code (previous release) sets the hook and so works against the enforced schema; the `migration-compat` job runs release N's suites against it and proves that |
 
@@ -183,11 +183,12 @@ fleet before the N+1 migrate Job runs. Skipping release N is not supported.
 tenant-owned table like the five keyed ones: migration `9a4d6c2e8b17` creates it with the same
 `tenant_isolation` and `owner_all` policies, while RLS is still disabled on it, so the policies
 are inert at `REQUIRED_SCHEMA_VERSION` 1. Release N+1's migration enables and forces RLS on it
-together with the six; `role_check.RLS_TABLES` already lists it, and invariants 1, 2, 9, 13 and
-17 apply to it as to the six (`test_rls_integration.py` covers it). It is also part of
+together with the six (release N+1 enables and forces seven tables, not six);
+`role_check.RLS_TABLES` already lists it, and invariants 1, 2, 9, 13 and 17 apply to it as they
+do to the six (`test_rls_integration.py` covers it). It is also part of
 `tb_delete_tenant`'s emptiness check (0034).
 
-### `audit_events` is a seventh RLS table
+### `audit_events` is a further RLS table
 
 [0032](0032-audit-log.md)'s `audit_events` is created with RLS enabled and forced, so the
 `owner_all` policy, the `FORCE` and owner-policy test (invariant 9), the role checks and the

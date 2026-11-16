@@ -104,10 +104,10 @@ verified end-to-end on arm64 hardware on 2026-09-06.
 
 `migration-compat.yml` enforces `../../docs/nfrs/NFR-0027-expand-contract-migrations.md`
 on pull requests that touch `alembic/` (the revisions and the harness), `alembic.ini`,
-the model packages (`src/app/models/`, trustbridge's `models.py` and SQL modules, its
-migrations package and `worker/schema.py`), the lockfile or the lint script (and on demand);
-a docs-only PR does not run it. The path list is in the workflow's `on.pull_request.paths`: a
-new module that defines tables or issues schema-dependent SQL has to be added there. Inside the devcontainer, like `checks.yml`, it:
+the model packages (`src/app/models/`), any Python file under `src/trustbridge/`
+(its models, SQL and stores are spread over its packages), the lockfile or the lint script (and on demand);
+a docs-only PR does not run it. The path list is in the workflow's `on.pull_request.paths`; code outside those
+directories that defines tables has to be added there. Inside the devcontainer, like `checks.yml`, it:
 
 1. lints the PR's new or changed revisions with Squawk
    (`../../scripts/lint-migrations.sh`);
