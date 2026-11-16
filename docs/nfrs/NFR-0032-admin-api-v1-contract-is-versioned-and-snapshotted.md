@@ -17,7 +17,7 @@ Maintainability, compatibility (versioned API), security (no unguarded route).
   route) is served authenticated at `/admin/v1/openapi.json` from one immutable body and is
   committed as `docs/openapi/admin-v1.json`. CI fails when the generated spec differs from the
   snapshot; `python -m trustbridge.admin.spec > docs/openapi/admin-v1.json` regenerates it, and
-  ADR 0033 says the snapshot is attached to each release; that is not implemented (see the gaps).
+  ADR 0033 plans the snapshot as a release asset; that is not implemented (see the gaps).
 - **Uniform contract.** Every error is `application/problem+json` with `type`, `title`,
   `status`, `detail` and `instance` ([NFR-0015](NFR-0015-exception-detail-redaction.md)). Lists
   use the cursor envelope `{items, next_cursor}` with `limit` 50 by default and 200 at most

@@ -12,8 +12,14 @@ name: Migration compat
 on:
   pull_request:
     paths:
-      - alembic/versions/**
       - src/app/models/**
+      # trustbridge's own tables, definer functions and raw SQL live across its
+      # packages (models, sql modules, stores, the worker's schema gate): any
+      # Python change there can touch the schema contract. Docs-only PRs still skip.
+      - src/trustbridge/*.py
+      - src/trustbridge/**/*.py
+      - alembic/**
+      - alembic.ini
       # craftainer-crud's models (revision table, base columns) arrive as a
       # version bump in the lockfile now that the package is published.
       - uv.lock

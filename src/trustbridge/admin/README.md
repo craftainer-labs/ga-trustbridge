@@ -374,9 +374,11 @@ The classes are open: v1 may add one. Errors off `/admin/v1` keep the template's
 Fixed windows in Valkey through `trustbridge.ratelimit` (key prefix `tb:rl:admin:`), fail open with
 a metric. Per principal (`iss` and `sub`, hashed): reads 600/min, exports 6/min, mutations 60/min
 (`guard(..., "mutation")`). Per source address: 30/min for unauthenticated requests (a 401, or a route that does not exist;
-over the limit the rejection becomes a 429). A 403 or 404 for an authenticated principal counts
-against that principal's read bucket instead, so callers behind one address (a NAT, the BFF) do
-not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_REQUESTS`,
+over the limit the rejection becomes a 429). A 403 or 404 for an authenticated principal is
+charged twice: to the route's own bucket (the limit dependency runs before the role check, so a
+mutation route's denied request spends a mutation token) and again to that principal's read
+bucket (the problem handler, `problems.py`), so callers behind one address (a NAT, the BFF) do
+not use up each other's budget. On a read route both are the read bucket. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_REQUESTS`,
 `MUTATION_REQUESTS`, `EXPORT_REQUESTS`, `ANONYMOUS_REQUESTS`, `WINDOW_SECONDS`, `TIMEOUT_MS`,
 `EXEMPT_CIDRS`. Behind the BFF the address is the BFF's unless `TRUSTED_PROXIES` lists it.
 

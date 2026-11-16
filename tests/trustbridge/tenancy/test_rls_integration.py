@@ -105,6 +105,13 @@ INSERTS = {
         "VALUES (gen_random_uuid(), :t, 'a', :k, 'issue', 'pending', false)"
     ),
 }
+# NG6h-6a's tracking table: tenant-keyed with the same policies, but not in the seed lists above.
+GITHUB_ENVIRONMENTS = "github_environments"
+ENVIRONMENT_INSERT = (
+    "INSERT INTO github_environments (tenant_id, host, repository_id, environment_name) "
+    "VALUES (:t, 'github.com', :n, :k)"
+)
+ENVIRONMENT_INSERT_STATEMENT = text(ENVIRONMENT_INSERT)
 ROLES_SQL = """
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trustbridge_app') THEN
@@ -735,6 +742,71 @@ async def test_a_disabled_policy_or_an_owner_connection_fails_the_isolation_prob
                 )
             )
     assert await _isolation_holds(db.app, db.a)
+
+
+async def _seed_environments(db: Db) -> None:
+    async with db.admin.begin() as conn:
+        for tenant_id in (db.a, db.b):
+            await conn.execute(ENVIRONMENT_INSERT_STATEMENT, {"t": tenant_id, "k": "seed", "n": 1})
+
+
+async def _clear_environments(db: Db) -> None:
+    async with db.admin.begin() as conn:
+        await conn.execute(text("ALTER TABLE github_environments NO FORCE ROW LEVEL SECURITY"))
+        await conn.execute(text("ALTER TABLE github_environments DISABLE ROW LEVEL SECURITY"))
+        await conn.execute(text("DELETE FROM github_environments"))
+
+
+async def test_github_environments_is_isolated_per_tenant_once_rls_is_enabled(
+    enforced_db: Db,
+) -> None:  # inv. 1, 2, 9 for the table NG6h-6a added
+    """With RLS enabled on it, its policies scope reads and writes to the context's tenant."""
+    db = enforced_db
+    try:
+        await _seed_environments(db)
+        async with db.admin.begin() as conn:  # what release N+1's migration does for the six
+            await conn.execute(text("ALTER TABLE github_environments ENABLE ROW LEVEL SECURITY"))
+            await conn.execute(text("ALTER TABLE github_environments FORCE ROW LEVEL SECURITY"))
+        async with tenant_session(db.app, db.a) as session:
+            assert await _values(session, GITHUB_ENVIRONMENTS, "tenant_id") == [db.a]
+            own = await session.execute(ENVIRONMENT_INSERT_STATEMENT, {"t": db.a, "k": "x", "n": 2})
+            assert _rowcount(own) == 1
+            await session.rollback()
+        async with tenant_session(db.app, db.a) as session:
+            with pytest.raises(DBAPIError, match=RLS_ERROR):
+                await session.execute(ENVIRONMENT_INSERT_STATEMENT, {"t": db.b, "k": "x", "n": 2})
+        async with tenant_session(db.app, db.a) as session:  # a delete reaches only its own row
+            removed = await session.execute(delete(table(GITHUB_ENVIRONMENTS)))
+            assert _rowcount(removed) == 1
+            await session.rollback()
+        async with db.app() as session:  # no context: nothing visible, no write possible
+            assert await _count(session, GITHUB_ENVIRONMENTS) == 0
+        async with db.app() as session:
+            with pytest.raises(DBAPIError, match=RLS_ERROR):
+                await session.execute(ENVIRONMENT_INSERT_STATEMENT, {"t": db.a, "k": "x", "n": 2})
+        async with db.owner() as session:  # the owner policy still sees every row
+            assert await _count(session, GITHUB_ENVIRONMENTS) == 2
+    finally:
+        await _clear_environments(db)
+
+
+async def test_github_environments_policies_filter_nothing_in_the_release_n_schema(
+    inert_db: Db,
+) -> None:  # inv. 13 for the table NG6h-6a added
+    """RLS is off on it as shipped, so the app role sees every tenant's rows with no context."""
+    db = inert_db
+    flags = await _admin_rows(
+        db,
+        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+        "WHERE relname = 'github_environments' AND relkind = 'r'",
+    )
+    assert [tuple(r) for r in flags] == [(False, False)]
+    try:
+        await _seed_environments(db)
+        async with db.app() as session:
+            assert await _count(session, GITHUB_ENVIRONMENTS) == 2
+    finally:
+        await _clear_environments(db)
 
 
 async def _check(

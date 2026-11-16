@@ -145,7 +145,7 @@ Three layers, from the database outward:
    the only path that satisfies the trigger.
 
 RLS (0031) is enabled and forced on `audit_events` from creation (a new table, so no previous
-release touches it; 0031 lists it as a seventh RLS table; like every policy in the migration it
+release touches it; 0031 lists it as a further RLS table; like every policy in the migration it
 is created only once both roles exist, which production guarantees). Its policies: an `owner_all` policy
 for `trustbridge_owner` (the definer functions `tb_audit_purge` and `tb_audit_list` run as the
 owner and need it, and the append-only trigger still gates the owner's changes), and for the

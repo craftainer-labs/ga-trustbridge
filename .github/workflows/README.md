@@ -103,8 +103,11 @@ verified end-to-end on arm64 hardware on 2026-09-06.
 ## Migration compatibility
 
 `migration-compat.yml` enforces `../../docs/nfrs/NFR-0027-expand-contract-migrations.md`
-on pull requests that touch `alembic/versions/` or the model packages
-(and on demand). Inside the devcontainer, like `checks.yml`, it:
+on pull requests that touch `alembic/` (the revisions and the harness), `alembic.ini`,
+the model packages (`src/app/models/`), any Python file under `src/trustbridge/`
+(its models, SQL and stores are spread over its packages), the lockfile or the lint script (and on demand);
+a docs-only PR does not run it. The path list is in the workflow's `on.pull_request.paths`; code outside those
+directories that defines tables has to be added there. Inside the devcontainer, like `checks.yml`, it:
 
 1. lints the PR's new or changed revisions with Squawk
    (`../../scripts/lint-migrations.sh`);
@@ -132,6 +135,12 @@ writes the reason to the run summary and a notice annotation, still runs
 the lint, and finishes green (steps 2 and 3 are the only ones skipped).
 It starts enforcing on its own once a release containing the setting
 exists.
+
+As long as no `v*` release tag exists (the state of this repository until its first release),
+only the Squawk lint of changed revisions runs: the summary says "N-1 compatibility check
+skipped: no stable release tag exists yet", and a green run therefore does not prove N-1
+compatibility of the PR's schema. ADR 0031's invariants 13 and 14 are checked by this job only
+from the first release that has the setting.
 
 ## Perf and microbenchmarks
 

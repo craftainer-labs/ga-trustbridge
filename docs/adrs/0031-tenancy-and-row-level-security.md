@@ -2,8 +2,11 @@
 
 ## Status
 
-Proposed. No code is written yet. It becomes Accepted
-when the implementation (NG6a) merges. Builds on
+Proposed, implemented except release N+1 ("enforce"): the tenant context, the hook, the
+policies (inert), the definer functions, `iterate_tenants` and the role checks are in the code
+(NG6a, NG6h); the migration that enables and forces RLS and bumps `REQUIRED_SCHEMA_VERSION`
+to 2 is not written yet (invariants 14 and 16 for the six tables, and the enforced half of 9).
+It becomes Accepted when that migration merges. Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) ("Tenancy", the roles table and
 its open issues), which this ADR settles, and is used by
 [0029](0029-adapter-plugin-interface.md) (the tables and lease) and by
@@ -20,8 +23,8 @@ transaction setting and deferred the details here. What exists today (NG3-NG5, m
 `a7e2c94b1d63`):
 
 1. **Tables.** Tenant-owned: `tenants` (its `id` is the tenant id), `tenant_repositories`,
-   `scope_leases`, `adapter_resources`, `adapter_credentials`, `credential_operations` (each
-   has a `tenant_id` column). Host-scoped, written before a tenant is known:
+   `scope_leases`, `adapter_resources`, `adapter_credentials`, `credential_operations` and, from NG6h-6a, `github_environments` (each
+   has a `tenant_id` column; `github_environments` has no foreign key to `tenants`, like the others). Host-scoped, written before a tenant is known:
    `webhook_deliveries` (primary key `(host, delivery_id)`) and `github_host_registrations`.
    `schema_compat` is a single-row, instance-wide table.
 2. **Roles.** The runtime role `trustbridge_app` already exists in migrations only as a name:
@@ -95,8 +98,8 @@ transaction setting and deferred the details here. What exists today (NG3-NG5, m
 
 ### Policies
 
-Enabled and forced on `tenants`, `tenant_repositories`, `scope_leases`, `adapter_resources`,
-`adapter_credentials` and `credential_operations`. For each table other than `tenants`:
+Enabled and forced (release N+1) on `tenants`, `tenant_repositories`, `scope_leases`,
+`adapter_resources`, `adapter_credentials` and `credential_operations`. For each table other than `tenants`:
 
 ```sql
 CREATE POLICY tenant_isolation ON <table>
@@ -164,7 +167,7 @@ another's context. Rules:
 | | Release N ("expand") | Release N+1 ("enforce") |
 | --- | --- | --- |
 | Code | `tenant_context`, the `after_begin` hook, every tenant-owned access inside a context, the four functions' callers, `iterate_tenants` | requires `REQUIRED_SCHEMA_VERSION = 2` |
-| Migration | creates `tb_current_tenant`, the four functions and the policies **while RLS is still disabled** on the tables (so the policies exist but filter nothing); grants `EXECUTE`; writes `schema_compat` 1 (`GREATEST`, no bump) | `ALTER TABLE ... ENABLE` and `FORCE ROW LEVEL SECURITY` on the six tables; bumps `schema_compat` to 2 |
+| Migration | creates `tb_current_tenant`, the four functions and the policies **while RLS is still disabled** on the tables (so the policies exist but filter nothing); grants `EXECUTE`; writes `schema_compat` 1 (`GREATEST`, no bump) | `ALTER TABLE ... ENABLE` and `FORCE ROW LEVEL SECURITY` on the six tables and `github_environments`; bumps `schema_compat` to 2 |
 | App role | not RLS-bound: queries behave as before | RLS-bound |
 | Why safe | N-1 code never sets the setting and, with RLS off, does not need to | N code (previous release) sets the hook and so works against the enforced schema; the `migration-compat` job runs release N's suites against it and proves that |
 
@@ -174,12 +177,23 @@ after the N+1 migration would see no rows. N+1 code requires `schema_compat` 2, 
 for the migration, and the release notes of N+1 state that N-1 must be fully rolled out of the
 fleet before the N+1 migrate Job runs. Skipping release N is not supported.
 
-### `audit_events` is a seventh RLS table
+### `github_environments` is a tenant-owned table too
+
+`github_environments` (NG6h-6a, the environments trustbridge created, tracked per tenant) is a
+tenant-owned table like the five keyed ones: migration `9a4d6c2e8b17` creates it with the same
+`tenant_isolation` and `owner_all` policies, while RLS is still disabled on it, so the policies
+are inert at `REQUIRED_SCHEMA_VERSION` 1. Release N+1's migration enables and forces RLS on it
+together with the six (release N+1 enables and forces seven tables, not six);
+`role_check.RLS_TABLES` already lists it, and invariants 1, 2, 9, 13 and 17 apply to it as they
+do to the six (`test_rls_integration.py` covers it). It is also part of
+`tb_delete_tenant`'s emptiness check (0034).
+
+### `audit_events` is a further RLS table
 
 [0032](0032-audit-log.md)'s `audit_events` is created with RLS enabled and forced, so the
 `owner_all` policy, the `FORCE` and owner-policy test (invariant 9), the role checks and the
 runtime check below all cover it too; "the six tables" in this ADR's text means the six
-tenant-owned tables, and each such check applies to `audit_events` as well. It needs no staged
+tenant-owned tables listed above (`github_environments` is the one added later, see above), and each such check applies to `audit_events` as well. It needs no staged
 rollout because no previous release touches it. **Consequence for the runtime check:** it
 applies as soon as any RLS-forced table exists, so from the release that creates `audit_events`
 a runtime process whose role is a superuser or `BYPASSRLS` reports not ready; the check is
