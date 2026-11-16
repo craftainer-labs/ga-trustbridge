@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import DBAPIError
 
 from tests.trustbridge.admin.helpers import ACME, FakeSession, build, problem
 from trustbridge.admin import guards, routes
@@ -332,6 +333,45 @@ def test_a_failed_enable_leaves_a_failure_event_with_a_reason_code(
     assert (event.action, event.outcome) == (Action.TENANT_ENABLE, Outcome.FAILURE)
     assert (event.before, event.after) == (None, {"reason": "internal"})
     assert CANARY not in repr(event)
+
+
+class _Driver(Exception):  # noqa: N818 -- stands in for the driver's error
+    def __init__(self, sqlstate: str) -> None:
+        super().__init__(sqlstate)
+        self.sqlstate = sqlstate
+
+
+def test_enabling_a_tenant_with_a_deletion_in_progress_is_a_409_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLSTATE 55000 (ADR 0034): a `conflict` problem and a `conflict` failure event."""
+    world = World(error=DBAPIError("SELECT 1", {}, _Driver("55000")))
+    client = _client(monkeypatch, world, ADMIN)
+    body = problem(client.post(ENABLE), 409, "conflict")
+    assert body["detail"] == "A deletion is in progress; the tenant cannot be enabled"
+    (event,) = world.written
+    assert (event.action, event.outcome) == (Action.TENANT_ENABLE, Outcome.FAILURE)
+    assert (event.before, event.after) == (None, {"reason": "conflict"})
+    assert world.events == []  # the change and its success event were never recorded
+
+
+def test_another_database_error_on_enable_stays_a_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the deletion's SQLSTATE is mapped."""
+    world = World(error=DBAPIError("SELECT 1", {}, _Driver("57014")))
+    client = _client(monkeypatch, world, ADMIN, server_errors=False)
+    problem(client.post(ENABLE), 500, "internal")
+    (event,) = world.written
+    assert event.after == {"reason": "internal"}
+
+
+def test_the_deletion_sqlstate_is_not_mapped_on_a_disable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 409 is the enable's: a disable never means "a deletion is in progress"."""
+    world = World(error=DBAPIError("SELECT 1", {}, _Driver("55000")))
+    client = _client(monkeypatch, world, ADMIN, server_errors=False)
+    problem(client.post(DISABLE, json={"reason": "r"}), 500, "internal")
+    (event,) = world.written
+    assert (event.action, event.outcome) == (Action.TENANT_DISABLE, Outcome.FAILURE)
+    assert event.after == {"reason": "internal"}
 
 
 def test_a_failure_event_that_cannot_be_written_does_not_hide_the_error(

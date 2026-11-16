@@ -2,10 +2,12 @@
 
 ## Status
 
-Proposed. The user decided on 2026-11-03 (G-api) that tenant data deletion is **in NG6**,
+Accepted (NG6h-7c). The user decided on 2026-11-03 (G-api) that tenant data deletion is **in NG6**,
 overriding the earlier lean to defer it; this ADR holds its design and the user's answers on
-the remaining items ("User decisions"). The engine, its steps, their composition and the admin routes are implemented (NG6h-1 to NG6h-7b); it becomes Accepted when
-the end-to-end test (NG6h-7c) merges. Builds on
+the remaining items ("User decisions"). The engine, its steps, their composition, the admin routes
+and the end-to-end test that runs a deletion from the request route to the tombstone with webhook
+deliveries arriving meanwhile (`tests/trustbridge/deletion/test_full_flow_integration.py`) are
+implemented (NG6h-1 to NG6h-7c). Builds on
 [0028](0028-trustbridge-architecture-and-instance-layout.md) (write-ahead operations, leases,
 parked values, retention),
 [0029](0029-adapter-plugin-interface.md) (adapter `delete` operations),
@@ -362,8 +364,18 @@ adapter fakes.
   (`DELETION_STEP_BATCH_SIZE`, default 500), and the `SqlRecordPurger` (budget half `LEASE_TTL_SECONDS`).
   Mock mode composes nothing and logs one line. Webhook deliveries are not scanned by the drain: a disabled
   tenant's handlers skip them and `tb_delete_tenant` refuses while one is left. The admin routes (request,
-  reads, cancel, skip-step, operator-fail) are NG6h-7b (merged; see "Routes") and the late-delivery end-to-end
-  test is NG6h-7c; until it lands this ADR stays Proposed.
+  reads, cancel, skip-step, operator-fail) are NG6h-7b (see "Routes").
+- **End to end (NG6h-7c).** `test_full_flow_integration.py` starts at `POST /tenants/{t}/deletion` (grace 0) and runs the
+  engine over the real store, drain port and database step with fake platform and GitHub ports, with the real worker, outbox
+  and gate beside it. A delivery that arrives while the tenant is `deleting` is deferred (left `pending`, `tenant_id`
+  recorded, no handler run) and the database step clears it; one that lands after the database step's last pass is refused by
+  `tb_delete_tenant`'s backstop and cleared by the retry; one after the deletion is acknowledged and dropped (the tombstone).
+  The trail is `tenant.deletion.requested`, five `tenant.deletion.step` and `tenant.deletion.skipped` (one per
+  skipped category: the platform step's operator-owned connection data right after that step, and the unresolved
+  deliveries kept by retention at the database step) and
+  `tenant.deletion.completed`, in that order. A second test skips a failing platform step and a database step, which does
+  not finish while rows remain. Enabling a tenant that has a deletion in progress answers 409 `conflict` (the definer's
+  SQLSTATE 55000), not 500.
 - **Re-creation (decided, NG6h-1; the table moved in NG6h-3c-1).** A row in `tenant_tombstones` for
   `(host, installation_id)` (until NG6h-3c-1 a `done` row in `tenant_deletions`; or a
   `database`-step deletion row whose tenant row `tb_delete_tenant` already removed) is a tombstone: `tb_upsert_tenant` creates nothing (NG6h-1 returned NULL; NG6h-2 raises, below), and `SqlTenants` and

@@ -285,8 +285,9 @@ Both answer 200 with the `TenantOut`. They call `tb_set_tenant_disabled` and app
 reason. `reason` is required, 1 to 500 printable characters, and is stored with secret-shaped
 parts masked (`scrub_text`), so it never comes back verbatim. A failure rolls back and leaves a
 `failure` event in its own transaction. A tenant-scoped `admin` gets 403 and a tenant the caller
-has no grant on 404. Enabling a tenant with a non-terminal deletion (409) is NG6h's: the hook is
-`v_deleting` in `tb_set_tenant_disabled`.
+has no grant on 404. Enabling a tenant with a non-terminal deletion is a 409 (`conflict`, "A deletion is in progress; the
+tenant cannot be enabled") with a `failure` event: `tb_set_tenant_disabled` raises SQLSTATE 55000 (`v_deleting`)
+and `_set_disabled` maps it. A disable of such a tenant stays an idempotent success.
 
 What a disabled tenant means (ADR 0033 invariant 19), enforced in the worker and the adapter
 core, not here:
@@ -378,7 +379,26 @@ not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_
 `MUTATION_REQUESTS`, `EXPORT_REQUESTS`, `ANONYMOUS_REQUESTS`, `WINDOW_SECONDS`, `TIMEOUT_MS`,
 `EXEMPT_CIDRS`. Behind the BFF the address is the BFF's unless `TRUSTED_PROXIES` lists it.
 
-## Tenant deletion (ADR 0034, NG6h-7b)
+## Tenant deletion (ADR 0034, NG6h-7b, NG6h-7c)
+
+Routes (instance `admin` for the writes, instance `viewer` for the reads; all under `/admin/v1`):
+
+| Route | Answer |
+| --- | --- |
+| `POST /tenants/{t}/deletion` | 202 with the record; the open one if there is one (a repeat); 409 when the tenant is not disabled or the confirmation does not match; 404 unknown tenant |
+| `GET /tenant-deletions` | a page (`limit`, `cursor`), newest request first |
+| `GET /tenant-deletions/{id}` | the record; readable after the tenant row is gone; 404 unknown id |
+| `POST /tenant-deletions/{id}/cancel` | 200; only while `requested` (idempotent once cancelled); 409 later |
+| `POST /tenant-deletions/{id}/skip-step` | 200, body `{reason}`; the platform, github or database step, after a failure, while the lease is free; 409 otherwise |
+| `POST /tenant-deletions/{id}/fail` | 200, body `{reason}`; ends a stuck deletion as `failed`; 409 while a lease is live or once ended |
+
+The record (`TenantDeletionOut`) carries `id`, `tenant_id`, `host`, `installation_id`, `state`,
+`delete_platform_resources`, `not_before`, `requested_at`, `requested_by`, `counts`, `skipped`, `attempts`,
+`last_error_code`, `updated_at` and `hint`. `hint` is a fixed sentence (`views.UNINSTALL_HINT`) saying what the
+installation's admins still have to do outside trustbridge: uninstall the GitHub App, because until then its events
+for the installation are acknowledged and dropped (a reinstall gets a new installation id). Webhook deliveries
+that arrive while the tenant is `deleting` are deferred and cleared by the database step (ADR 0034 "After
+deletion"); the end-to-end test is `tests/trustbridge/deletion/test_full_flow_integration.py`.
 
 `deletions.py` holds the writes (one `SECURITY DEFINER` function each: `tb_request_tenant_deletion`,
 `tb_cancel_tenant_deletion`, `tb_skip_tenant_deletion_step`, `tb_operator_fail_tenant_deletion`) and
@@ -401,7 +421,8 @@ true}` (see `deletion/README.md`).
 
 ## Not here yet
 
-- ADR 0033 stays Proposed until its acceptance review; every route it lists exists.
+- ADR 0033 stays Proposed: every route it lists exists, but its Open issues still hold cross-cutting items (the BFF
+  in front and `TRUSTED_PROXIES`, the template example routes in production, the dev realm's tenant roles).
 
 ## Don't
 
