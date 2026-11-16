@@ -306,6 +306,7 @@ def _install_admin(  # noqa: PLR0913 - the collaborators main owns
         writer=writer,
         export_lag_seconds=settings.audit_export_lag_seconds,
         max_body_bytes=settings.admin_max_body_bytes,
+        deletion_grace_seconds=settings.deletion_grace_seconds,
         scheduler=core.scheduler,
         registration=_registration_runtime(settings, core, redis),
         credentials=build_credential_runtime(

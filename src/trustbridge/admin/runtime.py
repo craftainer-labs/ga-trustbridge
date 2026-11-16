@@ -49,6 +49,8 @@ class AdminRuntime:
     reconcile request (`POST /tenants/{t}/reconcile`; None: the route answers 503).
     `registration` is the host-registration flow (None: its routes answer 503). `credentials` is
     the credential core of the rotate route (None without a database: 503).
+    `deletion_grace_seconds` (`DELETION_GRACE_SECONDS`) is how long a deletion request waits
+    before it can start (0: no wait); the caller cannot set it.
     """
 
     limits: AdminLimits
@@ -62,6 +64,7 @@ class AdminRuntime:
     scheduler: ReconcileScheduler | None = None
     registration: RegistrationRuntime | None = None
     credentials: CredentialRuntime | None = None
+    deletion_grace_seconds: int = 0
 
 
 def build_limits(settings: TrustbridgeSettings, counter: WindowCounter) -> AdminLimits:

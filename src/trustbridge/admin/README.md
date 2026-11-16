@@ -61,10 +61,12 @@ grant, *tenant* means a grant on that tenant or an instance grant.
 | `POST /tenants/{t}/credentials/{adapter}/{scope_key}/rotate` | `operator`, tenant | Credential rotation |
 | `POST /hosts/{host}/registration`, `/registration/complete` | `operator`, instance | Host registration |
 | `POST /hosts/{host}/registration/manual` | `admin`, instance | Host registration |
+| `GET /tenant-deletions`, `/tenant-deletions/{id}` | `viewer`, instance | Tenant deletion |
+| `POST /tenants/{t}/deletion` | `admin`, instance (`instance_only`, like disable) | Tenant deletion |
+| `POST /tenant-deletions/{id}/cancel`, `/skip-step`, `/fail` | `admin`, instance | Tenant deletion |
 
-Not built: `GET /tenant-deletions*`, `POST /tenants/{t}/deletion` and the cancel and skip-step
-routes (NG6h, ADR 0034), any write of adapter connection data (decided: operator-only), and a
-policies endpoint (no table). `docs/openapi/admin-v1.json` is the committed contract.
+Not built: any write of adapter connection data (decided: operator-only), and a
+policies endpoint (no table). The tenant-deletion routes (ADR 0034, NG6h-7b) are below. `docs/openapi/admin-v1.json` is the committed contract.
 
 ## Routes (v1, read side)
 
@@ -376,12 +378,30 @@ not use up each other's budget. Settings `ADMIN_RATE_LIMIT_*`: `ENABLED`, `READ_
 `MUTATION_REQUESTS`, `EXPORT_REQUESTS`, `ANONYMOUS_REQUESTS`, `WINDOW_SECONDS`, `TIMEOUT_MS`,
 `EXEMPT_CIDRS`. Behind the BFF the address is the BFF's unless `TRUSTED_PROXIES` lists it.
 
+## Tenant deletion (ADR 0034, NG6h-7b)
+
+`deletions.py` holds the writes (one `SECURITY DEFINER` function each: `tb_request_tenant_deletion`,
+`tb_cancel_tenant_deletion`, `tb_skip_tenant_deletion_step`, `tb_operator_fail_tenant_deletion`) and
+`queries.tenant_deletions` / `tenant_deletion` the reads of the host-scoped `tenant_deletions` table
+(outside row-level security; the lease, holder, fence, retry time and cursor columns are never
+selected). `views.error_code`, `skipped_entries` and `deletion_counts_view` hold what the record view
+may show: a short failure code (never the message), and `skipped` entries and `counts` with short,
+non-secret keys and scalar values. `POST /tenants/{t}/deletion` answers 202 with the record (the
+open one, if there is one) and takes `{host, installation_id, organization, reason,
+delete_platform_resources}` only: `not_before` is the server's (`DELETION_GRACE_SECONDS`, carried as
+`AdminRuntime.deletion_grace_seconds`) and a body that names it is a 422. The other writes find the
+record first, then run in `tenant_context(<its tenant>)` (the audit insert policy admits only the
+context tenant), apply the change, append the event and re-read the record in one transaction. An
+unknown id is a 404 with a tenant-less `failure` event; a wrong state is a 409 (`conflict`) with a
+`failure` event for the tenant, both with fixed reason codes. Events: `tenant.deletion_requested`,
+`tenant.deletion_cancelled`, `tenant.deletion_step_skipped` and `tenant.deletion_failed`
+(`resource_type` `tenant_deletion`, the `deletion` shape: ids, states, the step and the scrubbed
+reason, never the organisation login). Skipping `database` sets the cursor `{"operator_skipped":
+true}` (see `deletion/README.md`).
+
 ## Not here yet
 
-- `GET /tenant-deletions`, `/tenant-deletions/{id}`: there is no `tenant_deletions` table
-  (ADR 0034); NG6h.
-- The tenant-deletion `POST`s (NG6h). The reconcile set is consumed by the reconciler (NG5r).
-- ADR 0033 stays Proposed until the mutating routes (NG6e) and the deletion reads (NG6h) exist.
+- ADR 0033 stays Proposed until its acceptance review; every route it lists exists.
 
 ## Don't
 

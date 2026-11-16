@@ -429,6 +429,72 @@
         "title": "CredentialPage",
         "type": "object"
       },
+      "DeletionReasonIn": {
+        "additionalProperties": false,
+        "description": "The body of `POST /tenant-deletions/{id}/skip-step` and `/fail`: why the operator acts.\n\nThe reason is recorded in the audit event (secret-shaped parts masked), not in the record.",
+        "properties": {
+          "reason": {
+            "description": "Why (1 to 500 printable characters); stored with secret-shaped parts masked",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "DeletionReasonIn",
+        "type": "object"
+      },
+      "DeletionRequestIn": {
+        "additionalProperties": false,
+        "description": "The body of `POST /tenants/{t}/deletion`: the typed confirmation, the reason and the flag.\n\n`host`, `installation_id` and `organization` must equal the tenant's (the organisation is\ncompared without regard to case); they are checked and not stored. There is no `not_before`:\nthe server computes it from its configured grace window, and a body that names it is a 422.",
+        "properties": {
+          "delete_platform_resources": {
+            "default": false,
+            "description": "Also delete the platform projects and repositories (default: credentials and trust only)",
+            "title": "Delete Platform Resources",
+            "type": "boolean"
+          },
+          "host": {
+            "description": "The tenant's host name",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Host",
+            "type": "string"
+          },
+          "installation_id": {
+            "description": "The tenant's GitHub installation id",
+            "exclusiveMinimum": 0.0,
+            "maximum": 9.223372036854776e+18,
+            "title": "Installation Id",
+            "type": "integer"
+          },
+          "organization": {
+            "description": "The tenant's organisation login",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Organization",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why (1 to 500 printable characters); stored with secret-shaped parts masked",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "host",
+          "installation_id",
+          "organization"
+        ],
+        "title": "DeletionRequestIn",
+        "type": "object"
+      },
       "DeliveryDetailOut": {
         "description": "One delivery. `payload` is the stored body parsed as JSON, only for an `operator`.\n\nNever the headers. Null for a `viewer`, after the body was purged (retention) or when the\nstored body is not JSON.",
         "properties": {
@@ -1338,6 +1404,145 @@
           "manual_action"
         ],
         "title": "RotationOut",
+        "type": "object"
+      },
+      "TenantDeletionOut": {
+        "description": "A tenant deletion (ADR 0034): the record without its lease, holder, fence or cursor.\n\n`counts` maps a category to what was removed so far and `skipped` lists what was left behind\nand why (each entry has a `category` and a `reason`; an operator's skip also names the\n`step` and who acknowledged it). `attempts` counts the failed attempts of the current step\nand `last_error_code` is a short class name of the last failure, never its message.\n`hint` says what the operator still has to do outside trustbridge.",
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "delete_platform_resources": {
+            "title": "Delete Platform Resources",
+            "type": "boolean"
+          },
+          "hint": {
+            "title": "Hint",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "installation_id": {
+            "title": "Installation Id",
+            "type": "integer"
+          },
+          "last_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error Code"
+          },
+          "not_before": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Not Before"
+          },
+          "requested_at": {
+            "format": "date-time",
+            "title": "Requested At",
+            "type": "string"
+          },
+          "requested_by": {
+            "title": "Requested By",
+            "type": "string"
+          },
+          "skipped": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Skipped",
+            "type": "array"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "host",
+          "installation_id",
+          "state",
+          "delete_platform_resources",
+          "not_before",
+          "requested_at",
+          "requested_by",
+          "counts",
+          "skipped",
+          "attempts",
+          "last_error_code",
+          "updated_at",
+          "hint"
+        ],
+        "title": "TenantDeletionOut",
+        "type": "object"
+      },
+      "TenantDeletionPage": {
+        "description": "A page of tenant deletions, newest request first.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TenantDeletionOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "TenantDeletionPage",
         "type": "object"
       },
       "TenantOut": {
@@ -3236,6 +3441,559 @@
         "summary": "Get Openapi Spec"
       }
     },
+    "/admin/v1/tenant-deletions": {
+      "get": {
+        "description": "Tenant deletions, newest request first: state, counts, what was skipped and the last\nfailure's code. Never the lease, holder, fence or cursor.",
+        "operationId": "list_tenant_deletions_admin_v1_tenant_deletions_get",
+        "parameters": [
+          {
+            "description": "Page size (1 to 200)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Page size (1 to 200)",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque cursor",
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDeletionPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "List Tenant Deletions"
+      }
+    },
+    "/admin/v1/tenant-deletions/{deletion_id}": {
+      "get": {
+        "description": "One tenant deletion (readable after the tenant row is gone, unlike a tenant path).",
+        "operationId": "get_tenant_deletion_admin_v1_tenant_deletions__deletion_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deletion_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deletion Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDeletionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Get Tenant Deletion"
+      }
+    },
+    "/admin/v1/tenant-deletions/{deletion_id}/cancel": {
+      "post": {
+        "description": "Cancel a deletion before its first destructive step (instance `admin`).\n\nOnly a deletion still `requested` (including one waiting for its grace window) can be\ncancelled; later it is a 409. The tenant stays disabled and a new request makes a new\nrecord. Idempotent: a cancelled deletion is a 200 no-op.",
+        "operationId": "cancel_tenant_deletion_admin_v1_tenant_deletions__deletion_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deletion_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deletion Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDeletionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Cancel Tenant Deletion"
+      }
+    },
+    "/admin/v1/tenant-deletions/{deletion_id}/fail": {
+      "post": {
+        "description": "End a stuck deletion as `failed` (instance `admin`), for the operator to resolve.\n\nRefused while an engine holds the lease, for a deletion that has ended, and for one whose\ntenant row is already gone (that one can only finish). The tenant stays disabled and a new\nrequest makes a new record.",
+        "operationId": "fail_tenant_deletion_admin_v1_tenant_deletions__deletion_id__fail_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deletion_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deletion Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeletionReasonIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDeletionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Fail Tenant Deletion"
+      }
+    },
+    "/admin/v1/tenant-deletions/{deletion_id}/skip-step": {
+      "post": {
+        "description": "Acknowledge that a failing step is left incomplete and move on (instance `admin`).\n\nOnly the `platform`, `github` or `database` step, only after it has failed at least once, and\nonly while no engine holds the lease. The record gains a `skipped` entry naming the step and\nwho acknowledged it, and the next step runs. Skipping `database` makes the deletion go\nstraight to removing the tenant row, which still waits until no tenant row is left.",
+        "operationId": "skip_tenant_deletion_step_admin_v1_tenant_deletions__deletion_id__skip_step_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deletion_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deletion Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeletionReasonIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDeletionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Skip Tenant Deletion Step"
+      }
+    },
     "/admin/v1/tenants": {
       "get": {
         "description": "The tenants the caller may read, ordered by id.",
@@ -4317,6 +5075,122 @@
           }
         ],
         "summary": "Rotate Credential"
+      }
+    },
+    "/admin/v1/tenants/{tenant_id}/deletion": {
+      "post": {
+        "description": "Request the irreversible deletion of a tenant's data (instance `admin`).\n\nThe tenant must be disabled and the body must echo its host, installation id and organisation\nlogin (checked, not stored). The record is written before any step runs and the deletion\nstarts when the reconciler claims it, after the server's grace window if one is configured\n(`not_before`; it is not settable here). Idempotent: while a deletion of the tenant is open\nthe same record is returned. The record says the App must be uninstalled.",
+        "operationId": "request_tenant_deletion_admin_v1_tenants__tenant_id__deletion_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeletionRequestIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDeletionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemOut"
+                }
+              }
+            },
+            "description": "Problem Details (application/problem+json)"
+          }
+        },
+        "security": [
+          {
+            "_ResourceServerBearer": []
+          }
+        ],
+        "summary": "Request Tenant Deletion"
       }
     },
     "/admin/v1/tenants/{tenant_id}/disable": {

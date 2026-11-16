@@ -60,6 +60,11 @@ PLAN: tuple[tuple[str, str], ...] = (
 """`(table, category)` in deletion order. The category is the name in `counts`: it avoids the admin
 view's secret words (`has_secret_word`), which the table names `credential_*` would not."""
 
+OPERATOR_SKIPPED = "operator_skipped"
+"""The cursor key `tb_skip_tenant_deletion_step` sets when an admin skips the database step.
+
+The batches then do not run again; `tb_delete_tenant`, which still refuses while a row is left,
+decides whether the deletion can finish."""
 UNRESOLVED_CATEGORY = "webhook_bodies_unresolved"
 RETENTION_ONLY = "retention_only"
 
@@ -148,6 +153,8 @@ class SqlDatabaseStep:
     async def run(self, ctx: StepContext) -> StepOutcome:
         """Clear one batch of the cursor's table, then move on when the table is empty."""
         record = ctx.record
+        if record.step_cursor.get(OPERATOR_SKIPPED) is True:
+            return StepOutcome()  # an admin skipped the batches: go on to remove the tenant row
         index, before = _position(record.step_cursor)
         table, category = PLAN[index]
         removed, more, unresolved = await self._pass(ctx, table, record.host)

@@ -34,9 +34,8 @@ def test_the_spec_lists_only_admin_routes_and_needs_a_token() -> None:
     assert spec == json.loads(SNAPSHOT.read_text())
 
 
-def test_the_snapshot_documents_every_read_route_of_adr_0033() -> None:
-    """The v1 read side is complete except `/tenant-deletions` (NG6h, ADR 0034); the only
-    writes so far are tenant disable and enable (NG6e)."""
+def test_the_snapshot_documents_every_route_of_adr_0033_and_0034() -> None:
+    """The v1 read side, the mutating routes of NG6e and the tenant-deletion routes (NG6h-7b)."""
     paths = set(json.loads(SNAPSHOT.read_text())["paths"])
     base = "/admin/v1"
     assert {
@@ -68,6 +67,12 @@ def test_the_snapshot_documents_every_read_route_of_adr_0033() -> None:
             "/hosts/{host}/registration/complete",
             "/hosts/{host}/registration/manual",
             "/tenants/{tenant_id}/credentials/{adapter}/{scope_key}/rotate",
+            "/tenants/{tenant_id}/deletion",
+            "/tenant-deletions",
+            "/tenant-deletions/{deletion_id}",
+            "/tenant-deletions/{deletion_id}/cancel",
+            "/tenant-deletions/{deletion_id}/skip-step",
+            "/tenant-deletions/{deletion_id}/fail",
         )
     } == paths
 

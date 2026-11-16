@@ -23,12 +23,19 @@ class Action(StrEnum):
     OIDC_TRUST_REMOVE = "oidc_trust.remove"
     # Written by the database's own purge function (migration e5c9a37d2b18).
     AUDIT_PURGE = "audit.purge"
-    # The deletion engine's own events (ADR 0034, NG6h-4a-2). `tenant.deletion.requested` and
-    # `.cancelled` belong to the request path (the admin routes, NG6h-7b).
+    # The deletion engine's own events (ADR 0034, NG6h-4a-2): dotted, written by the reconciler.
     TENANT_DELETION_STEP = "tenant.deletion.step"
     TENANT_DELETION_SKIPPED = "tenant.deletion.skipped"
     TENANT_DELETION_COMPLETED = "tenant.deletion.completed"
     TENANT_DELETION_FAILED = "tenant.deletion.failed"
+    # The admin routes' events (ADR 0034, NG6h-7b), written in the transaction of the change. The
+    # two operator names are the user's (G-api, 2026-11-16); `requested` and `cancelled` follow
+    # them. `tenant.deletion_failed` is the operator's `fail`; the engine's own non-retryable
+    # failure stays `tenant.deletion.failed`.
+    TENANT_DELETION_REQUESTED = "tenant.deletion_requested"
+    TENANT_DELETION_CANCELLED = "tenant.deletion_cancelled"
+    TENANT_DELETION_STEP_SKIPPED = "tenant.deletion_step_skipped"
+    TENANT_DELETION_OPERATOR_FAILED = "tenant.deletion_failed"
     # Deferred: the admin API (NG6d, NG6e), host registration.
     AUDIT_EXPORT = "audit.export"
     TENANT_DISABLE = "tenant.disable"

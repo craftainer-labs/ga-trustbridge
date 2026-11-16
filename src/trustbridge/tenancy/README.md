@@ -103,7 +103,7 @@ app role keeps `SELECT` only, `search_path` pinned to `pg_catalog, public, pg_te
 skips terminal, future `not_before` and backed-off rows, `SKIP LOCKED`), `tb_renew_`, `tb_release_`,
 `tb_retry_` (records `last_error`, counts `attempts`, sets `retry_at`), `tb_advance_` (one step along
 `requested`, `draining`, `platform`, `github`, `database`), `tb_fail_` (`failed`, always with the lease),
-`tb_operator_fail_` (`failed` by an operator: no lease of its own, refused with `TB003` while a live
+`tb_skip_tenant_deletion_step` (migration `2c8e5b1f7d34`, NG6h-7b: an operator's audited skip of a failed `platform`, `github` or `database` step, refused while a live lease is held), `tb_operator_fail_` (`failed` by an operator: no lease of its own, refused with `TB003` while a live
 one is held; the actor lands in `last_error`; granted to `trustbridge_app`, the only runtime role
 (ADR 0031), which also serves the admin API), `tb_cancel_` (`requested` only) and `tb_finish_` (`done` and the
 `tenant_tombstones` row, only after the tenant row is gone). Every guarded call needs the live lease, judged by `clock_timestamp()` (`TB003`);

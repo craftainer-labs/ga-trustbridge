@@ -100,6 +100,12 @@ ALLOW_LISTS: Mapping[str, frozenset[str]] = {
             "count",
             "attempts",
             "error_code",
+            # NG6h-7b: the request (ids and the flag; never the organisation login) and the
+            # operator's skip, cancel and fail (`reason` is the operator's text, scrubbed).
+            "host",
+            "installation_id",
+            "delete_platform_resources",
+            "not_before",
         }
     ),
     "authz_denial": frozenset(
