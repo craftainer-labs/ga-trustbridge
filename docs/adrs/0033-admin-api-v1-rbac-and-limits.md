@@ -228,7 +228,11 @@ The numbers are starting points to measure with the UI.
   role), generated from the admin router only (FastAPI `get_openapi` with that router's
   routes, so the template's example routes and its CRUD stay out), plus a committed snapshot
   (`docs/openapi/admin-v1.json`) with a **drift test** that fails when the generated spec
-  differs from the snapshot. The snapshot is attached to each release.
+  differs from the snapshot. The snapshot is **planned** to be attached to each
+  release as an asset: the release workflow is template-owned (`release.yml`, "replace" tier), so
+  the change is a template one: its `release` job's `gh release create` would add
+  `docs/openapi/admin-v1.json` through an instance hook (for example a `make release-assets` step
+  that copies the file into `dist/`); until then no job attaches it (NFR-0032's gaps).
 
 **Endpoint list.** Base `/admin/v1`; `{t}` is a tenant id. Roles are the four of decision 2.
 

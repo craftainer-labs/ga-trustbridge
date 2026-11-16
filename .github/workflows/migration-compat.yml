@@ -14,6 +14,16 @@ on:
     paths:
       - alembic/versions/**
       - src/app/models/**
+      # trustbridge's own tables: its SQLAlchemy models and the raw SQL (definer
+      # functions, deletion SQL) its migrations must stay compatible with, and the
+      # migration harness. Narrow on purpose: docs-only PRs still skip.
+      - src/trustbridge/**/models.py
+      - src/trustbridge/**/sql.py
+      - src/trustbridge/**/sql_store.py
+      - src/trustbridge/migrations/**
+      - src/trustbridge/worker/schema.py
+      - alembic/**
+      - alembic.ini
       # craftainer-crud's models (revision table, base columns) arrive as a
       # version bump in the lockfile now that the package is published.
       - uv.lock
