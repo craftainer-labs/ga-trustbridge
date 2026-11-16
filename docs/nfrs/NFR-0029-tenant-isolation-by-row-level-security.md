@@ -5,7 +5,7 @@
 Accepted. Release N ("expand": the tenant context, the definer functions and inert policies) is
 implemented; `REQUIRED_SCHEMA_VERSION` is still 1. The release N+1 "enforce" migration
 (`ENABLE` and `FORCE ROW LEVEL SECURITY` on the tenant tables including `github_environments`, `schema_compat` 2) has not
-shipped, so until it does the isolation of those six tables rests on the application's tenant
+shipped, so until it does the isolation of the tenant tables rests on the application's tenant
 context and not yet on Postgres. `audit_events` is the exception: it is forced from its own
 release ([NFR-0031](NFR-0031-audit-log-is-append-only-complete-and-exportable.md)).
 
@@ -18,7 +18,8 @@ Security (tenant isolation, least privilege), deployability.
 - **Isolation in the database.** A tenant is a GitHub installation. For the tenant-owned tables
   (`tenants`, `tenant_repositories`, `scope_leases`, `adapter_resources`, `adapter_credentials`,
   `credential_operations`, the six of [ADR 0031](../adrs/0031-tenancy-and-row-level-security.md),
-  and `github_environments`, added later by NG6h-6a with the same inert policies), a statement run by the app role
+  and `github_environments`, added later by NG6h-6a with `tenant_isolation` and `owner_all` policies
+  created before enforcement), a statement run by the app role
   inside `tenant_context(A)` sees and writes only tenant A's rows. With no context it sees no row
   and every write fails. The app role is neither the owner, a superuser nor `BYPASSRLS`, and
   never owns a tenant-owned table.
@@ -88,5 +89,8 @@ stable `v*` release tag exists (the repository has none today) or while the late
 previous release; the release N+1 enforce migration and the test that N+1 code refuses to start
 against `schema_compat` 1 do not exist yet. The same caveat applies wherever [NFR-0031](NFR-0031-audit-log-is-append-only-complete-and-exportable.md)
 and [NFR-0034](NFR-0034-tenant-data-deletion-is-resumable-audited-and-complete.md) cite the job.
-`github_environments` is covered by the policy-existence list in `test_rls_integration.py` but
-has no isolation test of its own.
+`github_environments` is covered by the policy-existence list in `test_rls_integration.py` and,
+with RLS enabled by hand, by the deletion flow tests (`tests/trustbridge/deletion/test_flow_integration.py`),
+but has no isolation test of its own and is not part of the ADR 0031 invariants or of the
+enforce migration, which does not exist yet. The compat job's path filter lists `src/app/models/**`
+and not `src/trustbridge`, so a model-only change there does not trigger it.
