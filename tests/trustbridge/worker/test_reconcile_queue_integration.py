@@ -135,7 +135,7 @@ async def test_the_request_id_is_kept_across_a_reclaim_and_removed_by_the_ack() 
         request_id = await queue.request_id(first)
         assert request_id is not None
         assert await queue.request_id(first) == request_id
-        assert await queue.request_id(replace(first, token="someone-else")) is None
+        assert await queue.request_id(replace(first, token=uuid4().hex)) is None
         assert await queue.reclaim(NOW + timedelta(seconds=TTL + 1), TTL) == 1
         assert await queue.request_id(first) is None  # the old holder lost its claim
         (second,) = await queue.claim(NOW + timedelta(seconds=TTL + 2), 10)
