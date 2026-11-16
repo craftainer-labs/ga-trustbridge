@@ -1346,3 +1346,131 @@ async def test_the_idempotency_migration_rebuilds_an_invalid_index(fresh_db: Db)
     up = await asyncio.to_thread(_alembic, fresh_db.name, "upgrade", "head")
     assert up.returncode == 0, up.stderr[-2000:]
     assert await _index_state(fresh_db) is True
+
+
+# --- NG5r-d: the internal event key (at-least-once writers) ---------------------------------
+
+EVENT_KEY_INDEX = "ux_audit_events_event_key"
+BEFORE_EVENT_KEY = "2c8e5b1f7d34"  # the revision before 3d7f1b9c5e82
+
+
+async def _keyed_rows(db: Db, tenant: UUID) -> list[Any]:
+    async with db.owner() as session:
+        return list(
+            (
+                await session.execute(
+                    text("SELECT action, event_key FROM audit_events WHERE tenant_id = :t"),
+                    {"t": tenant},
+                )
+            ).all()
+        )
+
+
+async def test_a_second_write_with_the_same_event_key_stores_one_row(db: Db) -> None:
+    """Under RLS as the app role in the tenant's context: the retry inserts nothing."""
+    tenant = uuid4()
+    first = await _write(db, tenant, event_key="req-1")
+    second = await _write(db, tenant, event_key="req-1")
+    assert first is not None
+    assert second is None
+    assert await _keyed_rows(db, tenant) == [("tenant.disable", "req-1")]
+
+
+async def test_the_event_key_is_scoped_to_the_tenant_and_the_action(db: Db) -> None:
+    """Only the full (tenant, action, key) triple collides; no key is never deduplicated."""
+    tenant, other = uuid4(), uuid4()
+    await _write(db, tenant, event_key="req-1")
+    await _write(db, tenant, event_key="req-2")
+    await _write(db, tenant, event_key="req-1", action="tenant.enable")
+    await _write(db, other, event_key="req-1")
+    assert len(await _keyed_rows(db, tenant)) == 3
+    assert len(await _keyed_rows(db, other)) == 1
+    assert all([await _write(db, tenant) for _ in range(2)])  # no key: always inserts
+    assert len(await _keyed_rows(db, tenant)) == 5
+
+
+async def test_an_event_key_does_not_change_the_webhook_key_or_the_primary_key(db: Db) -> None:
+    """The webhook path is unchanged, and a primary-key conflict on a keyed event stays loud."""
+    tenant = uuid4()
+    assert await _write(db, tenant, action="tenant.sync", on_behalf_of=_DELIVERY)
+    assert await _write(db, tenant, action="tenant.sync", on_behalf_of=_DELIVERY) is None
+    event = _event(tenant, event_key="req-9")
+    async with tenant_session(db.app, tenant) as session, session.begin():
+        await append(session, event)
+    with pytest.raises(DBAPIError, match="pk_audit_events"):
+        async with tenant_session(db.app, tenant) as session, session.begin():
+            await append(session, replace(event, event_key="req-10"))
+
+
+async def test_the_event_key_is_never_exported_or_read_back(db: Db) -> None:
+    """Neither the NDJSON export (tenant and instance scope) nor a listing carries the key."""
+    tenant = uuid4()
+    await _write(db, tenant, event_key="secret-key-1")
+    await _write(db, tenant, event_key="secret-key-1")
+    for lines in (await _export(db, tenant, 0.0), await _export(db, None, 0.0)):
+        mine = [json.loads(line) for line in lines if str(tenant).encode() in line]
+        assert len(mine) == 1
+        assert list(mine[0]) == COLUMNS
+        assert all(b"event_key" not in line and b"secret-key-1" not in line for line in lines)
+    [record] = await _tenant_events(db, tenant)
+    assert "event_key" not in record.to_json()
+
+
+async def test_the_reconcile_audit_writes_one_event_per_request_id(db: Db) -> None:
+    """The real duty's writer: the same request id twice is one row, a new id is a second."""
+    tenant = uuid4()
+    audit = ReconcileAudit(AuditWriter(db.app))
+    summary = ReconcileSummary(scopes_ensured=2)
+    for request_id in ("a" * 32, "a" * 32, "b" * 32):
+        await audit.settled(tenant, request_id, summary=summary)
+    assert sorted(key for _, key in await _keyed_rows(db, tenant)) == ["a" * 32, "b" * 32]
+
+
+async def test_the_event_key_migration_round_trips(fresh_db: Db) -> None:
+    """Down drops the index and the column, up rebuilds both; a second up is a no-op."""
+
+    async def state() -> tuple[bool | None, bool]:
+        async with fresh_db.admin.connect() as conn:
+            valid = (
+                await conn.execute(
+                    text(
+                        "SELECT i.indisvalid FROM pg_index i JOIN pg_class c "
+                        "ON c.oid = i.indexrelid WHERE c.relname = :n"
+                    ),
+                    {"n": EVENT_KEY_INDEX},
+                )
+            ).scalar()
+            column = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM information_schema.columns WHERE "
+                        "table_name = 'audit_events' AND column_name = 'event_key'"
+                    )
+                )
+            ).scalar_one()
+        return valid, bool(column)
+
+    assert await state() == (True, True)
+    down = await asyncio.to_thread(_alembic, fresh_db.name, "downgrade", BEFORE_EVENT_KEY)
+    _skip_if_not_permitted(down)
+    assert down.returncode == 0, down.stderr[-2000:]
+    assert await state() == (None, False)
+    # An old writer's insert (it never names the column) still works on both sides of the change.
+    tenant = uuid4()
+    await _write(fresh_db, tenant)
+    for _ in range(2):
+        up = await asyncio.to_thread(_alembic, fresh_db.name, "upgrade", "head")
+        assert up.returncode == 0, up.stderr[-2000:]
+        assert await state() == (True, True)
+    assert await _keyed_rows(fresh_db, tenant) == [("tenant.disable", None)]
+    with pytest.raises(DBAPIError, match=EVENT_KEY_INDEX):
+        await _run_owner(
+            fresh_db,
+            "INSERT INTO audit_events (id, tenant_id, actor_type, actor_sub, action, "
+            "resource_type, outcome, event_key) VALUES "
+            "(gen_random_uuid(), CAST(:t AS uuid), 'system', 'worker', 'tenant.disable', "
+            "'tenant', 'success', 'k'), "
+            "(gen_random_uuid(), CAST(:t AS uuid), 'system', 'worker', 'tenant.disable', "
+            "'tenant', 'success', 'k')",
+            t=tenant,
+        )

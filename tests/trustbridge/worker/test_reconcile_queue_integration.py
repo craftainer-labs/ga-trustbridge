@@ -34,6 +34,7 @@ async def keys() -> AsyncIterator[tuple[Redis, dict[str, str]]]:
         "INFLIGHT_SET": f"tb:reconcile:inflight:test:{suffix}",
         "CLAIMS_HASH": f"tb:reconcile:claims:test:{suffix}",
         "ATTEMPTS_HASH": f"tb:reconcile:attempts:test:{suffix}",
+        "REQUEST_IDS_HASH": f"tb:reconcile:request_ids:test:{suffix}",
     }
     originals = {name: getattr(reconcile_queue, name) for name in names}
     for name, value in names.items():
@@ -122,3 +123,25 @@ async def test_extend_restamps_only_for_the_holder_and_attempts_are_counted() ->
         assert [await queue.begin_attempt(claim) for _ in range(3)] == [1, 2, 3]
         await queue.clear_attempts(claim)
         assert await client.hlen(names["ATTEMPTS_HASH"]) == 0
+
+
+async def test_the_request_id_is_kept_across_a_reclaim_and_removed_by_the_ack() -> None:
+    """NG5r-d: one id per request, only for the claim's holder, gone with the acknowledgement."""
+    async with keys() as (client, names):
+        queue = ReconcileQueue(client)
+        tenant = str(uuid4())
+        await client.sadd(names["RECONCILE_SET"], tenant)
+        (first,) = await queue.claim(NOW, 10)
+        request_id = await queue.request_id(first)
+        assert request_id is not None
+        assert await queue.request_id(first) == request_id
+        assert await queue.request_id(replace(first, token="someone-else")) is None
+        assert await queue.reclaim(NOW + timedelta(seconds=TTL + 1), TTL) == 1
+        assert await queue.request_id(first) is None  # the old holder lost its claim
+        (second,) = await queue.claim(NOW + timedelta(seconds=TTL + 2), 10)
+        assert await queue.request_id(second) == request_id  # the reclaimed run sees the same id
+        assert await queue.ack(second) is True
+        assert await client.hlen(names["REQUEST_IDS_HASH"]) == 0
+        await client.sadd(names["RECONCILE_SET"], tenant)  # a new request, a new id
+        (third,) = await queue.claim(NOW + timedelta(seconds=TTL + 3), 10)
+        assert await queue.request_id(third) not in (None, request_id)

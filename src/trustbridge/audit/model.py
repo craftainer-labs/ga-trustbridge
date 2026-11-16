@@ -48,6 +48,11 @@ class AuditEvent:
     `id` is generated here because an insert never uses `RETURNING` (a null-tenant row is not
     selectable by the app role). `before` and `after` must already be redacted by the emitter's
     allow-list (`trustbridge.audit.redact`); this layer checks only their shape and size.
+
+    `event_key` is an internal idempotency key (NG5r-d): a tenant event carrying one is written at
+    most once per `(tenant_id, action, event_key)`, so an at-least-once writer can retry safely.
+    It is stored but never read back: it is not on `AuditRecord` and not in the export. It is
+    exclusive with `on_behalf_of` (the webhook events have their own key) and needs a `tenant_id`.
     """
 
     actor_type: ActorType
@@ -58,6 +63,7 @@ class AuditEvent:
     actor_iss: str | None = None
     tenant_id: UUID | None = None
     on_behalf_of: dict[str, Any] | None = None
+    event_key: str | None = None
     source_ip: str | None = None
     resource_id: str | None = None
     before: dict[str, Any] | None = None
@@ -84,6 +90,7 @@ class AuditEvent:
         for name, limit in TEXT_LIMITS.items():
             _check_text(name, getattr(self, name), limit)
         self._check_actor()
+        self._check_event_key()
         self._check_ids_and_version()
         _check_payload("before", self.before)
         _check_payload("after", self.after)
@@ -99,6 +106,18 @@ class AuditEvent:
                     "delivery_id": str(self.on_behalf_of["delivery_id"]),
                 },
             )
+
+    def _check_event_key(self) -> None:
+        """A key is printable text within `MAX_EVENT_KEY`, on a tenant event without a delivery."""
+        if self.event_key is None:
+            return
+        if not self.event_key:
+            raise ValueError("event_key must not be empty")
+        _check_text("event_key", self.event_key, MAX_EVENT_KEY)
+        if self.tenant_id is None:
+            raise ValueError("event_key needs a tenant_id")
+        if self.on_behalf_of is not None:
+            raise ValueError("event_key and on_behalf_of are exclusive")
 
     def _check_actor(self) -> None:
         """The actor columns agree with the actor type (and the table's check constraint)."""
@@ -148,6 +167,9 @@ MAX_SENDER_ID = 2**63 - 1
 """Largest `github_sender_id` (a signed 64-bit integer, like GitHub's ids)."""
 MAX_DELIVERY_ID = 100
 """Longest `delivery_id` in `on_behalf_of`."""
+
+MAX_EVENT_KEY = 128
+"""Longest `event_key`."""
 
 
 def _check_on_behalf_of(value: object) -> None:

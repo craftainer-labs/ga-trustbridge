@@ -5,8 +5,12 @@ things (actor `reconciler`). This module adds the one *terminal* event of the re
 `tenant.reconcile.completed` when the body ran to the end, `tenant.reconcile.failed` when the
 request was dropped (the tenant is disabled, deleting or gone; the body was stopped because the
 tenant was disabled; or it failed `TENANT_RECONCILE_MAX_ATTEMPTS` times). A run that failed and
-will be retried writes nothing, so a request has one terminal event, and the reconciler writes it
-only after its acknowledgement succeeded (see `Reconciler._reconcile_claim`).
+will be retried writes nothing, so a request has one terminal event. The reconciler writes it
+BEFORE it acknowledges the request (see `Reconciler._reconcile_claim`), keyed by the request's id
+(`ReconcileQueue.request_id`, the same for every run of one request): a crash after the write and
+before the ack runs the request again, and the second write is absorbed by the database
+(`audit.store.append`, `event_key`). The event is written at least once and stored once; it is
+never lost to a crash between the ack and the write.
 
 The payload is a fixed reason code (`FailureReason`) and counts; never an error text, a URL or a
 value. The event is written in the request's tenant context, also for a tenant that no longer
@@ -38,6 +42,7 @@ class ReconcileSummary:
 def reconcile_event(
     tenant_id: UUID,
     *,
+    event_key: str | None = None,
     reason: FailureReason | None = None,
     summary: ReconcileSummary | None = None,
     attempts: int | None = None,
@@ -64,6 +69,7 @@ def reconcile_event(
         resource_id=str(tenant_id),
         outcome=Outcome.FAILURE if failed else Outcome.SUCCESS,
         tenant_id=tenant_id,
+        event_key=event_key,
         after=project("tenant_reconcile", after),
     )
 
@@ -78,12 +84,18 @@ class ReconcileAudit:
     async def settled(
         self,
         tenant_id: UUID,
+        request_id: str,
         *,
         reason: FailureReason | None = None,
         summary: ReconcileSummary | None = None,
         attempts: int | None = None,
     ) -> None:
-        """Write one terminal event; `reason` makes it the `failed` one."""
+        """Write one terminal event; `reason` makes it the `failed` one.
+
+        `request_id` is the event's key: writing the same request's event again stores nothing.
+        """
         await self._writer.record(
-            reconcile_event(tenant_id, reason=reason, summary=summary, attempts=attempts)
+            reconcile_event(
+                tenant_id, event_key=request_id, reason=reason, summary=summary, attempts=attempts
+            )
         )

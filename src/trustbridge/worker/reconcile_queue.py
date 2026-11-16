@@ -8,9 +8,9 @@ and a stale holder cannot undo a newer claim):
 1. **claim**: `SMOVE tb:reconcile tb:reconcile:inflight <tenant_id>` and `HSET` of the claim
    (time and a per-claim token) in `tb:reconcile:claims`. Two replicas never claim the same member,
    and a crash leaves it in the inflight set, never nowhere.
-2. **ack**: only if the stored token is still the caller's: `HDEL` of the claim and `SREM` from
-   inflight. A request made again while its claim is held is a new member of the pending set, so
-   it is not lost by the ack.
+2. **ack**: only if the stored token is still the caller's: `HDEL` of the claim and of the
+   request id (below) and `SREM` from inflight. A request made again while its claim is held is a
+   new member of the pending set, so it is not lost by the ack.
 3. **reclaim**: a member that stays inflight longer than the claim TTL is moved back to the pending
    set, only if its claim entry is still the one that was listed (`HDEL` and `SMOVE` together). A
    member with no claim entry (written by nothing here, but possible after a manual edit or an
@@ -25,6 +25,13 @@ The attempts of a request live in a separate hash, `tb:reconcile:attempts` (a re
 claim entry, so the count cannot live there): `begin_attempt` adds one before the body runs and
 `clear_attempts` removes the count when the request is acknowledged. The reconciler drops a request
 whose count passes `TENANT_RECONCILE_MAX_ATTEMPTS` (poison handling, ADR 0029).
+
+The id of a request (NG5r-d) lives in `tb:reconcile:request_ids`: `request_id` returns the stored
+one or stores a new random one, only while the caller holds the claim, and the ack removes it in
+the same script. A reclaim keeps it, so every run of one request sees the same id, which is the
+key of its terminal audit event (the database ignores the second write); a request made again
+after the ack gets a new id. A request set member alone cannot be the key: it is the tenant, the
+same for every request that tenant ever makes.
 
 A slow holder whose claim was reclaimed finds out at its ack: the claim entry is gone or carries
 another token, so `ack` returns False and the caller logs it. The reconcile itself is idempotent
@@ -48,10 +55,11 @@ logger = logging.getLogger(__name__)
 INFLIGHT_SET = "tb:reconcile:inflight"
 CLAIMS_HASH = "tb:reconcile:claims"
 ATTEMPTS_HASH = "tb:reconcile:attempts"
+REQUEST_IDS_HASH = "tb:reconcile:request_ids"
 _SEP = "|"
 
-# KEYS: pending set, inflight set, claims hash. ARGV: see each script. The token is the text after
-# the first `|` of a claim entry (`<epoch>|<token>`).
+# KEYS: pending set, inflight set, claims hash, request ids hash. ARGV: see each script. The token
+# is the text after the first `|` of a claim entry (`<epoch>|<token>`).
 _CLAIM = """
 if redis.call('SMOVE', KEYS[1], KEYS[2], ARGV[1]) == 1 then
     redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
@@ -64,7 +72,17 @@ _ACK = """
 local v = redis.call('HGET', KEYS[3], ARGV[1])
 if not v or string.match(v, '^[^|]*|(.*)$') ~= ARGV[2] then return 0 end
 redis.call('HDEL', KEYS[3], ARGV[1])
+redis.call('HDEL', KEYS[4], ARGV[1])
 return redis.call('SREM', KEYS[2], ARGV[1])
+"""
+# ARGV: member, token, a new request id. The request's id (kept across reclaims, removed by the
+# ack in the same step): the stored one, or the new one when none is stored; nil when the claim
+# is no longer the caller's, so a holder that lost its claim can never leave a stale id behind.
+_REQUEST_ID = """
+local v = redis.call('HGET', KEYS[3], ARGV[1])
+if not v or string.match(v, '^[^|]*|(.*)$') ~= ARGV[2] then return false end
+redis.call('HSETNX', KEYS[4], ARGV[1], ARGV[3])
+return redis.call('HGET', KEYS[4], ARGV[1])
 """
 # ARGV: member, token
 _RELEASE = """
@@ -174,9 +192,21 @@ class ReconcileQueue:
         return claimed
 
     async def _run(self, script: str, *args: str) -> int:
-        """Run one of the scripts over the three keys; its integer reply."""
-        keys = (RECONCILE_SET, INFLIGHT_SET, CLAIMS_HASH)
-        return int(await self._r.eval(script, len(keys), *keys, *args))
+        """Run one of the scripts over the four keys; its integer reply."""
+        return int(await self._eval(script, *args) or 0)
+
+    async def _eval(self, script: str, *args: str) -> str | bytes | int | None:
+        keys = (RECONCILE_SET, INFLIGHT_SET, CLAIMS_HASH, REQUEST_IDS_HASH)
+        reply: str | bytes | int | None = await self._r.eval(script, len(keys), *keys, *args)
+        return reply
+
+    async def request_id(self, claim: Claim) -> str | None:
+        """The id of the request this claim holds (the same for every run of it).
+
+        None when the claim was reclaimed meanwhile: the caller must not act on the request.
+        """
+        reply = await self._eval(_REQUEST_ID, str(claim.tenant_id), claim.token, uuid4().hex)
+        return None if reply is None else _text(reply)
 
     async def ack(self, claim: Claim) -> bool:
         """Remove the request from inflight. False when the claim was reclaimed meanwhile."""

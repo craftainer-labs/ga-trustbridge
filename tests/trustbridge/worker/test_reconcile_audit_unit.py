@@ -76,10 +76,11 @@ async def test_the_writer_records_one_event_per_call() -> None:
 
     tenant = uuid4()
     audit: Any = ReconcileAudit(Writer())  # type: ignore[arg-type]
-    await audit.settled(tenant, summary=COUNTS)
+    await audit.settled(tenant, "req-1", summary=COUNTS)
     [event] = written
     assert event.action is Action.TENANT_RECONCILE_COMPLETED
     assert event.tenant_id == tenant
+    assert event.event_key == "req-1"
 
 
 def test_an_exhausted_request_records_its_attempt_count() -> None:

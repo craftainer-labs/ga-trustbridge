@@ -226,6 +226,20 @@ target `DO NOTHING`, so a redelivered webhook writes no second row and `append` 
 Events without `on_behalf_of` are not keyed. The upgrade refuses, changing nothing, when the
 table already holds duplicates: the log is append-only and the migration never edits history.
 
+A fourth revision (NG5r-d, `3d7f1b9c5e82`) adds an internal idempotency key for a writer that
+must not lose an event (decision of 2026-11-16: an audit trail must not silently lose events, and
+at-least-once delivery with idempotent writes is the standard outbox and consumer pattern, OWASP
+Logging Cheat Sheet). It adds the nullable `text` column `event_key` (a catalog-only change) and
+the partial unique index `ux_audit_events_event_key` on `(tenant_id, action, event_key) WHERE
+event_key IS NOT NULL`, built `CONCURRENTLY`; expand only, and the previous release's inserts
+(which never name the column) keep working. `append` inserts an event that has a key with `ON
+CONFLICT (tenant_id, action, event_key) WHERE event_key IS NOT NULL DO NOTHING` and returns `None`
+for the duplicate. The column is internal: it is not on `AuditRecord`, not in the event model
+above and not in the export. The first user is the tenant reconcile duty: it writes
+`tenant.reconcile.completed` or `.failed` before it acknowledges the request, keyed by the
+request's id, so a crash between the acknowledgement and the write can no longer lose the event
+(it is written at least once and stored once).
+
 ## User decisions (G-api, 2026-11-03)
 
 These replace the open options the first draft carried. Alternatives considered are kept in
