@@ -1351,7 +1351,7 @@ async def test_the_idempotency_migration_rebuilds_an_invalid_index(fresh_db: Db)
 # --- NG5r-d: the internal event key (at-least-once writers) ---------------------------------
 
 EVENT_KEY_INDEX = "ux_audit_events_event_key"
-BEFORE_EVENT_KEY = "2c8e5b1f7d34"  # the revision before 3d7f1b9c5e82
+BEFORE_EVENT_COLUMN = "2c8e5b1f7d34"  # the revision before 3d7f1b9c5e82
 
 
 async def _keyed_rows(db: Db, tenant: UUID) -> list[Any]:
@@ -1451,7 +1451,7 @@ async def test_the_event_key_migration_round_trips(fresh_db: Db) -> None:
         return valid, bool(column)
 
     assert await state() == (True, True)
-    down = await asyncio.to_thread(_alembic, fresh_db.name, "downgrade", BEFORE_EVENT_KEY)
+    down = await asyncio.to_thread(_alembic, fresh_db.name, "downgrade", BEFORE_EVENT_COLUMN)
     _skip_if_not_permitted(down)
     assert down.returncode == 0, down.stderr[-2000:]
     assert await state() == (None, False)
