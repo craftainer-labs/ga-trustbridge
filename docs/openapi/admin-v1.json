@@ -5079,7 +5079,7 @@
     },
     "/admin/v1/tenants/{tenant_id}/deletion": {
       "post": {
-        "description": "Request the irreversible deletion of a tenant's data (instance `admin`).\n\nThe tenant must be disabled and the body must echo its host, installation id and organisation\nlogin (checked, not stored). The record is written before any step runs and the deletion\nstarts when the reconciler claims it, after the server's grace window if one is configured\n(`not_before`; it is not settable here). Idempotent: while a deletion of the tenant is open\nthe same record is returned. The record says the App must be uninstalled.",
+        "description": "Request the irreversible deletion of a tenant's data (instance `admin`).\n\nThe tenant must be disabled and the body must echo its host, installation id and organisation\nlogin (checked, not stored). The record is written before any step runs and the deletion\nstarts when the reconciler claims it, after the server's grace window if one is configured\n(`not_before`; it is not settable here). Idempotent: while a deletion of the tenant is open\nthe same record is returned, with the flag it was first requested with (a later\nrequest cannot change it; read `delete_platform_resources` in the answer). The record says the\nApp must be uninstalled.",
         "operationId": "request_tenant_deletion_admin_v1_tenants__tenant_id__deletion_post",
         "parameters": [
           {

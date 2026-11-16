@@ -846,6 +846,7 @@ def test_not_before_is_none_without_a_window_and_now_plus_it_with_one() -> None:
         ("something went wrong: x", "error"),
         ("9bad: x", "error"),
         (": x", "error"),
+        ("ghs_secret_token", "error"),
     ],
 )
 def test_the_error_code_is_a_short_identifier_never_the_message(

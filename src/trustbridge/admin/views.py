@@ -135,7 +135,7 @@ def error_code(last_error: str | None) -> str | None:
     if last_error.startswith("operator "):
         return "operator_failed"
     head = last_error.split(":", 1)[0].strip()
-    return head if _ERROR_CLASS.fullmatch(head) else "error"
+    return head if _ERROR_CLASS.fullmatch(head) and not has_secret_word(head) else "error"
 
 
 def _entry_value(value: object) -> str | int | bool | list[int] | None:

@@ -540,7 +540,9 @@ async def request_tenant_deletion(
     login (checked, not stored). The record is written before any step runs and the deletion
     starts when the reconciler claims it, after the server's grace window if one is configured
     (`not_before`; it is not settable here). Idempotent: while a deletion of the tenant is open
-    the same record is returned. The record says the App must be uninstalled.
+    the same record is returned, with the flag it was first requested with (a later
+    request cannot change it; read `delete_platform_resources` in the answer). The record says the
+    App must be uninstalled.
     """
     action = Action.TENANT_DELETION_REQUESTED
     reason = scrub_text(body.reason, _REASON_MAX)
