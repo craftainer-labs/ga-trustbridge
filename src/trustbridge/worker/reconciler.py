@@ -24,6 +24,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from trustbridge.audit.redact import FailureReason
 from trustbridge.audit.store import purge_expired
 from trustbridge.deletion.ports import DeletionDriver, RecordPurger
 from trustbridge.github.availability import HostMonitor
@@ -34,6 +35,7 @@ from trustbridge.worker.health import Heartbeat, stale_after
 from trustbridge.worker.lease import LeaseBusy, LeaseManager
 from trustbridge.worker.models import NIL_TENANT
 from trustbridge.worker.queue import StreamQueue
+from trustbridge.worker.reconcile_audit import ReconcileAudit, ReconcileSummary
 from trustbridge.worker.reconcile_queue import Claim, ClaimLostError, Extend, ReconcileQueue
 from trustbridge.worker.relay import Clock, Relay, utcnow
 
@@ -123,8 +125,8 @@ class TenantRefusals(Protocol):
 class TenantReconciler(Protocol):
     """The tenant reconcile body (`CredentialReconciler`). Idempotent: a request can run twice."""
 
-    async def reconcile(self, tenant_id: UUID, extend: Extend) -> None:
-        """Bring the tenant's credentials to the desired state.
+    async def reconcile(self, tenant_id: UUID, extend: Extend) -> ReconcileSummary:
+        """Bring the tenant's credentials to the desired state; returns what it did (counts).
 
         `extend` re-stamps the running claim (and beats the loop's heartbeat); the body calls it
         before each write step, and it raises `ClaimLostError` when the claim was reclaimed.
@@ -178,6 +180,23 @@ class ReconcilerDeps:
     reconcile_requests: ReconcileQueue | None = None  # None: no Valkey (mock mode), no duty
     refusals: TenantRefusals | None = None  # None: no database, no duty
     tenant_reconciler: TenantReconciler | None = None  # None: mock mode, no body
+    reconcile_audit: ReconcileAudit | None = None  # None: no database, no terminal event
+
+
+_REFUSAL_REASONS = {
+    "gone": FailureReason.TENANT_GONE,
+    "deleting": FailureReason.TENANT_DELETING,
+    "disabled": FailureReason.TENANT_DISABLED,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _Settled:
+    """How a request ended: a `reason` makes it a `tenant.reconcile.failed`, else `completed`."""
+
+    reason: FailureReason | None = None
+    summary: ReconcileSummary | None = None
+    attempts: int | None = None
 
 
 class Reconciler:
@@ -360,6 +379,12 @@ class Reconciler:
         was reclaimed (`ClaimLostError` from its `extend`) stops before its next write step. A run
         starts no body after half the claim TTL (the rest of its claims go back to pending), so a
         claim never expires before its body starts.
+        Each acknowledged request then gets one terminal audit event (`ReconcileAudit`, actor
+        `reconciler`): `tenant.reconcile.completed` with the counts, or `.failed` with a fixed
+        reason code (a dropped tenant, a tenant disabled mid-run, the attempts used up). It is
+        written only after the acknowledgement succeeded, so a request whose claim was reclaimed
+        (it runs again) gets its event from the run that finishes it, never twice; a crash
+        between the acknowledgement and the write loses the event (logged when the write fails).
         Returns the number of requests acknowledged.
         """
         queue, refusals = self._d.reconcile_requests, self._d.refusals
@@ -420,11 +445,12 @@ class Reconciler:
                 refusal,
                 extra={"tenant": tenant, "reason": refusal},
             )
+            settled = _Settled(_REFUSAL_REASONS[refusal])
         elif body is None:
             await queue.release(claim)
             return False
         else:
-            await self._run_body(queue, body, claim)  # a poison request returns, to be acked
+            settled = await self._run_body(queue, body, claim)  # a poison request is acked too
         if not await queue.ack(claim):
             logger.warning(
                 "reconcile claim was reclaimed while it ran; the request runs again",
@@ -432,9 +458,30 @@ class Reconciler:
             )
         else:
             await queue.clear_attempts(claim)
+            await self._record_settled(claim, settled)
         return True
 
-    async def _run_body(self, queue: ReconcileQueue, body: TenantReconciler, claim: Claim) -> None:
+    async def _record_settled(self, claim: Claim, settled: _Settled) -> None:
+        """The terminal event of an acknowledged request; a failure is logged, never raised."""
+        audit = self._d.reconcile_audit
+        if audit is None:
+            return
+        try:
+            await audit.settled(
+                claim.tenant_id,
+                reason=settled.reason,
+                summary=settled.summary,
+                attempts=settled.attempts,
+            )
+        except Exception:
+            logger.exception(
+                "could not record the reconcile request's terminal event",
+                extra={"tenant": str(claim.tenant_id)},
+            )
+
+    async def _run_body(
+        self, queue: ReconcileQueue, body: TenantReconciler, claim: Claim
+    ) -> _Settled:
         """Run the body for a claim; a poison request is logged and left for the caller to ack.
 
         Each run counts first (a crash counts too). The request is dropped, at ERROR, when it has
@@ -449,14 +496,15 @@ class Reconciler:
                 limit,
                 extra={"tenant": str(claim.tenant_id), "attempts": limit},
             )
-            return
+            return _Settled(FailureReason.ATTEMPTS_EXCEEDED, attempts=limit)
 
         async def extend() -> None:
             self._beat("tenant-reconcile")
             if not await queue.extend(claim, self._d.clock()):
                 raise ClaimLostError(str(claim.tenant_id))
 
-        await body.reconcile(claim.tenant_id, extend)
+        summary = await body.reconcile(claim.tenant_id, extend)
+        return _Settled(summary.stopped, summary)
 
     async def trim_streams(self) -> None:
         """Trim `tb:events` below what the group acknowledged, the dead letter by age, set lag."""

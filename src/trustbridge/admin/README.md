@@ -268,7 +268,8 @@ is appended first, then the request recorded, then the transaction commits, so a
 leaves no `success` event. A disabled tenant is a 409. The reconciler's
 `tenant-reconcile` duty consumes the set (NG5r): it drops a request for a disabled tenant (ADR 0033
 invariant 19) and otherwise runs the reconcile body, unless `TENANT_RECONCILE_ENABLED` is off, when
-the request stays queued. Without a queue (no
+the request stays queued. Each processed request then gets one more event from the reconciler,
+`tenant.reconcile.completed` or `tenant.reconcile.failed` (audit README, NG5r-c). Without a queue (no
 `AdminRuntime.scheduler`) the route is a 503.
 
 ## Tenant disable and enable (NG6e-2)

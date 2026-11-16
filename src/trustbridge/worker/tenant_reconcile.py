@@ -26,6 +26,7 @@ sweep is the exception: its failure is only logged (see `_sweep_parked`).
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -46,6 +47,7 @@ from trustbridge.adapters.store import CredentialStore, LeaseLostError, TenantRe
 from trustbridge.audit.actions import SystemActor
 from trustbridge.audit.credentials import CredentialAuditObserver
 from trustbridge.audit.emit import AuditWriter
+from trustbridge.audit.redact import FailureReason
 from trustbridge.github.environments import SqlEnvironmentStore
 from trustbridge.github.installations import AppInstallationLookup
 from trustbridge.github.writer import GitHubEnvironmentInspector, GitHubOutputWriter
@@ -54,6 +56,7 @@ from trustbridge.worker.drain_deletion import SqlWritersPort
 from trustbridge.worker.github_deletion import SqlGithubPort
 from trustbridge.worker.lease import LeaseBusy, LeaseLost
 from trustbridge.worker.platform_deletion import SqlPlatformPort
+from trustbridge.worker.reconcile_audit import ReconcileSummary
 from trustbridge.worker.reconcile_queue import Extend
 
 if TYPE_CHECKING:  # runtime imports this module to compose the body
@@ -103,6 +106,31 @@ class ReconcileIncompleteError(Exception):
     """Some steps failed; the others ran. The request is retried after the claim TTL."""
 
 
+_FAILED = object()
+"""What `_guarded` returns for a step that failed."""
+
+
+@dataclass(slots=True)
+class _Run:
+    """The counts of one run of the body."""
+
+    failed: int = 0
+    operations_resumed: int = 0
+    scopes_ensured: int = 0
+    orphans_swept: int = 0
+    parked_values_swept: int = 0
+
+    def summary(self, stopped: FailureReason | None = None) -> ReconcileSummary:
+        """The counts as the body's result."""
+        return ReconcileSummary(
+            self.operations_resumed,
+            self.scopes_ensured,
+            self.orphans_swept,
+            self.parked_values_swept,
+            stopped,
+        )
+
+
 class CredentialReconciler:
     """The `TenantReconciler` over the credential core."""
 
@@ -122,12 +150,15 @@ class CredentialReconciler:
         self._tenants = tenants
         self._adapters = tuple(adapters)
 
-    async def reconcile(self, tenant_id: UUID, extend: Extend) -> None:
-        """Run the steps; `ClaimLostError` from `extend` aborts before the next write step."""
+    async def reconcile(self, tenant_id: UUID, extend: Extend) -> ReconcileSummary:
+        """Run the steps; `ClaimLostError` from `extend` aborts before the next write step.
+
+        Returns the counts; a tenant disabled mid-run ends the body early with `stopped` set.
+        """
         tenant = await self._tenants.get_tenant(tenant_id)
-        failed = 0
+        run = _Run()
         try:
-            failed += await self._resume(tenant_id, extend)
+            await self._resume(tenant_id, extend, run)
             by_adapter = {
                 a: await self._store.list_credentials(tenant_id, a) for a in self._adapters
             }
@@ -135,59 +166,68 @@ class CredentialReconciler:
             for adapter, rows in by_adapter.items():
                 for row in rows:
                     await extend()
-                    failed += await self._guarded(
+                    done = await self._guarded(
                         self._core.ensure_scope(tenant, adapter, row.scope, scopes),
+                        run,
                         tenant_id,
                         f"{adapter} ensure_scope",
                     )
+                    run.scopes_ensured += done is not _FAILED
             for adapter, rows in by_adapter.items():
                 if rows:
                     await extend()
-                    failed += await self._guarded(
+                    swept = await self._guarded(
                         self._core.sweep_orphans(tenant, adapter),
+                        run,
                         tenant_id,
                         f"{adapter} sweep_orphans",
                     )
-            await self._sweep_parked(tenant_id, extend)
+                    run.orphans_swept += len(swept) if isinstance(swept, list) else 0
+            await self._sweep_parked(tenant_id, extend, run)
         except TenantDisabledError:
             logger.info(
                 "tenant reconcile stopped: tenant is disabled", extra={"tenant": str(tenant_id)}
             )
-            return
-        if failed:
-            msg = f"{failed} reconcile step(s) failed"
+            return run.summary(FailureReason.TENANT_DISABLED)
+        if run.failed:
+            msg = f"{run.failed} reconcile step(s) failed"
             raise ReconcileIncompleteError(msg)
+        return run.summary()
 
-    async def _sweep_parked(self, tenant_id: UUID, extend: Extend) -> None:
+    async def _sweep_parked(self, tenant_id: UUID, extend: Extend, run: _Run) -> None:
         """The global parked-value sweep, at most once per interval.
 
         Housekeeping for the instance, not for this tenant: a failure is logged (a warning) and
         does not fail, or after the attempts drop, this tenant's request. The interval counts from
         the attempt, so an outage costs one sweep a minute, not one per request; the next interval
-        retries it.
+        retries it. A failed sweep is not counted in `run.failed`.
         """
         if not self._sweep.due():
             return
         await extend()
         self._sweep.done()
-        await self._guarded(self._core.sweep_parked_values(), tenant_id, "sweep_parked_values")
+        removed = await self._guarded(
+            self._core.sweep_parked_values(), _Run(), tenant_id, "sweep_parked_values"
+        )
+        run.parked_values_swept += removed if isinstance(removed, int) else 0
 
-    async def _resume(self, tenant_id: UUID, extend: Extend) -> int:
-        """Resume the tenant's open operations; the number that failed."""
-        failed = 0
+    async def _resume(self, tenant_id: UUID, extend: Extend, run: _Run) -> None:
+        """Resume the tenant's open operations."""
         for op in await self._store.list_open_operations():
             if op.tenant_id != tenant_id:
                 continue
             await extend()
-            failed += await self._guarded(
-                self._core.resume_operation(op.id), tenant_id, f"{op.adapter} resume_operation"
+            resumed = await self._guarded(
+                self._core.resume_operation(op.id), run, tenant_id, f"{op.adapter} resume_operation"
             )
-        return failed
+            run.operations_resumed += resumed is not _FAILED and resumed is not None
 
-    async def _guarded(self, step: Awaitable[object], tenant_id: UUID, name: str) -> int:
-        """Await `step`; 1 when it failed with a platform, GitHub or lease error, else 0."""
+    async def _guarded[T](
+        self, step: Awaitable[T], run: _Run, tenant_id: UUID, name: str
+    ) -> T | object:
+        """Await `step`; on a platform, GitHub or lease error count it and return `_FAILED`."""
         try:
-            await step
+            return await step
         except _STEP_ERRORS as exc:
             # the type only: an adapter's message is not for the log of a loop
             logger.warning(
@@ -196,8 +236,8 @@ class CredentialReconciler:
                 type(exc).__name__,
                 extra={"tenant": str(tenant_id)},
             )
-            return 1
-        return 0
+            run.failed += 1
+            return _FAILED
 
 
 def _core_deps(

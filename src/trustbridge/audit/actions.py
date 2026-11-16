@@ -35,6 +35,10 @@ class Action(StrEnum):
     TENANT_DELETION_CANCELLED = "tenant.deletion.cancelled"
     TENANT_DELETION_STEP_SKIPPED = "tenant.deletion.step_skipped"
     TENANT_DELETION_OPERATOR_FAILED = "tenant.deletion.operator_failed"
+    # The reconciler's summary of one processed tenant reconcile request (NG5r-c); user decision,
+    # 2026-11-16. Unlike `tenant.reconcile` (the admin's request), these are written by the duty.
+    TENANT_RECONCILE_COMPLETED = "tenant.reconcile.completed"
+    TENANT_RECONCILE_FAILED = "tenant.reconcile.failed"
     # Deferred: the admin API (NG6d, NG6e), host registration.
     AUDIT_EXPORT = "audit.export"
     TENANT_DISABLE = "tenant.disable"
