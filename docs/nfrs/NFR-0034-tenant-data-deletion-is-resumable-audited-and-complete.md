@@ -31,7 +31,7 @@ Compliance (data erasure, SOC 2 / ISO 27001 enablers), reliability, auditability
   hold no organisation login or tenant content. The tenant's other audit rows stay until
   `AUDIT_RETENTION_DAYS` ([NFR-0031](NFR-0031-audit-log-is-append-only-complete-and-exportable.md)).
 - **Tombstone.** A deleted tenant whose installation still exists is not re-created: its events
-  are acknowledged and dropped, and the App must be uninstalled.
+  are acknowledged and dropped, keeping no body or headers, and the App must be uninstalled.
 - **Isolation.** Other tenants' rows and the host-scoped tables are unchanged, and the engine
   runs only inside the deleted tenant's context ([NFR-0029](NFR-0029-tenant-isolation-by-row-level-security.md)).
 
@@ -97,7 +97,8 @@ Integration tests run as the app role against a real Postgres, in the Checks wor
   core and the connection data the fakes hold (read only through the drain port and the connection
   names), in webhook headers and bodies, in the request reason and in a failing step's
   error, runs a whole deletion, and asserts it is in no log record, response, audit row, deletion
-  record or delivery row.
+  record or delivery row, including the delivery dropped after the deletion (its body and headers
+  are cleared; unit test `test_a_tombstoned_installations_delivery_is_acknowledged_and_dropped`).
 
 Known gaps: the plan names the retry cost of a long tenant
 disable as a measurement owed to NG6g, not yet measured; the stale-claim ABA residual of the

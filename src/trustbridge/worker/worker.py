@@ -291,6 +291,9 @@ class Worker:
                 row.event,
                 extra={"host": row.host, "delivery_id": row.delivery_id},
             )
+            # Data minimisation (ADR 0034 "After deletion"): the dropped delivery keeps no
+            # payload, only what the replay dedupe and the metadata need.
+            await self._d.store.clear_payload(row.key)
             return False
         if standing.refusal == "deleting":
             raise TenantDeleting(first=first_sight)

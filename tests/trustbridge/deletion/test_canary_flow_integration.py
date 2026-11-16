@@ -243,7 +243,9 @@ async def test_a_canary_planted_through_a_whole_deletion_is_in_no_log_response_o
 
     await _assert_gone(db, tenant)
     await _assert_cleared(db, tenant, "mid", "late")
-    await webhooks.deliver(tenant, "after")  # dropped, with its canary body
+    await webhooks.deliver(tenant, "after")  # dropped unhandled, with its canary body
+    after = await _delivery(db, tenant, "after")  # the row that held the canary before NG6z-c
+    assert (after.status, after.body, after.headers) == ("processed", None, {})
     assert platform.failures == 1  # the failing step ran, and was retried
     assert any(CANARY.encode() in body for body in held)
     assert logs.lines  # something was logged, so the check below is not vacuous
@@ -254,14 +256,11 @@ async def test_a_canary_planted_through_a_whole_deletion_is_in_no_log_response_o
     deletions = await _admin_scalar(
         db, "SELECT coalesce(string_agg(row_to_json(d)::text, E'\\n'), '') FROM tenant_deletions d"
     )
-    # The delivery that arrived after the deletion is kept as received, as a processed row (the
-    # worker drops it unhandled); it is the one row of this run that may hold the canary.
     deliveries = await _admin_scalar(
         db,
         "SELECT coalesce(string_agg(host || ' ' || delivery_id || ' ' || status || ' ' || "
         "coalesce(last_error, '') || ' ' || headers::text || ' ' || "
-        "coalesce(convert_from(body, 'UTF8'), ''), E'\\n'), '') FROM webhook_deliveries "
-        "WHERE delivery_id <> 'after'",
+        "coalesce(convert_from(body, 'UTF8'), ''), E'\\n'), '') FROM webhook_deliveries ",
     )
     assert "tenant.deletion.requested" in audit  # the audit text is not empty either
     surfaces = {

@@ -116,6 +116,13 @@ class DeliveryStore(Protocol):
         """
         ...
 
+    async def clear_payload(self, key: DeliveryKey) -> None:
+        """Drop the stored body and headers of a delivery that is being dropped unhandled.
+
+        The row stays, with its `body_sha256` and metadata, to deduplicate a redelivery.
+        """
+        ...
+
     async def record_failure(
         self,
         key: DeliveryKey,
@@ -277,6 +284,10 @@ class InMemoryDeliveryStore:
             return False
         self._set(key, status=PROCESSED, processed_at=now, next_attempt_at=None)
         return True
+
+    async def clear_payload(self, key: DeliveryKey) -> None:
+        """Drop the body and headers."""
+        self._set(key, body=None, headers={})
 
     async def record_failure(
         self,
@@ -540,6 +551,10 @@ class PgDeliveryStore:
             .values(status=PROCESSED, processed_at=now, next_attempt_at=None)
         )
         return count == 1
+
+    async def clear_payload(self, key: DeliveryKey) -> None:
+        """Null the body and empty the headers (the row stays, with its hash, to deduplicate)."""
+        await self._exec(update(WebhookDelivery).where(_is(key)).values(body=None, headers={}))
 
     async def record_failure(
         self,
