@@ -234,7 +234,7 @@ def test_every_deletion_route_has_its_role_bucket_and_emitter() -> None:
 
 
 def test_the_action_names_are_the_decided_ones() -> None:
-    """The user's two names (G-api, 2026-11-16) and the two that follow them."""
+    """The route events are in the engine's dotted family (user decision, 2026-11-16)."""
     assert Action.TENANT_DELETION_STEP_SKIPPED.value == "tenant.deletion.step_skipped"
     assert Action.TENANT_DELETION_OPERATOR_FAILED.value == "tenant.deletion.operator_failed"
     assert Action.TENANT_DELETION_REQUESTED.value == "tenant.deletion.requested"
