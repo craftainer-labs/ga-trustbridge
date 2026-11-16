@@ -16,10 +16,11 @@ Availability, security (abuse resistance), scalability.
   `(iss, sub)` once known and the source address before; a 401, or a request to a route that does
   not exist, counts against the address, and a 403 or 404 for an authenticated principal
   against that principal's `read` bucket (whatever the route's kind), so callers behind one
-  address do not use up each other's budget. Independently, the guard counts every request, denied
-  or not, in the route's own bucket before the role check runs, so a denied request on a read
-  route spends two read tokens and one on a mutation route spends a mutation and a read token.
-  The statuses counted this way are 401 (address bucket), 403 and 404. A scanner hitting unknown paths can
+  address do not use up each other's budget. Independently, the guard counts every authenticated
+  request, denied or not, in the route's own bucket before the role check runs, so an
+  authenticated 403 or 404 on a read route spends two read tokens and one on a mutation route
+  spends a mutation and a read token. A 401 or an unknown route never reaches the guard and
+  spends one token of the address bucket. A scanner hitting unknown paths can
   exhaust the address bucket; behind the BFF the address is the BFF's unless `TRUSTED_PROXIES`
   lists it. Configured exempt addresses are never limited.
 - **Over the limit.** The response is a 429 problem document with `Retry-After` set to the

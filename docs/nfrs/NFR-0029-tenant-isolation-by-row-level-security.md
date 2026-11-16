@@ -90,8 +90,9 @@ previous release; the release N+1 enforce migration and the test that N+1 code r
 against `schema_compat` 1 do not exist yet. The same caveat applies wherever [NFR-0031](NFR-0031-audit-log-is-append-only-complete-and-exportable.md)
 and [NFR-0034](NFR-0034-tenant-data-deletion-is-resumable-audited-and-complete.md) cite the job.
 `github_environments` is covered by the policy-existence list in `test_rls_integration.py` and,
-and has no isolation test of its own. Its migration says release N+1 enforces it with the other
+and, with RLS enabled by hand, by the deletion flow tests in
+`tests/trustbridge/deletion/test_flow_integration.py`, but has no isolation test of its own. Its migration says release N+1 enforces it with the other
 tenant tables, but ADR 0031's table list and invariants do not name it and the enforce migration
 does not exist yet, so ADR 0031 needs updating when it is written. The compat job's path filter lists `src/app/models/**`
-and not `src/trustbridge`, so a model-only change there does not trigger it. Both are open gaps for the maintainers of
-the workflow, not fixed here.
+and not `src/trustbridge`, so a model-only change there does not trigger it. The ADR update belongs to the enforce migration's author and the path filter to the workflow's
+maintainers; neither is fixed here.

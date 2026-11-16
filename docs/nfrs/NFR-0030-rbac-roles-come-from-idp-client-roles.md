@@ -29,7 +29,8 @@ Security (authentication, authorization, least privilege), portability.
   writes an `authz.denied` audit row carrying the `sub`, subject to the denial throttle of
   [NFR-0031](NFR-0031-audit-log-is-append-only-complete-and-exportable.md): past a configurable
   burst (`AUDIT_DENIED_BURST`, default 5 per subject and reason per 60 s window) further denials
-  are counted into a summary row, not written one by one.
+  are counted into a summary row, not written one by one; when the counter store fails the
+  denial is recorded as its own row.
 - **Portability limit (NFR-0014).** The role source is Keycloak-shaped. Other IdPs reach it
   through a Keycloak broker or a protocol mapper that writes the same claim shape; only `sub` is
   assumed otherwise.
