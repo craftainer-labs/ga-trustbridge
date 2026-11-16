@@ -16,6 +16,7 @@ on:
       # trustbridge's own tables, definer functions and raw SQL live across its
       # packages (models, sql modules, stores, the worker's schema gate): any
       # Python change there can touch the schema contract. Docs-only PRs still skip.
+      - src/trustbridge/*.py
       - src/trustbridge/**/*.py
       - alembic/**
       - alembic.ini

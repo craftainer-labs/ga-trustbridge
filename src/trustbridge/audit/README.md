@@ -213,7 +213,7 @@ numeric `github_sender_id` and a string `delivery_id`. No roles, no grants.
   is not a defence against a compromised app role.
 - **Read:** `tb_audit_list(...)` (`SECURITY DEFINER`) for instance scope.
 - `EXECUTE` on both is revoked from `PUBLIC` and granted to the two roles.
-- **RLS** is enabled and forced from creation (ADR 0031 "seventh RLS table"), but only if both
+- **RLS** is enabled and forced from creation (ADR 0031 "`audit_events` is a further RLS table"), but only if both
   roles exist, as for every grant and policy. App role: `INSERT` with a null or the context
   tenant, `SELECT` of the context tenant's rows. Owner: `owner_all`.
 - Definer functions are owned by whoever runs the migration; setting the owner explicitly is
