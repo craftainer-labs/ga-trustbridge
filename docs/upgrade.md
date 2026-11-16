@@ -70,3 +70,18 @@ be undone, restore the database from the backup taken in step 1.
 Tenancy and RLS use a two-release N-1 rollout
 ([ADR 0031](adrs/0031-tenancy-and-row-level-security.md), NFR-0027): do not
 skip releases between versions that change the same table.
+
+## Reconciler rollout
+
+Roll the reconciler out as a single version: replace all reconciler pods
+in one step rather than running old and new reconcilers side by side.
+
+The reconcile queue's Lua scripts went from three keys to four when the
+reconcile terminal event started to be written before the acknowledgement,
+keyed by a per-request id kept in the Valkey hash `tb:reconcile:request_ids`
+([ADR 0032](adrs/0032-audit-log.md),
+[NFR-0031](nfrs/NFR-0031-audit-log-is-append-only-complete-and-exportable.md)).
+A release that mixes old and new reconcilers leaves stale ids in that hash
+until the old pods drain. The notes of the first release that carries this
+change must say "single-version reconciler rollout". The application is
+unreleased, so no deployed fleet is affected yet.

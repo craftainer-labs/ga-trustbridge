@@ -209,6 +209,12 @@ interacts with EB-15 deletion ([0034](0034-tenant-data-deletion.md)): the deleti
 events always survive, and 0034 holds the open decision on the rest of a deleted tenant's
 rows.
 
+The purge subtracts `CLOCK_SKEW_MARGIN` (5 minutes) from the app-computed cut-off, so a retention
+equal to the floor is not refused when the app's clock runs ahead of the database's. The constant
+is defined in `trustbridge.audit.store`, separately from the deletion purge's copy
+(`trustbridge.deletion.purge.CLOCK_SKEW_MARGIN`), because the import contracts forbid `audit`
+importing `deletion`. Purging up to five minutes later than the retention is harmless.
+
 ### Migration
 
 Implemented in #18 (NG6c): one expand migration creates the table, the indexes
