@@ -393,8 +393,8 @@ delete_platform_resources}` only: `not_before` is the server's (`DELETION_GRACE_
 record first, then run in `tenant_context(<its tenant>)` (the audit insert policy admits only the
 context tenant), apply the change, append the event and re-read the record in one transaction. An
 unknown id is a 404 with a tenant-less `failure` event; a wrong state is a 409 (`conflict`) with a
-`failure` event for the tenant, both with fixed reason codes. Events: `tenant.deletion_requested`,
-`tenant.deletion_cancelled`, `tenant.deletion_step_skipped` and `tenant.deletion_failed`
+`failure` event for the tenant, both with fixed reason codes. Events: `tenant.deletion.requested`,
+`tenant.deletion.cancelled`, `tenant.deletion.step_skipped` and `tenant.deletion.operator_failed`
 (`resource_type` `tenant_deletion`, the `deletion` shape: ids, states, the step and the scrubbed
 reason, never the organisation login). Skipping `database` sets the cursor `{"operator_skipped":
 true}` (see `deletion/README.md`).

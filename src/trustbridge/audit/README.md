@@ -142,7 +142,7 @@ ADR names them, with no emitter:
 | Event | Owner |
 | --- | --- |
 | (none left for the admin API.) The router walk `admin.guards.mutations_without_emitter` fails any mutating route without an `emits` marker. Emitted since NG6e-2 to NG6e-5: `credential.rotate`, `tenant.disable`, `tenant.enable`, `tenant.reconcile`, `delivery.requeue` and `host.registration.start`, `.manual`, `.complete` (the `host_registration` shape); the credential events of a rotation made through the API have the system actor `api` | done |
-| (none left for the deletion's admin routes.) `tenant.deletion_requested`, `tenant.deletion_cancelled`, `tenant.deletion_step_skipped` and `tenant.deletion_failed` (0034; an operator's `fail`, unlike the engine's `tenant.deletion.failed`) are emitted by `admin.routes` since NG6h-7b, in the transaction of the change, in the deletion's tenant context | done |
+| (none left for the deletion's admin routes.) `tenant.deletion.requested`, `tenant.deletion.cancelled`, `tenant.deletion.step_skipped` and `tenant.deletion.operator_failed` (0034; an operator's `fail`, unlike the engine's `tenant.deletion.failed`) are emitted by `admin.routes` since NG6h-7b, in the transaction of the change, in the deletion's tenant context | done |
 | The reconciler duty calling `purge_expired` (ADR 0032 "Retention") | done (NG6h-3a): the `audit-purge` job |
 | A `transaction_timeout` (or statement and idle-in-transaction timeouts) on the api, worker and deletion connections, and the startup check of `AUDIT_EXPORT_LAG_SECONDS` against it (ADR 0032 "Export") | done (NG6h-3b): the `after_begin` hook and `tenancy.timeout_check`, see `tenancy/README.md` "Transaction time bound" |
 

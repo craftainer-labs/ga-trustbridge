@@ -232,10 +232,11 @@ class TrustbridgeSettings(Settings):
     # database rather than raise the timeout.
     deletion_step_batch_size: int = Field(default=500, ge=1, le=10000)
     # The grace window of a deletion request (NG6h-7b): the server sets the record's `not_before`
-    # to the request time plus this many seconds, and the engine does not start it before. `0`
-    # (the default) means no wait. The admin API does not let a caller choose it (user decision,
-    # G-api 2026-11-16). A deletion can be cancelled until it starts.
-    deletion_grace_seconds: int = Field(default=0, ge=0, le=MAX_DELETION_GRACE_SECONDS)
+    # to the request time plus this many seconds, and the engine does not start it before. The
+    # default is 24 hours (user decision, 2026-11-16); `0` means no wait. The admin API does not
+    # let a caller choose it (user decision, G-api 2026-11-16). A deletion can be cancelled until
+    # it starts.
+    deletion_grace_seconds: int = Field(default=86400, ge=0, le=MAX_DELETION_GRACE_SECONDS)
     # Retention of finished deletion records (ADR 0034, user decision B4, NG6h-3c-2). `0` (the
     # default) keeps them for ever; a non-zero value is at least `deletion_retention_min_days`, as
     # for the audit log. The purge runs every `deletion_purge_interval_seconds`, at most

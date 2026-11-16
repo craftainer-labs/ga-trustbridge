@@ -16,8 +16,8 @@ The statements below run as the application role (`trustbridge_app`), which
 holds `SELECT` on `tenant_deletions` and `EXECUTE` on the functions named.
 The admin API routes wrap them (`POST /admin/v1/tenant-deletions/{id}/cancel`,
 `/skip-step` and `/fail`; instance `admin`): prefer them, because they audit
-the action (`tenant.deletion_cancelled`, `tenant.deletion_step_skipped`,
-`tenant.deletion_failed`). **The SQL functions below write no audit event**, so
+the action (`tenant.deletion.cancelled`, `tenant.deletion.step_skipped`,
+`tenant.deletion.operator_failed`). **The SQL functions below write no audit event**, so
 if you use one as the break-glass path, record it in your change log.
 
 ## 1. Watch a deletion
@@ -52,6 +52,10 @@ ORDER BY updated_at;
 
 ## 2. Cancel a deletion
 
+A request waits `DELETION_GRACE_SECONDS` (default 86400, 24 hours; Helm
+`deletion.graceSeconds`) before the reconciler starts it: `not_before` in the
+record shows when. The deletion stays `requested`, and so cancellable, until then.
+
 A deletion can be cancelled only while it is `requested` (nothing destructive
 has run: draining is the first destructive step), and a request with a future
 `not_before` stays `requested` until then.
@@ -78,7 +82,7 @@ acknowledge it with `POST /admin/v1/tenant-deletions/<id>/skip-step` and
 only while no engine holds the lease (a 409 otherwise: wait for the backoff or
 `DELETION_LEASE_TTL_SECONDS`). The record gains a `skipped` entry with the step
 and who acknowledged it, and the next step runs; the event is
-`tenant.deletion_step_skipped`. Skipping `database` does not remove rows: the
+`tenant.deletion.step_skipped`. Skipping `database` does not remove rows: the
 engine goes on to remove the tenant row, which still refuses while any
 tenant-keyed row is left, so clear those by hand first.
 

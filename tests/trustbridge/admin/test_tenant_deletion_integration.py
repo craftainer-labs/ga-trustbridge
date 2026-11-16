@@ -267,8 +267,9 @@ def _client(db: rls.Db, *roles: str) -> httpx.AsyncClient:
 async def _events(db: rls.Db, tenant: UUID) -> list[tuple[str, str]]:
     rows = await _admin(
         db,
-        "SELECT action, outcome FROM audit_events WHERE tenant_id = :t "
-        "AND action LIKE 'tenant.deletion\\_%' ORDER BY seq",
+        "SELECT action, outcome FROM audit_events WHERE tenant_id = :t AND action IN ("
+        "'tenant.deletion.requested', 'tenant.deletion.cancelled', "
+        "'tenant.deletion.step_skipped', 'tenant.deletion.operator_failed') ORDER BY seq",
         t=tenant,
     )
     return [(r.action, r.outcome) for r in rows]
@@ -363,19 +364,19 @@ async def test_the_whole_flow_runs_under_rls_and_every_event_lands_in_the_tenant
         ).status_code == 404
     events = await _events(db, db.b)
     assert events == [
-        ("tenant.deletion_requested", "failure"),  # not disabled, then the mismatch
-        ("tenant.deletion_requested", "failure"),
-        ("tenant.deletion_requested", "success"),
-        ("tenant.deletion_requested", "success"),  # the repeat
-        ("tenant.deletion_cancelled", "success"),
-        ("tenant.deletion_cancelled", "success"),
-        ("tenant.deletion_requested", "success"),
-        ("tenant.deletion_step_skipped", "failure"),
-        ("tenant.deletion_step_skipped", "success"),
-        ("tenant.deletion_failed", "success"),
-        ("tenant.deletion_failed", "failure"),
+        ("tenant.deletion.requested", "failure"),  # not disabled, then the mismatch
+        ("tenant.deletion.requested", "failure"),
+        ("tenant.deletion.requested", "success"),
+        ("tenant.deletion.requested", "success"),  # the repeat
+        ("tenant.deletion.cancelled", "success"),
+        ("tenant.deletion.cancelled", "success"),
+        ("tenant.deletion.requested", "success"),
+        ("tenant.deletion.step_skipped", "failure"),
+        ("tenant.deletion.step_skipped", "success"),
+        ("tenant.deletion.operator_failed", "success"),
+        ("tenant.deletion.operator_failed", "failure"),
     ]
-    assert await _events(db, db.a) == [("tenant.deletion_failed", "failure")]
+    assert await _events(db, db.a) == [("tenant.deletion.operator_failed", "failure")]
     unknown = await _admin(
         db,
         "SELECT count(*) AS n FROM audit_events WHERE resource_id = :i AND tenant_id IS NULL",

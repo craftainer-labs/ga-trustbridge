@@ -28,14 +28,13 @@ class Action(StrEnum):
     TENANT_DELETION_SKIPPED = "tenant.deletion.skipped"
     TENANT_DELETION_COMPLETED = "tenant.deletion.completed"
     TENANT_DELETION_FAILED = "tenant.deletion.failed"
-    # The admin routes' events (ADR 0034, NG6h-7b), written in the transaction of the change. The
-    # two operator names are the user's (G-api, 2026-11-16); `requested` and `cancelled` follow
-    # them. `tenant.deletion_failed` is the operator's `fail`; the engine's own non-retryable
-    # failure stays `tenant.deletion.failed`.
-    TENANT_DELETION_REQUESTED = "tenant.deletion_requested"
-    TENANT_DELETION_CANCELLED = "tenant.deletion_cancelled"
-    TENANT_DELETION_STEP_SKIPPED = "tenant.deletion_step_skipped"
-    TENANT_DELETION_OPERATOR_FAILED = "tenant.deletion_failed"
+    # The admin routes' events (ADR 0034, NG6h-7b), written in the transaction of the change; the
+    # user put them in the engine's dotted family (G-api, 2026-11-16). `.operator_failed` is the
+    # operator's `fail`; the engine's own non-retryable failure is `.failed`.
+    TENANT_DELETION_REQUESTED = "tenant.deletion.requested"
+    TENANT_DELETION_CANCELLED = "tenant.deletion.cancelled"
+    TENANT_DELETION_STEP_SKIPPED = "tenant.deletion.step_skipped"
+    TENANT_DELETION_OPERATOR_FAILED = "tenant.deletion.operator_failed"
     # Deferred: the admin API (NG6d, NG6e), host registration.
     AUDIT_EXPORT = "audit.export"
     TENANT_DISABLE = "tenant.disable"

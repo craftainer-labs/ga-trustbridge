@@ -123,10 +123,10 @@ def test_failure_reason_for_status_maps_refusals_and_defaults_to_unavailable() -
         (Action.TENANT_DELETION_SKIPPED, "tenant.deletion.skipped"),
         (Action.TENANT_DELETION_COMPLETED, "tenant.deletion.completed"),
         (Action.TENANT_DELETION_FAILED, "tenant.deletion.failed"),
-        (Action.TENANT_DELETION_REQUESTED, "tenant.deletion_requested"),
-        (Action.TENANT_DELETION_CANCELLED, "tenant.deletion_cancelled"),
-        (Action.TENANT_DELETION_STEP_SKIPPED, "tenant.deletion_step_skipped"),
-        (Action.TENANT_DELETION_OPERATOR_FAILED, "tenant.deletion_failed"),
+        (Action.TENANT_DELETION_REQUESTED, "tenant.deletion.requested"),
+        (Action.TENANT_DELETION_CANCELLED, "tenant.deletion.cancelled"),
+        (Action.TENANT_DELETION_STEP_SKIPPED, "tenant.deletion.step_skipped"),
+        (Action.TENANT_DELETION_OPERATOR_FAILED, "tenant.deletion.operator_failed"),
     ],
 )
 def test_the_deletion_action_names_are_the_adr_ones(member: Action, value: str) -> None:

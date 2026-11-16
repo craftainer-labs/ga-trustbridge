@@ -235,10 +235,10 @@ def test_every_deletion_route_has_its_role_bucket_and_emitter() -> None:
 
 def test_the_action_names_are_the_decided_ones() -> None:
     """The user's two names (G-api, 2026-11-16) and the two that follow them."""
-    assert Action.TENANT_DELETION_STEP_SKIPPED.value == "tenant.deletion_step_skipped"
-    assert Action.TENANT_DELETION_OPERATOR_FAILED.value == "tenant.deletion_failed"
-    assert Action.TENANT_DELETION_REQUESTED.value == "tenant.deletion_requested"
-    assert Action.TENANT_DELETION_CANCELLED.value == "tenant.deletion_cancelled"
+    assert Action.TENANT_DELETION_STEP_SKIPPED.value == "tenant.deletion.step_skipped"
+    assert Action.TENANT_DELETION_OPERATOR_FAILED.value == "tenant.deletion.operator_failed"
+    assert Action.TENANT_DELETION_REQUESTED.value == "tenant.deletion.requested"
+    assert Action.TENANT_DELETION_CANCELLED.value == "tenant.deletion.cancelled"
 
 
 @pytest.mark.parametrize("role", [OPERATOR, VIEWER, ACME_ADMIN])
@@ -747,7 +747,7 @@ def test_skip_and_fail_need_exactly_a_reason(
 # ---- operator fail -----------------------------------------------------------------------
 
 
-def test_fail_ends_the_deletion_and_audits_tenant_deletion_failed(
+def test_fail_ends_the_deletion_and_audits_tenant_deletion_operator_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The function gets the actor and the scrubbed reason; the event is the operator's."""
@@ -767,7 +767,7 @@ def test_fail_ends_the_deletion_and_audits_tenant_deletion_failed(
         Outcome.SUCCESS,
         TENANT,
     )
-    assert event.action.value == "tenant.deletion_failed"
+    assert event.action.value == "tenant.deletion.operator_failed"
     assert event.before == {"deletion_id": str(DELETION), "from_state": "github"}
     assert event.after == {
         "deletion_id": str(DELETION),

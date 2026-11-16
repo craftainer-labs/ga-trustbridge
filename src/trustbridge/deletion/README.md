@@ -215,8 +215,8 @@ the transaction that removed the `tenants` row, and a rolled-back transition lea
 `deletion` shape allows ids, state and step names, a category, a count and a fixed code; `counts`
 go through `deletion_counts`. Free text (`NonRetryableError.message`, an exception message) reaches
 only `last_error`, scrubbed and cut, never the audit trail. The request, cancel,
-skip and operator-fail events (`tenant.deletion_requested`, `_cancelled`, `_step_skipped`,
-`tenant.deletion_failed`) are written by the admin routes, not the engine (NG6h-7b). Leaving `requested` writes a `step` event too (draining is the first destructive step, so every
+skip and operator-fail events (`tenant.deletion.requested`, `.cancelled`, `.step_skipped`,
+`.operator_failed`) are written by the admin routes, not the engine (NG6h-7b). Leaving `requested` writes a `step` event too (draining is the first destructive step, so every
 transition is audited); `counts` on a step event are cumulative.
 
 ## Operator skip (NG6h-7b)

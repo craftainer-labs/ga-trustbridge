@@ -62,7 +62,7 @@ reconciler resumes a non-terminal deletion.
 - **Routes (NG6h-7b; shapes decided by the user, G-api 2026-11-16).** `viewer` reads, instance `admin` writes
   (a tenant-scoped role gets 403). `POST /tenants/{t}/deletion` takes `{host, installation_id, organization,
   reason, delete_platform_resources=false}` and nothing else (a body that names `not_before` is a 422): the
-  server computes `not_before` from `DELETION_GRACE_SECONDS` (default 0, no wait) and the caller cannot set it.
+  server computes `not_before` from `DELETION_GRACE_SECONDS` (default 86400, 24 hours; 0 means no wait) and the caller cannot set it.
   `POST /tenant-deletions/{id}/cancel` (no body; 200; 409 once past `requested`; idempotent),
   `POST /tenant-deletions/{id}/skip-step` and `POST /tenant-deletions/{id}/fail` (body `{reason}`; 200).
   An unknown id is a 404 and a wrong state a 409, Problem types as `POST /tenants/{t}/disable`
@@ -190,14 +190,14 @@ singleton duty (EB-6). There is no cancel after the first destructive step; befo
 
 ### The audit trail of the deletion
 
-Events (0032) are written by the deletion itself: `tenant.deletion_requested` (who, reason, and the tenant id,
+Events (0032) are written by the deletion itself: `tenant.deletion.requested` (who, reason, and the tenant id,
 host and installation id; **no organisation login and no tenant content**, `before` is ids,
 states and counts only, so no organisation name or other tenant content survives in the append-only trail (only the
 opaque identifiers, see Open issues)), one `tenant.deletion.step`
 per transition (including `requested` to `draining`, the first destructive step) with cumulative counts, `tenant.deletion.skipped` per skipped category, and
 `tenant.deletion.completed`. The admin routes write their own events in the transaction of the change
-(and a `failure` event with a fixed reason code for a refusal): `tenant.deletion_requested`,
-`tenant.deletion_cancelled`, `tenant.deletion_step_skipped` and `tenant.deletion_failed` (an operator's `fail`; the
+(and a `failure` event with a fixed reason code for a refusal): `tenant.deletion.requested`,
+`tenant.deletion.cancelled`, `tenant.deletion.step_skipped` and `tenant.deletion.operator_failed` (an operator's `fail`; the
 engine's own non-retryable failure stays `tenant.deletion.failed`). They carry the tenant id, are inserted in the same transaction as
 the step they record, and **survive the deletion**: `audit_events` has no foreign key to the
 tenant and the database step never touches it. The reconciler's audit purge (0032) removes the events
