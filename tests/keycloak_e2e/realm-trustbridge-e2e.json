@@ -1,0 +1,300 @@
+{
+  "realm": "trustbridge-e2e",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "clients": [
+    {
+      "clientId": "api",
+      "name": "trustbridge API (resource server)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false
+    },
+    {
+      "clientId": "e2e-cli",
+      "name": "Password-grant client whose tokens carry the api audience",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "e2e-short",
+      "name": "Same, with a 2 second access token",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ],
+      "attributes": {
+        "access.token.lifespan": "2"
+      }
+    },
+    {
+      "clientId": "e2e-other-audience",
+      "name": "Tokens for another resource server only",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "other-service",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "roles": {
+    "client": {
+      "api": [
+        {
+          "name": "trustbridge:admin",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:operator",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:auditor",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:viewer",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:github.com:acme:admin",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:github.com:acme:operator",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:github.com:acme:auditor",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:github.com:acme:viewer",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:github.com:other:admin",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:github.com:other:operator",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:github.com:other:auditor",
+          "description": "ADR 0033 client role"
+        },
+        {
+          "name": "trustbridge:github.com:other:viewer",
+          "description": "ADR 0033 client role"
+        }
+      ]
+    }
+  },
+  "users": [
+    {
+      "username": "kc-viewer",
+      "enabled": true,
+      "email": "kc-viewer@example.test",
+      "emailVerified": true,
+      "firstName": "E2E",
+      "lastName": "kc-viewer",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kc-viewer",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "trustbridge:viewer"
+        ]
+      }
+    },
+    {
+      "username": "kc-operator",
+      "enabled": true,
+      "email": "kc-operator@example.test",
+      "emailVerified": true,
+      "firstName": "E2E",
+      "lastName": "kc-operator",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kc-operator",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "trustbridge:operator"
+        ]
+      }
+    },
+    {
+      "username": "kc-auditor",
+      "enabled": true,
+      "email": "kc-auditor@example.test",
+      "emailVerified": true,
+      "firstName": "E2E",
+      "lastName": "kc-auditor",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kc-auditor",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "trustbridge:auditor"
+        ]
+      }
+    },
+    {
+      "username": "kc-admin",
+      "enabled": true,
+      "email": "kc-admin@example.test",
+      "emailVerified": true,
+      "firstName": "E2E",
+      "lastName": "kc-admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kc-admin",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "trustbridge:admin"
+        ]
+      }
+    },
+    {
+      "username": "kc-acme-viewer",
+      "enabled": true,
+      "email": "kc-acme-viewer@example.test",
+      "emailVerified": true,
+      "firstName": "E2E",
+      "lastName": "kc-acme-viewer",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kc-acme-viewer",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "trustbridge:github.com:acme:viewer"
+        ]
+      }
+    },
+    {
+      "username": "kc-acme-admin",
+      "enabled": true,
+      "email": "kc-acme-admin@example.test",
+      "emailVerified": true,
+      "firstName": "E2E",
+      "lastName": "kc-acme-admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kc-acme-admin",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "offline_access",
+        "uma_authorization"
+      ],
+      "clientRoles": {
+        "api": [
+          "trustbridge:github.com:acme:admin"
+        ]
+      }
+    }
+  ]
+}

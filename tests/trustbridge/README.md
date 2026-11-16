@@ -46,6 +46,9 @@ Tests for the instance package `src/trustbridge/` (instance-added files under th
   (grace 0), the engine over the real store, drain port and database step with fake platform and GitHub ports, and the
   real worker, outbox and gate for deliveries that arrive before, during and after the deletion; it also covers the
   skip-step path and the 409 for enabling a tenant that is being deleted.
+- `deletion/test_canary_flow_integration.py` (marked `integration`) reruns that flow with a canary secret planted in the
+  credential and connection fakes, webhook headers and bodies, the request reason and a failing step's error, and asserts
+  it is in no log record, response, audit row, deletion record or delivery row (ADR 0034 inv. 11).
 - `test_main.py` runs the real `trustbridge.main:app` in a subprocess (the entrypoint mutates the
   template app at import, which must not leak into the template's own tests).
 

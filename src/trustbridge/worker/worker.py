@@ -168,7 +168,7 @@ class Worker:
             )
             return
         try:
-            await self._handle(row)
+            dropped = await self._handle(row)
         except LeaseBusy:
             await store.defer(row.key, now + timedelta(seconds=self._s.busy_retry_seconds))
             await queue.ack(entry.entry_id)
@@ -196,7 +196,10 @@ class Worker:
             error = f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
             await self._failed(row, entry, error)
         else:
-            done = await store.mark_processed(row.key, self._d.clock(), attempts=row.attempts)
+            # A dropped delivery keeps no payload (ADR 0034): cleared with the mark.
+            done = await store.mark_processed(
+                row.key, self._d.clock(), attempts=row.attempts, drop_payload=dropped
+            )
             if not done:
                 _lost_claim(row, "processed")
             await queue.ack(entry.entry_id)
@@ -244,17 +247,20 @@ class Worker:
             "delivery dead-lettered", extra={"host": row.host, "delivery_id": row.delivery_id}
         )
 
-    async def _handle(self, row: DeliveryRecord) -> None:
-        """Parse the stored body and dispatch it to the handlers registered for the event."""
+    async def _handle(self, row: DeliveryRecord) -> bool:
+        """Parse the stored body and dispatch it to the handlers registered for the event.
+
+        Returns True when the delivery was dropped unhandled (a tombstoned installation).
+        """
         if not self._d.registry.handlers_for(row.event):
-            return
+            return False
         if row.body is None:
             raise ValueError("delivery body was purged")
         payload = json.loads(row.body)
         if not isinstance(payload, dict):
             raise TypeError("webhook payload is not a JSON object")
         if not await self._admit(row, payload):
-            return
+            return True
         action = payload.get("action")
         await self._d.registry.dispatch(
             EventContext(
@@ -265,6 +271,7 @@ class Worker:
                 payload=payload,
             )
         )
+        return False
 
     async def _admit(self, row: DeliveryRecord, payload: dict[str, object]) -> bool:
         """Record the delivery's tenant, then decide whether the handlers may run.

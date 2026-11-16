@@ -31,7 +31,7 @@ Compliance (data erasure, SOC 2 / ISO 27001 enablers), reliability, auditability
   hold no organisation login or tenant content. The tenant's other audit rows stay until
   `AUDIT_RETENTION_DAYS` ([NFR-0031](NFR-0031-audit-log-is-append-only-complete-and-exportable.md)).
 - **Tombstone.** A deleted tenant whose installation still exists is not re-created: its events
-  are acknowledged and dropped, and the App must be uninstalled.
+  are acknowledged and dropped, keeping no body or headers, and the App must be uninstalled.
 - **Isolation.** Other tenants' rows and the host-scoped tables are unchanged, and the engine
   runs only inside the deleted tenant's context ([NFR-0029](NFR-0029-tenant-isolation-by-row-level-security.md)).
 
@@ -92,7 +92,14 @@ Integration tests run as the app role against a real Postgres, in the Checks wor
   `tests/trustbridge/tenancy/test_deletion_purge_integration.py`.
 - Migration: `.github/workflows/migration-compat.yml`; the downgrade and upgrade round trips above.
 
-Known gaps: ADR 0034 invariant 11 (a canary secret in no row, log line or audit event) is covered
-only by one canary in `test_engine_unit.py`, not end to end through the platform and GitHub steps; the plan names the retry cost of a long tenant
+- Invariant 11 end to end: `test_a_canary_planted_through_a_whole_deletion_is_in_no_log_response_or_row`
+  in `tests/trustbridge/deletion/test_canary_flow_integration.py` plants a canary in the credential
+  core and the connection data the fakes hold (read only through the drain port and the connection
+  names), in webhook headers and bodies, in the request reason and in a failing step's
+  error, runs a whole deletion, and asserts it is in no log record, response, audit row, deletion
+  record or delivery row, including the delivery dropped after the deletion (its body and headers
+  are cleared; unit test `test_a_tombstoned_installations_delivery_is_acknowledged_and_dropped`).
+
+Known gaps: the plan names the retry cost of a long tenant
 disable as a measurement owed to NG6g, not yet measured; the stale-claim ABA residual of the
 delivery requeue (decided for NG6g) has no generation column or test.

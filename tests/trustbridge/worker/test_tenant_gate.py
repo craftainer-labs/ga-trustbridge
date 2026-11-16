@@ -180,6 +180,8 @@ async def test_a_tombstoned_installations_delivery_is_acknowledged_and_dropped()
     row = await h.store.get(key("d1"))
     assert row is not None
     assert (row.status, row.attempts, row.tenant_id) == ("processed", 0, None)
+    assert (row.body, row.headers) == (None, {})  # no payload is kept for a dropped delivery
+    assert row.body_sha256 is not None  # the replay dedupe identity stays
     assert seen == []
     assert (await h.valkey.xpending("tb:events", "tb-workers"))["pending"] == 0
 
