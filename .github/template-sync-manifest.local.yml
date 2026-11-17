@@ -1,4 +1,6 @@
 ignore:
+  # instance-owned package
+  - src/trustbridge/
   # The admin API against real Keycloak tokens (NFR-0030): instance-owned.
   - .github/workflows/keycloak-e2e.yml
   # Instance-owned pytest hook: keeps trustbridge out of the e2e coverage run.
