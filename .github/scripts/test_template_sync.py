@@ -937,6 +937,93 @@ class ConflictedSyncIsDraftTest(unittest.TestCase):
         self.assertIn('PYTHONDONTWRITEBYTECODE: "1"', text)
 
 
+class NewIgnoreFilesTest(unittest.TestCase):
+    """A new exact-path ignore-tier file is created once and then instance-owned."""
+
+    TIERS: dict[str, list[str]] = {
+        "replace": ["tool.sh"],
+        "ignore": ["compose.instance.yml", "docs/plans/[0-9]*.md", "src/"],
+        "merge": [],
+    }
+
+    def run_apply(self, old: Path, new: Path, inst: Path) -> dict[str, dict[str, list[str]]]:
+        """Run ``cmd_apply`` over the trees with ``TIERS``; return its summary."""
+        manifest = old.parent / "manifest.yml"
+        manifest.write_text(
+            "".join(
+                f"{tier}:\n" + "".join(f"  - {p}\n" for p in pats)
+                for tier, pats in self.TIERS.items()
+            )
+        )
+        args = argparse.Namespace(manifest=manifest, old_ref=old, new_ref=new, instance_root=inst)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(template_sync.cmd_apply(args), 0)
+        summary: dict[str, dict[str, list[str]]] = json.loads(out.getvalue())
+        return summary
+
+    def trees(self, tmp: str) -> tuple[Path, Path, Path]:
+        """Make empty old/new/instance trees."""
+        old, new, inst = (Path(tmp) / n for n in ("old", "new", "inst"))
+        for d in (old, new, inst):
+            d.mkdir()
+        return old, new, inst
+
+    def test_created_when_missing_and_listed_in_pr_body(self) -> None:
+        """A file new in this release is copied, reported and named in the PR body."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new, inst = self.trees(tmp)
+            write(new / "compose.instance.yml", b"services: {}\n", 0o644)
+            summary = self.run_apply(old, new, inst)
+            self.assertEqual((inst / "compose.instance.yml").read_bytes(), b"services: {}\n")
+            self.assertEqual(summary["ignore"]["created"], ["compose.instance.yml"])
+            body = template_sync.pr_body(summary, "v1.0.0", "v1.1.0", "o/t")
+            self.assertIn("### New instance-owned files", body)
+            self.assertIn("- `compose.instance.yml`", body)
+
+    def test_not_overwritten_when_present(self) -> None:
+        """An existing instance file keeps its content and is not reported."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new, inst = self.trees(tmp)
+            write(new / "compose.instance.yml", b"new\n", 0o644)
+            write(inst / "compose.instance.yml", b"mine\n", 0o644)
+            summary = self.run_apply(old, new, inst)
+            self.assertEqual((inst / "compose.instance.yml").read_bytes(), b"mine\n")
+            self.assertEqual(summary["ignore"]["created"], [])
+            body = template_sync.pr_body(summary, "v1.0.0", "v1.1.0", "o/t")
+            self.assertNotIn("New instance-owned files", body)
+
+    def test_not_resurrected_after_deliberate_deletion(self) -> None:
+        """A file the previous release already had is not recreated in an instance lacking it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new, inst = self.trees(tmp)
+            write(old / "compose.instance.yml", b"old\n", 0o644)
+            write(new / "compose.instance.yml", b"new\n", 0o644)
+            summary = self.run_apply(old, new, inst)
+            self.assertFalse((inst / "compose.instance.yml").exists())
+            self.assertEqual(summary["ignore"]["created"], [])
+
+    def test_globs_and_directories_are_not_starter_files(self) -> None:
+        """Template plans (a glob) and ``src/`` (a directory) are never handed to instances."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new, inst = self.trees(tmp)
+            write(new / "docs/plans/2026-01-x.md", b"plan\n", 0o644)
+            write(new / "src/app.py", b"x\n", 0o644)
+            summary = self.run_apply(old, new, inst)
+            self.assertEqual(summary["ignore"]["created"], [])
+            self.assertFalse((inst / "docs").exists())
+            self.assertFalse((inst / "src").exists())
+
+    def test_symlink_in_instance_is_left_alone(self) -> None:
+        """A (dangling) symlink at the path counts as present."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new, inst = self.trees(tmp)
+            write(new / "compose.instance.yml", b"new\n", 0o644)
+            (inst / "compose.instance.yml").symlink_to(inst / "elsewhere")
+            self.run_apply(old, new, inst)
+            self.assertFalse((inst / "elsewhere").exists())
+
+
 class DirectlyInvokedScriptsAreExecutableTest(unittest.TestCase):
     """A workflow step that names a script as the command needs mode 755 (exit 126 otherwise)."""
 

@@ -6,6 +6,14 @@
   [`devcontainers/ci`](https://github.com/devcontainers/ci)), under a
   per-run `COMPOSE_PROJECT_NAME` that a final step tears down. Runs as a
   two-leg `amd64`/`arm64` matrix (see "Architecture matrix" below).
+  A step before the hooks runs `../scripts/semver_release_type.py` when an
+  instance or downstream template ships it (template-rust-crate does; base
+  does not, so the step is skipped here) and the hooks step forwards its
+  `SEMVER_RELEASE_TYPE` into the container (the step appends the script's
+  output to `$GITHUB_ENV` only if it is empty or exactly
+  `SEMVER_RELEASE_TYPE=` with an optional `major`, `minor` or `patch`
+  value, failing otherwise), so a `!`-marked PR title (or, on
+  `main`, head commit subject) runs `cargo semver-checks` as `major`.
 - `smoke.yml` — builds the `runner` stage of the root `Dockerfile` via
   the root `compose.yml`, starts it against the real Postgres, RustFS,
   Redis, and Keycloak backing services, in production mode (TLS and
@@ -68,7 +76,19 @@
   fails the job before the sync state advances. The job then exits with
   `apply`'s own status when that is 2 or higher (so the log and the step's
   exit code tell an error from conflicts) and the summary is printed as valid
-  only after that check. The sync never copies Python bytecode
+  only after that check. The `ignore` tier is instance-owned: sync never overwrites or deletes an
+  `ignore` file. The one exception is a new starting copy: an exact-path
+  `ignore` entry whose file the new tag introduces (the previous synced tag
+  lacks it) is created when the instance lacks it, and the PR body lists it
+  under "New instance-owned files". A glob or directory entry is never
+  created, nor is a file the previous tag already had, so a file the instance
+  deleted stays deleted. A path's tier comes from the upstream tag's manifest
+  only, so when a parent's `ignore` file (template-docker's `README.md`,
+  `Dockerfile`, `image.mk`) is also listed by the instance's own manifest
+  (template-fastapi or -react, which ship their own versions), the parent's
+  `ignore` wins for that sync: the instance's copy is left as it is, and its
+  own manifest classifies the path only for the instance's own instances.
+  The sync never copies Python bytecode
   (`__pycache__/`, `*.pyc`), and the apply step sets
   `PYTHONDONTWRITEBYTECODE` so running the script cannot create any in the
   template checkout.
@@ -107,11 +127,10 @@ verified end-to-end on arm64 hardware on 2026-09-06.
 ## Migration compatibility
 
 `migration-compat.yml` enforces `../../docs/nfrs/NFR-0027-expand-contract-migrations.md`
-on pull requests that touch `alembic/` (the revisions and the harness), `alembic.ini`,
-the model packages (`src/app/models/`), any Python file under `src/trustbridge/`
-(its models, SQL and stores are spread over its packages), the lockfile or the lint script (and on demand);
-a docs-only PR does not run it. The path list is in the workflow's `on.pull_request.paths`; code outside those
-directories that defines tables has to be added there. Inside the devcontainer, like `checks.yml`, it:
+on pull requests that touch `alembic/`, `alembic.ini`, any Python file under
+`src/` (whatever the package is named), `uv.lock`, `pyproject.toml`, the
+lint script or the workflow itself (and on demand). The `paths` filter uses
+positive patterns only, so docs- and README-only changes don't trigger it. Inside the devcontainer, like `checks.yml`, it:
 
 1. lints the PR's new or changed revisions with Squawk
    (`../../scripts/lint-migrations.sh`);
@@ -132,13 +151,13 @@ tag's tests run (after the dependency sync).
 
 **Skips until the first release with `RUN_MIGRATIONS_ON_STARTUP`.** Older
 code always migrates on startup and would try to migrate a database whose
-revision it doesn't know. A first step reads the latest release tag's
-`src/app/config.py`; if there is no stable tag, or the file has no
-`run_migrations_on_startup` setting, the N-1 part is skipped: the job
+revision it doesn't know. A first step searches the latest release tag with `git grep` for
+`run_migrations_on_startup` in its Python files under `src/`; if there is no
+stable tag, or nothing there mentions the setting, the N-1 part is skipped: the job
 writes the reason to the run summary and a notice annotation, still runs
 the lint, and finishes green (steps 2 and 3 are the only ones skipped).
 It starts enforcing on its own once a release containing the setting
-exists.
+exists. The search is package-agnostic, so a renamed `src/<pkg>/` works; a `git grep` error (anything but match or no match) fails the step instead of skipping.
 
 As long as no `v*` release tag exists (the state of this repository until its first release),
 only the Squawk lint of changed revisions runs: the summary says "N-1 compatibility check
@@ -338,8 +357,13 @@ Activating this in a given repo/fork takes two one-time steps, neither
 of which is itself a workflow: provisioning a dedicated Anthropic
 Console workspace (its own `ANTHROPIC_API_KEY`, a monthly spend limit,
 and a usage alert at 80% of it) and storing that key as the
-`ANTHROPIC_API_KEY` repository secret, then running `moderate-setup.yml`
-once to create the labels below.
+`ANTHROPIC_API_KEY` secret of the `moderation` environment (the `gate`
+and Claude jobs declare `environment: moderation`; create it with
+`../scripts/setup_environments.sh`, see `../../docs/TEMPLATE.md`,
+"Moderation and template-sync environments"), then running
+`moderate-setup.yml` once to create the labels below. The `gate` job's
+first step fails the run if that environment is missing or isn't
+restricted to the default branch.
 
 Two independent label sequences track state, applied by the `apply` jobs
 (`gh issue edit`) from a fixed action-to-label table, or by a deterministic
@@ -366,7 +390,7 @@ output — `secrets` isn't readable from `jobs.<job_id>.if` directly
 `jobs.<job_id>.env`. The real job then carries
 `if: needs.gate.outputs.has-key == 'true' && <trust condition>`,
 checked before checkout — so a fork or clone that hasn't set the
-`ANTHROPIC_API_KEY` repository secret sees every one of these jobs show
+`ANTHROPIC_API_KEY` secret sees every one of these jobs show
 **Skipped**, not **Failed**, and gets no failure-triggered email from
 GitHub's default Actions notifications. `moderate-cleanup.yml` has no
 such gate (see its own header comment) and always runs.
@@ -497,7 +521,8 @@ variables/secrets, all optional:
   no-ops except during the first cron-scheduled week of the month.
 - `TEMPLATE_SYNC_CHANNEL` (variable, `stable` | `alpha` | `beta` | `rc`,
   default `stable`) — which tag channel to sync to.
-- `TEMPLATE_SYNC_TOKEN` (secret) — a PAT used to read the template
+- `TEMPLATE_SYNC_TOKEN` (secret, held in the `template-sync` environment the
+  `sync` job declares; first step checks it) — a PAT used to read the template
   repository and to push the sync branch / open the sync PR. It needs
   the `workflow` scope (classic PAT) or **Workflows: read/write**
   (fine-grained), because the default `GITHUB_TOKEN` can't push

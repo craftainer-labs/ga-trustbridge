@@ -5,24 +5,25 @@
 # Also lints the PR's new or changed revisions with Squawk.
 #
 # The N-1 half reports and skips (job stays green) until the latest release
-# tag's src/app/config.py mentions RUN_MIGRATIONS_ON_STARTUP: older code
+# tag's Python sources under src/ mention RUN_MIGRATIONS_ON_STARTUP: older code
 # would try to migrate a database whose revision it doesn't know.
 name: Migration compat
 
 on:
   pull_request:
+    # Positive patterns only, so nothing needs negating: docs and README-only
+    # changes match none of them. Package-agnostic: an instance that renames
+    # src/app/ to src/<pkg>/ still triggers (src/**/*.py matches both).
     paths:
-      - src/app/models/**
-      # trustbridge's own tables, definer functions and raw SQL live across its
-      # packages (models, sql modules, stores, the worker's schema gate): any
-      # Python change there can touch the schema contract. Docs-only PRs still skip.
-      - src/trustbridge/*.py
-      - src/trustbridge/**/*.py
       - alembic/**
       - alembic.ini
+      - src/*.py
+      - src/**/*.py
       # craftainer-crud's models (revision table, base columns) arrive as a
-      # version bump in the lockfile now that the package is published.
+      # version bump in the lockfile (or pyproject.toml) now that the
+      # package is published.
       - uv.lock
+      - pyproject.toml
       - scripts/lint-migrations.sh
       - .github/workflows/migration-compat.yml
   workflow_dispatch:
@@ -50,12 +51,19 @@ jobs:
         id: n1
         run: |
           tag="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+          reason=""
           if [ -z "$tag" ]; then
             reason="no stable release tag exists yet"
-          elif ! git show "${tag}:src/app/config.py" | grep -qi 'run_migrations_on_startup'; then
-            reason="latest release ${tag} predates RUN_MIGRATIONS_ON_STARTUP (src/app/config.py has no such setting), so it would migrate a database it doesn't know"
           else
-            reason=""
+            # git grep: 0 = match, 1 = no match, anything else is a real
+            # error and must fail the step rather than count as "skip".
+            rc=0
+            git grep -qi 'run_migrations_on_startup' "$tag" -- 'src/*.py' || rc=$?
+            case "$rc" in
+              0) ;;
+              1) reason="latest release ${tag} predates RUN_MIGRATIONS_ON_STARTUP (no Python file under src/ mentions it), so it would migrate a database it doesn't know" ;;
+              *) echo "::error::git grep failed (exit ${rc}) while checking ${tag}"; exit "$rc" ;;
+            esac
           fi
           if [ -n "$reason" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"

@@ -93,6 +93,12 @@ if [ "$mode" = build ]; then
 else
   action=failed
   comment=""
+  # A patch over the cap is the one reason worth naming: apply_triage posts a
+  # failed result's comment, so the maintainer learns why instead of seeing the
+  # generic "no usable result" note.
+  if [ "$too_large" = 1 ]; then
+    comment="The automated change is larger than the ${MAX_PATCH_BYTES}-byte limit for an unattended run."
+  fi
   result="$workspace/.moderation-out/triage.json"
   if [ "$too_large" = 0 ] && agent_file "$result" "$workspace" \
     && jq -e '(.action | type == "string") and (.comment | type == "string")' "$result" > /dev/null 2>&1; then

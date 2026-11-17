@@ -13,7 +13,8 @@ Subcommands:
   release channel, print the latest tag in that channel.
 - ``apply``: 3-way-apply the ``replace``/``merge`` tiers from a manifest
   between two template checkouts (the previously-synced tag and the new one)
-  and the instance's own working tree; print a summary and list any
+  and the instance's own working tree, and create the exact-path ``ignore``
+  files the new release introduces; print a summary and list any
   merge conflicts.
 - ``check-apply``: confirm an ``apply`` exit status of 0 or 1 against its summary
   file, so a crash that exits 1 is not read as merge conflicts.
@@ -368,6 +369,49 @@ def apply_merge(
     return {"merged": merged, "conflicts": conflicts, "binary": binary}
 
 
+def starter_paths(root: Path, tiers: dict[str, list[str]]) -> set[str]:
+    """Return the ``ignore``-tier files under ``root`` named by an exact path.
+
+    Only an exact-path entry is a starting copy the template hands over. A
+    glob (``docs/plans/[0-9]*.md``) or a directory entry matches the template's
+    own working documents or an instance's own content, which no instance
+    should receive.
+    """
+    exact = {
+        pattern
+        for pattern in tiers["ignore"]
+        if not pattern.endswith("/") and "*" not in pattern and "?" not in pattern
+    }
+    return {
+        path
+        for path in exact
+        if (root / path).is_file() and not is_bytecode(path) and classify(path, tiers) == ["ignore"]
+    }
+
+
+def apply_ignore_new(
+    old_root: Path, new_root: Path, instance_root: Path, paths: set[str]
+) -> dict[str, list[str]]:
+    """Create ignore-tier files this release introduces; return {"created": [...]}.
+
+    The instance owns an ``ignore`` file, so one that exists (or is a symlink)
+    is never touched. A file is created only when the previous release did not
+    have it at all, so a file the instance deleted on purpose is not brought
+    back by every sync. The state file records only the synced tag, so the
+    previous release's tree is the record of which paths are new.
+    """
+    created: list[str] = []
+    for path in sorted(paths):
+        src = new_root / path
+        dst = instance_root / path
+        if os.path.lexists(old_root / path) or os.path.lexists(dst):
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        created.append(path)
+    return {"created": created}
+
+
 def _annotation_escape(value: str, *, prop: bool = False) -> str:
     """Percent-encode ``value`` for a GitHub workflow command (property or message)."""
     value = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
@@ -395,6 +439,9 @@ def cmd_apply(args: argparse.Namespace) -> int:
         summary = {
             "replace": apply_replace(args.old_ref, args.new_ref, args.instance_root, replace_paths),
             "merge": apply_merge(args.old_ref, args.new_ref, args.instance_root, merge_paths),
+            "ignore": apply_ignore_new(
+                args.old_ref, args.new_ref, args.instance_root, starter_paths(args.new_ref, tiers)
+            ),
         }
     except Exception as err:
         # Any failure must exit 2: an uncaught exception exits 1, which reads
@@ -480,6 +527,18 @@ def pr_body(summary: dict[str, dict[str, list[str]]], old_tag: str, new_tag: str
             "Resolve every conflict above before merging: text files have `<<<<<<<` markers; "
             "a binary file has none (it is left at the instance's version).",
         ]
+    created = summary.get("ignore", {}).get("created", [])
+    if created:
+        lines += [
+            "",
+            "### New instance-owned files",
+            "",
+            "This release introduces these `ignore`-tier files. They were created from the "
+            "template because this repo lacked them; this repo owns them from now on, and "
+            "later syncs never overwrite them.",
+            "",
+        ]
+        lines += [f"- `{path}`" for path in created]
     if "pyproject.toml" in summary["merge"]["merged"] + summary["merge"]["conflicts"]:
         lines += [
             "",

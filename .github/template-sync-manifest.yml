@@ -119,7 +119,6 @@ replace:
   # synced past this change.
   - app.Dockerfile
   - app.Dockerfile.dockerignore
-  - compose.yml
   - compose.perf.yml
   - scripts/builder.sh
   - scripts/builder-sync-app.sh
@@ -144,7 +143,6 @@ replace:
   # The AI-assisted workflow, and every directory README/template documenting
   # this repo's own conventions rather than product knowledge.
   - CLAUDE.md
-  - docs/README.md
   - docs/adrs/README.md
   - docs/adrs/template.md
   - docs/frs/README.md
@@ -158,7 +156,9 @@ replace:
   # tests alike) -- see docs/TEMPLATE.md's "Example CRUD resource: Hero" and
   # the header note above about what "replace" means for a path an instance
   # has deleted.
-  - src/
+  # src/README.md is merge tier, so src/ is listed as its package, not as a
+  # directory (a path matching two tiers fails the completeness check).
+  - src/app/
   - tests/
 
 ignore:
@@ -233,6 +233,18 @@ merge:
   - .gitignore
   - scripts/README.md
   - docs/TEMPLATE.md
+
+  # Files an instance customizes in place, with no hook to split the
+  # template's part from its own: the smoke stack (an instance adds
+  # services such as a database-role bootstrap or a migrate job), and the
+  # docs/ and src/ overview READMEs. As "replace" a sync silently discarded
+  # those edits; as "merge" the instance's changes are 3-way merged with the
+  # template's, and a clash leaves markers and a draft PR. The first sync
+  # after a file moves here merges against the old tag's copy, so the
+  # instance's edits to it survive that sync too.
+  - compose.yml
+  - docs/README.md
+  - src/README.md
 
   # The critical one: as "replace", the first sync would overwrite a
   # downstream template's own manifest, which classifies *its* tree for
