@@ -127,18 +127,10 @@ verified end-to-end on arm64 hardware on 2026-09-06.
 ## Migration compatibility
 
 `migration-compat.yml` enforces `../../docs/nfrs/NFR-0027-expand-contract-migrations.md`
-<<<<<<< /home/runner/work/ga-trustbridge/ga-trustbridge/.github/workflows/README.md
-on pull requests that touch `alembic/` (the revisions and the harness), `alembic.ini`,
-the model packages (`src/app/models/`), any Python file under `src/trustbridge/`
-(its models, SQL and stores are spread over its packages), the lockfile or the lint script (and on demand);
-a docs-only PR does not run it. The path list is in the workflow's `on.pull_request.paths`; code outside those
-directories that defines tables has to be added there. Inside the devcontainer, like `checks.yml`, it:
-=======
 on pull requests that touch `alembic/`, `alembic.ini`, any Python file under
 `src/` (whatever the package is named), `uv.lock`, `pyproject.toml`, the
 lint script or the workflow itself (and on demand). The `paths` filter uses
 positive patterns only, so docs- and README-only changes don't trigger it. Inside the devcontainer, like `checks.yml`, it:
->>>>>>> /tmp/template-new/.github/workflows/README.md
 
 1. lints the PR's new or changed revisions with Squawk
    (`../../scripts/lint-migrations.sh`);
